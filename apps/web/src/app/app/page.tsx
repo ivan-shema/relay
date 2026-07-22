@@ -10,10 +10,10 @@ import type {
   TripSummary,
 } from "@relay/shared";
 import { QRCodeSVG } from "qrcode.react";
-import { formatRWF } from "@relay/shared";
+import { formatRWF, topUpSchema, savedPlaceSchema, type TopUpInput, type SavedPlaceInput } from "@relay/shared";
 import { api, ApiError, type SavedPlace, type WalletData, type NotificationList, type MeStats } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { Pagination } from "@/components/console";
+import { Pagination, FormModal } from "@/components/console";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
@@ -847,27 +847,23 @@ function TripsTab() {
 function WalletTab() {
   const { refreshUser } = useAuth();
   const [data, setData] = useState<WalletData | null>(null);
-  const [topping, setTopping] = useState(false);
+  const [showTopup, setShowTopup] = useState(false);
 
   const load = useCallback(() => { api.wallet().then(setData).catch(() => undefined); }, []);
   useEffect(() => { load(); }, [load]);
 
-  const topUp = async () => {
-    const input = window.prompt("Top up amount (RWF)", "5000");
-    if (!input) return;
-    const amount = Number(input.replace(/[^0-9]/g, ""));
-    if (!amount || amount <= 0) return;
-    setTopping(true);
-    try {
-      await api.walletTopup(amount);
-      await Promise.all([load(), refreshUser()]);
-    } finally {
-      setTopping(false);
-    }
-  };
-
   return (
     <div style={{ padding: "14px 22px 28px" }} className="rel-up">
+      {showTopup && (
+        <FormModal
+          title="Top up wallet"
+          submitLabel="Top up"
+          schema={topUpSchema}
+          fields={[{ name: "amount", label: "Amount (RWF)", type: "number", defaultValue: "5000", placeholder: "5000" }]}
+          onSubmit={async (v) => { await api.walletTopup((v as TopUpInput).amount); await Promise.all([load(), refreshUser()]); }}
+          onClose={() => setShowTopup(false)}
+        />
+      )}
       <div style={{ background: "#1b1714", borderRadius: 22, padding: 22, color: "#fff", marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 12.5, color: "#cfc7bb", fontWeight: 600 }}>Relay Wallet</span>
@@ -875,7 +871,7 @@ function WalletTab() {
         </div>
         <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 700, letterSpacing: "-1px", margin: "8px 0 18px" }}>{data ? formatRWF(data.balance) : "…"}</div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={topUp} disabled={topping} style={{ flex: 1, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>{topping ? "Topping up…" : "Top up"}</button>
+          <button onClick={() => setShowTopup(true)} style={{ flex: 1, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Top up</button>
           <button onClick={() => window.alert("Send money — coming soon")} style={{ flex: 1, background: "#2a2520", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Send</button>
         </div>
       </div>
@@ -1005,20 +1001,27 @@ function NotificationsView({ onBack }: { onBack: () => void }) {
 
 function SavedPlacesView({ onBack }: { onBack: () => void }) {
   const [places, setPlaces] = useState<SavedPlace[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
   const load = useCallback(() => { api.savedPlaces().then(setPlaces).catch(() => undefined); }, []);
   useEffect(() => { load(); }, [load]);
 
-  const add = async () => {
-    const label = window.prompt("Place name (e.g. Gym)");
-    if (!label) return;
-    const area = window.prompt("Area / address") ?? "";
-    await api.addSavedPlace({ label, area, icon: "◎" });
-    load();
-  };
   const remove = async (id: string) => { await api.deleteSavedPlace(id); load(); };
 
   return (
     <div style={{ padding: "14px 22px 28px" }} className="rel-up">
+      {showAdd && (
+        <FormModal
+          title="Add a place"
+          submitLabel="Save place"
+          schema={savedPlaceSchema}
+          fields={[
+            { name: "label", label: "Name", placeholder: "Gym" },
+            { name: "area", label: "Area / address", placeholder: "Kacyiru" },
+          ]}
+          onSubmit={async (v) => { const d = v as SavedPlaceInput; await api.addSavedPlace({ label: d.label, area: d.area, icon: "◎" }); load(); }}
+          onClose={() => setShowAdd(false)}
+        />
+      )}
       <ScreenHeader onBack={onBack} title="Saved places" />
       <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, overflow: "hidden", marginBottom: 14 }}>
         {places.length === 0 && <div style={{ padding: 16, fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No saved places yet.</div>}
@@ -1030,7 +1033,7 @@ function SavedPlacesView({ onBack }: { onBack: () => void }) {
           </div>
         ))}
       </div>
-      <button onClick={add} style={{ width: "100%", background: "#fff", border: "1px dashed #cbc3b6", borderRadius: 14, padding: 14, fontSize: 13.5, fontWeight: 700, color: "#8c8378", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>+ Add a place</button>
+      <button onClick={() => setShowAdd(true)} style={{ width: "100%", background: "#fff", border: "1px dashed #cbc3b6", borderRadius: 14, padding: 14, fontSize: 13.5, fontWeight: 700, color: "#8c8378", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>+ Add a place</button>
     </div>
   );
 }

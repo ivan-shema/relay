@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useForm, type Resolver } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import type { z } from "zod";
 import type { Paginated } from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
 
@@ -258,72 +261,85 @@ export interface FormField {
   defaultValue?: string;
 }
 
-// Lightweight modal form used by the operator/admin "Add…" actions.
+type FormValues = Record<string, unknown>;
+
+// Modal form used by the operator/admin/passenger "Add…" actions.
+// Validated with react-hook-form + a shared Zod schema (zodResolver).
 export function FormModal({
   title,
   fields,
   submitLabel,
+  schema,
+  defaultValues,
   onSubmit,
   onClose,
 }: {
   title: string;
   fields: FormField[];
   submitLabel: string;
-  onSubmit: (values: Record<string, string>) => Promise<void>;
+  schema: z.ZodTypeAny;
+  defaultValues?: FormValues;
+  onSubmit: (values: FormValues) => Promise<void>;
   onClose: () => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>(
-    () => Object.fromEntries(fields.map((f) => [f.name, f.defaultValue ?? (f.type === "select" ? f.options?.[0]?.value ?? "" : "")]))
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const computedDefaults: FormValues =
+    defaultValues ?? Object.fromEntries(fields.map((f) => [f.name, f.defaultValue ?? (f.type === "select" ? f.options?.[0]?.value ?? "" : "")]));
 
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<FormValues>({ resolver: zodResolver(schema) as Resolver<FormValues>, defaultValues: computedDefaults });
+
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  const submit = handleSubmit(async (values) => {
+    setServerError(null);
     try {
       await onSubmit(values);
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong");
-      setBusy(false);
+      setServerError(e instanceof Error ? e.message : "Something went wrong");
     }
-  };
+  });
 
   const inputStyle: React.CSSProperties = { width: "100%", border: "1px solid #e3ddd1", borderRadius: 11, padding: "11px 13px", fontSize: 14, fontWeight: 600, outline: "none", fontFamily: "'Manrope', sans-serif", background: "#fff" };
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(27,23,20,.55)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, background: "#fff", borderRadius: 20, overflow: "hidden", boxShadow: "0 40px 90px -30px rgba(0,0,0,.6)" }}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ width: "100%", maxWidth: 440, background: "#fff", borderRadius: 20, overflow: "hidden", boxShadow: "0 40px 90px -30px rgba(0,0,0,.6)" }}>
         <div style={{ padding: "20px 22px", borderBottom: "1px solid #ece6db" }}>
           <div style={{ fontFamily: DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: "-.4px" }}>{title}</div>
         </div>
         <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
-          {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, fontWeight: 600 }}>{error}</div>}
-          {fields.map((f) => (
-            <div key={f.name}>
-              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>{f.label}</div>
-              {f.type === "select" ? (
-                <select value={values[f.name]} onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))} style={inputStyle}>
-                  {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              ) : (
-                <input
-                  type={f.type === "number" ? "number" : "text"}
-                  value={values[f.name]}
-                  placeholder={f.placeholder}
-                  onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
-                  style={inputStyle}
-                />
-              )}
-            </div>
-          ))}
+          {serverError && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, fontWeight: 600 }}>{serverError}</div>}
+          {fields.map((f) => {
+            const err = errors[f.name]?.message as string | undefined;
+            return (
+              <div key={f.name}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>{f.label}</div>
+                {f.type === "select" ? (
+                  <select {...register(f.name)} style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}>
+                    {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    {...register(f.name)}
+                    type={f.type === "number" ? "number" : "text"}
+                    placeholder={f.placeholder}
+                    style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}
+                  />
+                )}
+                {err && <div style={{ fontSize: 11.5, color: "#c2553f", fontWeight: 600, marginTop: 5 }}>{err}</div>}
+              </div>
+            );
+          })}
           <div style={{ display: "flex", gap: 11, marginTop: 4 }}>
-            <button onClick={onClose} style={{ flex: 1, background: "#f4f1ea", color: "#8c8378", border: "1px solid #e9e3d8", borderRadius: 12, padding: 13, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Cancel</button>
-            <button onClick={submit} disabled={busy} style={{ flex: 2, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: 13, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{busy ? "Saving…" : submitLabel}</button>
+            <button type="button" onClick={onClose} style={{ flex: 1, background: "#f4f1ea", color: "#8c8378", border: "1px solid #e9e3d8", borderRadius: 12, padding: 13, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Cancel</button>
+            <button type="submit" disabled={isSubmitting} style={{ flex: 2, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: 13, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{isSubmitting ? "Saving…" : submitLabel}</button>
           </div>
         </div>
-      </div>
+      </form>
     </div>
   );
 }

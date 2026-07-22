@@ -11,7 +11,7 @@ import {
   type AdminPayments,
   type AdminReports,
 } from "@/lib/api";
-import { formatRWF } from "@relay/shared";
+import { formatRWF, createUserSchema, type CreateUserInput } from "@relay/shared";
 import { tokenStore } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { ConsoleShell, KpiGrid, StatusPill, Card, CardTitle, BarChart, PrimaryButton, FormModal, Pagination, usePaged, type NavItem } from "@/components/console";
@@ -186,13 +186,14 @@ function UsersTab() {
         <FormModal
           title="Add user"
           submitLabel="Create user"
+          schema={createUserSchema}
           fields={[
             { name: "fullName", label: "Full name", placeholder: "Jane D." },
             { name: "phone", label: "Phone number", placeholder: "+250 78 000 0000" },
             { name: "email", label: "Email", placeholder: "jane@email.com" },
             { name: "role", label: "Role", type: "select", options: [{ value: "PASSENGER", label: "Passenger" }, { value: "DRIVER", label: "Driver" }, { value: "OPERATOR", label: "Operator" }, { value: "ADMIN", label: "Admin" }] },
           ]}
-          onSubmit={async (v) => { await api.adminAddUser({ fullName: v.fullName, phone: v.phone, email: v.email, role: v.role }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateUserInput; await api.adminAddUser({ fullName: d.fullName, phone: d.phone, email: d.email, role: d.role }); reload(); }}
           onClose={() => setModal(false)}
         />
       )}

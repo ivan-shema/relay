@@ -1,7 +1,6 @@
 import { Router } from "express";
-import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { formatRWF } from "@relay/shared";
+import { formatRWF, createUserSchema } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -98,14 +97,7 @@ adminRouter.get(
 adminRouter.post(
   "/users",
   asyncHandler(async (req, res) => {
-    const body = z
-      .object({
-        fullName: z.string().min(2),
-        phone: z.string().min(6),
-        email: z.string().email(),
-        role: z.enum(["PASSENGER", "DRIVER", "OPERATOR", "ADMIN"]).default("PASSENGER"),
-      })
-      .parse(req.body);
+    const body = createUserSchema.parse(req.body);
     const existing = await prisma.user.findFirst({ where: { OR: [{ email: body.email }, { phone: body.phone }] } });
     if (existing) throw new HttpError(409, "Email or phone already registered");
     const user = await prisma.user.create({

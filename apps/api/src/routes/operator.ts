@@ -1,7 +1,14 @@
 import { Router } from "express";
-import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { formatRWF } from "@relay/shared";
+import {
+  formatRWF,
+  createVehicleSchema,
+  createRouteSchema,
+  createDepartureSchema,
+  inviteDriverSchema,
+  assignVehicleSchema,
+  assignTripSchema,
+} from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -131,15 +138,7 @@ operatorRouter.post(
   "/vehicles",
   asyncHandler(async (req, res) => {
     const opId = await resolveOperatorId(req.auth!.sub);
-    const body = z
-      .object({
-        plateNumber: z.string().min(3),
-        type: z.enum(["BUS", "MOTO", "RIDE"]),
-        capacity: z.number().int().min(1),
-        model: z.string().default("—"),
-        label: z.string().optional(),
-      })
-      .parse(req.body);
+    const body = createVehicleSchema.parse(req.body);
     const v = await prisma.vehicle.create({
       data: { operatorId: opId, plateNumber: body.plateNumber, type: body.type, capacity: body.capacity, model: body.model, label: body.label ?? `${body.type} ${body.plateNumber.slice(-3)}`, status: "IDLE" },
     });
@@ -183,9 +182,7 @@ operatorRouter.post(
   "/routes",
   asyncHandler(async (req, res) => {
     await resolveOperatorId(req.auth!.sub); // authz
-    const body = z
-      .object({ originId: z.string(), destinationId: z.string(), distanceKm: z.number().positive().default(5) })
-      .parse(req.body);
+    const body = createRouteSchema.parse(req.body);
     const [origin, destination] = await Promise.all([
       prisma.place.findUnique({ where: { id: body.originId } }),
       prisma.place.findUnique({ where: { id: body.destinationId } }),
@@ -203,18 +200,7 @@ operatorRouter.post(
   "/departures",
   asyncHandler(async (req, res) => {
     const opId = await resolveOperatorId(req.auth!.sub);
-    const body = z
-      .object({
-        routeId: z.string(),
-        fare: z.number().positive(),
-        departInMinutes: z.number().int().min(1).default(30),
-        durationMinutes: z.number().int().min(1).default(30),
-        capacity: z.number().int().min(1).default(33),
-        mode: z.enum(["BUS", "MOTO", "RIDE"]).default("BUS"),
-        vehicleId: z.string().optional(),
-        driverId: z.string().optional(),
-      })
-      .parse(req.body);
+    const body = createDepartureSchema.parse(req.body);
     const route = await prisma.route.findUnique({ where: { id: body.routeId } });
     if (!route) throw new HttpError(400, "Invalid route");
     const departAt = new Date(Date.now() + body.departInMinutes * 60_000);
@@ -242,17 +228,9 @@ operatorRouter.post(
   "/drivers/invite",
   asyncHandler(async (req, res) => {
     const opId = await resolveOperatorId(req.auth!.sub);
-    const body = z
-      .object({
-        fullName: z.string().min(2),
-        phone: z.string().min(6),
-        email: z.string().email().optional(),
-        licenseNumber: z.string().default("PENDING"),
-        vehicleId: z.string().optional(),
-      })
-      .parse(req.body);
+    const body = inviteDriverSchema.parse(req.body);
 
-    const email = body.email ?? `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
+    const email = body.email && body.email.length > 0 ? body.email : `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
     const existing = await prisma.user.findFirst({ where: { OR: [{ email }, { phone: body.phone }] } });
     if (existing) throw new HttpError(409, "Phone or email already registered");
 
@@ -260,7 +238,7 @@ operatorRouter.post(
       data: { fullName: body.fullName, email, phone: body.phone, passwordHash: await hashPassword("password123"), role: "DRIVER", phoneVerified: false },
     });
     const driver = await prisma.driver.create({
-      data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber },
+      data: { userId: user.id, operatorId: opId, licenseNumber: "PENDING" },
     });
     if (body.vehicleId) {
       await prisma.vehicle.update({ where: { id: body.vehicleId }, data: { driverId: driver.id } });
@@ -435,7 +413,7 @@ operatorRouter.post(
   "/drivers/:id/assign-vehicle",
   asyncHandler(async (req, res) => {
     const opId = await resolveOperatorId(req.auth!.sub);
-    const { vehicleId } = z.object({ vehicleId: z.string().nullable().optional() }).parse(req.body);
+    const { vehicleId } = assignVehicleSchema.parse(req.body);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId }, include: { vehicle: true } });
     if (!d) throw new HttpError(404, "Driver not found");
 
@@ -458,7 +436,7 @@ operatorRouter.post(
   "/drivers/:id/assign-trip",
   asyncHandler(async (req, res) => {
     const opId = await resolveOperatorId(req.auth!.sub);
-    const { tripId } = z.object({ tripId: z.string() }).parse(req.body);
+    const { tripId } = assignTripSchema.parse(req.body);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId }, include: { vehicle: true } });
     if (!d) throw new HttpError(404, "Driver not found");
     const trip = await prisma.trip.findFirst({ where: { id: tripId, operatorId: opId } });

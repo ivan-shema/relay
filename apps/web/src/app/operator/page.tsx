@@ -14,7 +14,19 @@ import {
   type OperatorBookingRow,
   type OperatorPayments,
 } from "@/lib/api";
-import { formatRWF } from "@relay/shared";
+import {
+  formatRWF,
+  createVehicleSchema,
+  createRouteSchema,
+  createDepartureSchema,
+  inviteDriverSchema,
+  assignVehicleSchema,
+  assignTripSchema,
+  type CreateVehicleInput,
+  type CreateRouteInput,
+  type CreateDepartureInput,
+  type InviteDriverInput,
+} from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
 import { ConsoleShell, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, type NavItem } from "@/components/console";
 
@@ -181,13 +193,14 @@ function FleetTab() {
         <FormModal
           title="Add vehicle"
           submitLabel="Add vehicle"
+          schema={createVehicleSchema}
           fields={[
             { name: "plateNumber", label: "Plate number", placeholder: "RAD 500 X" },
             { name: "type", label: "Type", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }] },
             { name: "capacity", label: "Capacity", type: "number", defaultValue: "33" },
             { name: "model", label: "Model", placeholder: "Coaster HD" },
           ]}
-          onSubmit={async (v) => { await api.operatorAddVehicle({ plateNumber: v.plateNumber, type: v.type, capacity: Number(v.capacity), model: v.model }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateVehicleInput; await api.operatorAddVehicle({ plateNumber: d.plateNumber, type: d.type, capacity: d.capacity, model: d.model }); reload(); }}
           onClose={() => setModal(false)}
         />
       )}
@@ -221,12 +234,13 @@ function RoutesTab() {
         <FormModal
           title="New route"
           submitLabel="Create route"
+          schema={createRouteSchema}
           fields={[
             { name: "originId", label: "Origin", type: "select", options: places },
             { name: "destinationId", label: "Destination", type: "select", options: places },
             { name: "distanceKm", label: "Distance (km)", type: "number", defaultValue: "5" },
           ]}
-          onSubmit={async (v) => { await api.operatorAddRoute({ originId: v.originId, destinationId: v.destinationId, distanceKm: Number(v.distanceKm) }); load(); }}
+          onSubmit={async (v) => { const d = v as CreateRouteInput; await api.operatorAddRoute({ originId: d.originId, destinationId: d.destinationId, distanceKm: d.distanceKm }); load(); }}
           onClose={() => setModal(false)}
         />
       )}
@@ -263,6 +277,7 @@ function ScheduleTab() {
         <FormModal
           title="Add departure"
           submitLabel="Publish departure"
+          schema={createDepartureSchema}
           fields={[
             { name: "routeId", label: "Route", type: "select", options: routes },
             { name: "mode", label: "Mode", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }] },
@@ -271,7 +286,7 @@ function ScheduleTab() {
             { name: "durationMinutes", label: "Duration (min)", type: "number", defaultValue: "30" },
             { name: "capacity", label: "Capacity", type: "number", defaultValue: "33" },
           ]}
-          onSubmit={async (v) => { await api.operatorAddDeparture({ routeId: v.routeId, mode: v.mode, fare: Number(v.fare), departInMinutes: Number(v.departInMinutes), durationMinutes: Number(v.durationMinutes), capacity: Number(v.capacity) }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateDepartureInput; await api.operatorAddDeparture({ routeId: d.routeId, mode: d.mode, fare: d.fare, departInMinutes: d.departInMinutes, durationMinutes: d.durationMinutes, capacity: d.capacity }); reload(); }}
           onClose={() => setModal(false)}
         />
       )}
@@ -334,8 +349,9 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
           <FormModal
             title="Reassign vehicle"
             submitLabel="Save assignment"
+            schema={assignVehicleSchema}
             fields={[{ name: "vehicleId", label: "Vehicle", type: "select", options: [{ value: "", label: "— Unassigned —" }, ...lookups.vehicles] }]}
-            onSubmit={async (v) => { await api.operatorAssignVehicle(detail.id, v.vehicleId || null); loadDetail(detail.id); reload(); }}
+            onSubmit={async (v) => { await api.operatorAssignVehicle(detail.id, (v.vehicleId as string) || null); loadDetail(detail.id); reload(); }}
             onClose={() => setAction(null)}
           />
         )}
@@ -343,8 +359,9 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
           <FormModal
             title="Assign to a departure"
             submitLabel="Assign driver"
+            schema={assignTripSchema}
             fields={[{ name: "tripId", label: "Upcoming departure", type: "select", options: lookups.trips.length ? lookups.trips : [{ value: "", label: "No upcoming departures" }] }]}
-            onSubmit={async (v) => { if (v.tripId) { await api.operatorAssignTrip(detail.id, v.tripId); loadDetail(detail.id); } }}
+            onSubmit={async (v) => { if (v.tripId) { await api.operatorAssignTrip(detail.id, v.tripId as string); loadDetail(detail.id); } }}
             onClose={() => setAction(null)}
           />
         )}
@@ -420,12 +437,13 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
         <FormModal
           title="Invite a driver"
           submitLabel="Send invite"
+          schema={inviteDriverSchema}
           fields={[
             { name: "fullName", label: "Full name", placeholder: "Patrick H." },
             { name: "phone", label: "Phone number", placeholder: "+250 78 000 0000" },
             { name: "email", label: "Email (optional)", placeholder: "driver@email.com" },
           ]}
-          onSubmit={async (v) => { await api.operatorInviteDriver({ fullName: v.fullName, phone: v.phone, email: v.email || undefined }); reload(); }}
+          onSubmit={async (v) => { const d = v as InviteDriverInput; await api.operatorInviteDriver({ fullName: d.fullName, phone: d.phone, email: d.email || undefined }); reload(); }}
           onClose={() => setInviteModal(false)}
         />
       )}

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { AuthResponse, AuthUser } from "@relay/shared";
+import { registerSchema, loginSchema, verifyOtpSchema, forgotSchema, resetSchema } from "@relay/shared";
 import { prisma } from "../prisma";
 import { env } from "../env";
 import { asyncHandler, HttpError } from "../lib/http";
@@ -14,19 +15,6 @@ import {
 import { requireAuth } from "../middleware/auth";
 
 export const authRouter = Router();
-
-const registerSchema = z.object({
-  fullName: z.string().min(2),
-  email: z.string().email(),
-  phone: z.string().min(6),
-  password: z.string().min(8),
-  role: z.enum(["PASSENGER", "DRIVER", "OPERATOR", "ADMIN"]).default("PASSENGER"),
-});
-
-const loginSchema = z.object({
-  identifier: z.string().min(3),
-  password: z.string().min(1),
-});
 
 function toAuthUser(u: {
   id: string;
@@ -123,12 +111,10 @@ authRouter.post(
   })
 );
 
-const verifySchema = z.object({ userId: z.string(), code: z.string().min(4) });
-
 authRouter.post(
   "/verify-otp",
   asyncHandler(async (req, res) => {
-    const { userId, code } = verifySchema.parse(req.body);
+    const { userId, code } = verifyOtpSchema.parse(req.body);
     const otp = await prisma.otp.findFirst({
       where: { userId, purpose: "VERIFY_PHONE", consumed: false },
       orderBy: { createdAt: "desc" },
@@ -147,8 +133,6 @@ authRouter.post(
   })
 );
 
-const forgotSchema = z.object({ identifier: z.string().min(3) });
-
 authRouter.post(
   "/forgot-password",
   asyncHandler(async (req, res) => {
@@ -161,12 +145,6 @@ authRouter.post(
     res.json({ sent: true, userId: user?.id ?? null });
   })
 );
-
-const resetSchema = z.object({
-  userId: z.string(),
-  code: z.string().min(4),
-  password: z.string().min(8),
-});
 
 authRouter.post(
   "/reset-password",

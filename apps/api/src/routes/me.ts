@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { z } from "zod";
+import { topUpSchema, savedPlaceSchema } from "@relay/shared";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
@@ -100,7 +100,7 @@ meRouter.get(
 meRouter.post(
   "/wallet/topup",
   asyncHandler(async (req, res) => {
-    const { amount } = z.object({ amount: z.number().positive().max(1_000_000) }).parse(req.body);
+    const { amount } = topUpSchema.parse(req.body);
     const userId = req.auth!.sub;
     const result = await prisma.$transaction(async (tx) => {
       const user = await tx.user.findUnique({ where: { id: userId } });
@@ -126,7 +126,7 @@ meRouter.get(
 meRouter.post(
   "/places",
   asyncHandler(async (req, res) => {
-    const body = z.object({ label: z.string().min(1), area: z.string().min(1), icon: z.string().default("◎") }).parse(req.body);
+    const body = savedPlaceSchema.parse(req.body);
     const p = await prisma.savedPlace.create({ data: { userId: req.auth!.sub, ...body } });
     res.status(201).json({ id: p.id, label: p.label, area: p.area, icon: p.icon });
   })
