@@ -92,7 +92,7 @@ export function ConsoleShell({
           <div style={{ background: "#2a2520", borderRadius: 12, padding: 13, display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
             <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700 }}>{user?.fullName ?? "—"}</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700 }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
               <div style={{ fontSize: 10.5, color: "#9a9186" }}>{role} account</div>
             </div>
             <button onClick={() => { signOut(); router.push("/"); }} title="Sign out" style={{ background: "none", border: "none", color: "#9a9186", cursor: "pointer", fontSize: 15 }}>⎋</button>
@@ -255,10 +255,13 @@ export function AccentButton({ children, onClick }: { children: React.ReactNode;
 export interface FormField {
   name: string;
   label: string;
-  type?: "text" | "number" | "select";
+  type?: "text" | "number" | "select" | "file";
   options?: { value: string; label: string }[];
   placeholder?: string;
   defaultValue?: string;
+  // Conditionally show this field based on the live form values
+  // (e.g. company name only when role === "OPERATOR").
+  showIf?: (values: Record<string, unknown>) => boolean;
 }
 
 type FormValues = Record<string, unknown>;
@@ -283,20 +286,37 @@ export function FormModal({
   onClose: () => void;
 }) {
   const computedDefaults: FormValues =
-    defaultValues ?? Object.fromEntries(fields.map((f) => [f.name, f.defaultValue ?? (f.type === "select" ? f.options?.[0]?.value ?? "" : "")]));
+    defaultValues ??
+    Object.fromEntries(
+      fields.filter((f) => f.type !== "file").map((f) => [f.name, f.defaultValue ?? (f.type === "select" ? f.options?.[0]?.value ?? "" : "")])
+    );
 
   const {
     register,
     handleSubmit,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({ resolver: zodResolver(schema) as Resolver<FormValues>, defaultValues: computedDefaults });
 
   const [serverError, setServerError] = useState<string | null>(null);
+  // File inputs live outside RHF: zodResolver strips keys the schema doesn't
+  // know, and files are validated server-side (type/size) anyway.
+  const [files, setFiles] = useState<Record<string, File | null>>({});
+  const [fileErrors, setFileErrors] = useState<Record<string, string>>({});
+
+  const watched = watch();
+  const visibleFields = fields.filter((f) => !f.showIf || f.showIf(watched));
 
   const submit = handleSubmit(async (values) => {
     setServerError(null);
+    const missing: Record<string, string> = {};
+    for (const f of visibleFields) {
+      if (f.type === "file" && !files[f.name]) missing[f.name] = "This document is required";
+    }
+    setFileErrors(missing);
+    if (Object.keys(missing).length > 0) return;
     try {
-      await onSubmit(values);
+      await onSubmit({ ...values, ...files });
       onClose();
     } catch (e) {
       setServerError(e instanceof Error ? e.message : "Something went wrong");
@@ -307,14 +327,14 @@ export function FormModal({
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(27,23,20,.55)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={onClose}>
-      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ width: "100%", maxWidth: 440, background: "#fff", borderRadius: 20, overflow: "hidden", boxShadow: "0 40px 90px -30px rgba(0,0,0,.6)" }}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ width: "100%", maxWidth: 440, maxHeight: "88vh", overflowY: "auto", background: "#fff", borderRadius: 20, boxShadow: "0 40px 90px -30px rgba(0,0,0,.6)" }}>
         <div style={{ padding: "20px 22px", borderBottom: "1px solid #ece6db" }}>
           <div style={{ fontFamily: DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: "-.4px" }}>{title}</div>
         </div>
         <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
           {serverError && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, fontWeight: 600 }}>{serverError}</div>}
-          {fields.map((f) => {
-            const err = errors[f.name]?.message as string | undefined;
+          {visibleFields.map((f) => {
+            const err = (errors[f.name]?.message as string | undefined) ?? (f.type === "file" ? fileErrors[f.name] : undefined);
             return (
               <div key={f.name}>
                 <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>{f.label}</div>
@@ -322,6 +342,23 @@ export function FormModal({
                   <select {...register(f.name)} style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}>
                     {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
+                ) : f.type === "file" ? (
+                  <label style={{ ...inputStyle, display: "flex", alignItems: "center", gap: 10, cursor: "pointer", borderStyle: "dashed", borderColor: err ? "#e0a99a" : "#cbc3b6", color: files[f.name] ? "#1b1714" : "#8c8378" }}>
+                    <span style={{ width: 28, height: 28, borderRadius: 8, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flex: "none" }}>⇧</span>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {files[f.name]?.name ?? "Choose a PDF or image (no GIFs)"}
+                    </span>
+                    <input
+                      type="file"
+                      accept=".pdf,.jpg,.jpeg,.png,.webp"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0] ?? null;
+                        setFiles((prev) => ({ ...prev, [f.name]: file }));
+                        if (file) setFileErrors((prev) => ({ ...prev, [f.name]: "" }));
+                      }}
+                    />
+                  </label>
                 ) : (
                   <input
                     {...register(f.name)}

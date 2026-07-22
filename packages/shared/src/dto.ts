@@ -8,12 +8,13 @@ import type {
 } from "./enums";
 
 // ---------- Auth ----------
+// Public registration is passenger-only — no role field.
 export interface RegisterInput {
-  fullName: string;
+  firstName: string;
+  lastName: string;
   email: string;
   phone: string;
   password: string;
-  role: UserRole;
 }
 
 export interface LoginInput {
@@ -23,7 +24,8 @@ export interface LoginInput {
 
 export interface AuthUser {
   id: string;
-  fullName: string;
+  firstName: string;
+  lastName: string;
   email: string;
   phone: string;
   role: UserRole;

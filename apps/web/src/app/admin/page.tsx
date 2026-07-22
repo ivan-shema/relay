@@ -162,16 +162,42 @@ function Dashboard({ onApprovalsChanged }: { onApprovalsChanged: () => void }) {
   );
 }
 
+const DOC_LABELS: Record<string, string> = {
+  NATIONAL_ID: "ID document",
+  PASSPORT: "Passport",
+  DRIVING_LICENSE: "Driving licence",
+  BUSINESS_CERTIFICATE: "RDB certificate",
+};
+
 function ApprovalRow({ a, onAct }: { a: AdminApproval; onAct: (id: string, approve: boolean) => void }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 13, padding: "13px 0", borderTop: "1px solid #f1ece2" }}>
-      <div style={{ width: 40, height: 40, borderRadius: 11, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flex: "none" }}>{a.initial}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 700 }}>{a.company}</div>
-        <div style={{ fontSize: 12, color: "#8c8378" }}><span style={{ fontWeight: 700, color: a.color }}>{a.type}</span> · {a.vehicles} · {a.date}</div>
+    <div style={{ padding: "13px 0", borderTop: "1px solid #f1ece2" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 11, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flex: "none" }}>{a.initial}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>{a.company}</div>
+          <div style={{ fontSize: 12, color: "#8c8378" }}>
+            <span style={{ fontWeight: 700, color: a.color }}>{a.type}</span> · {a.date}
+            {a.applicant && <> · {a.applicant}</>}
+            {a.idNumber && <> · ID <span style={{ fontFamily: MONO }}>{a.idNumber}</span></>}
+          </div>
+        </div>
+        <button onClick={() => onAct(a.id, false)} style={{ background: "#fff", border: "1px solid #e3ddd1", color: "#8c8378", borderRadius: 10, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Reject</button>
+        <button onClick={() => onAct(a.id, true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Approve</button>
       </div>
-      <button onClick={() => onAct(a.id, false)} style={{ background: "#fff", border: "1px solid #e3ddd1", color: "#8c8378", borderRadius: 10, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Reject</button>
-      <button onClick={() => onAct(a.id, true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Approve</button>
+      {(a.documents?.length ?? 0) > 0 && (
+        <div style={{ display: "flex", gap: 8, marginTop: 9, marginLeft: 53, flexWrap: "wrap" }}>
+          {a.documents!.map((doc) => (
+            <button
+              key={doc.id}
+              onClick={() => api.openDocument(doc.id).catch(() => window.alert("Could not open document"))}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "#faf8f4", border: "1px solid #ece6db", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, color: "#6b6258", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
+            >
+              <span style={{ color: "#ff6a1a" }}>▤</span> {DOC_LABELS[doc.kind] ?? doc.kind}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -188,12 +214,15 @@ function UsersTab() {
           submitLabel="Create user"
           schema={createUserSchema}
           fields={[
-            { name: "fullName", label: "Full name", placeholder: "Jane D." },
+            { name: "firstName", label: "First name", placeholder: "Jane" },
+            { name: "lastName", label: "Last name", placeholder: "Dukuze" },
             { name: "phone", label: "Phone number", placeholder: "+250 78 000 0000" },
             { name: "email", label: "Email", placeholder: "jane@email.com" },
             { name: "role", label: "Role", type: "select", options: [{ value: "PASSENGER", label: "Passenger" }, { value: "DRIVER", label: "Driver" }, { value: "OPERATOR", label: "Operator" }, { value: "ADMIN", label: "Admin" }] },
+            { name: "companyName", label: "Company name", placeholder: "Kigali Bus Co.", showIf: (v) => v.role === "OPERATOR" },
+            { name: "modes", label: "Primary mode", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }], showIf: (v) => v.role === "OPERATOR" },
           ]}
-          onSubmit={async (v) => { const d = v as CreateUserInput; await api.adminAddUser({ fullName: d.fullName, phone: d.phone, email: d.email, role: d.role }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateUserInput; await api.adminAddUser({ firstName: d.firstName, lastName: d.lastName, phone: d.phone, email: d.email, role: d.role, companyName: d.companyName, modes: d.modes }); reload(); }}
           onClose={() => setModal(false)}
         />
       )}

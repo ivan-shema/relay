@@ -224,7 +224,7 @@ function HomeScreen({
     }
   }, [user, origin, dest]);
 
-  const firstName = user ? user.fullName.split(" ")[0] : "there";
+  const firstName = user ? user.firstName : "there";
 
   return (
     <div className="rel-up">
@@ -939,7 +939,7 @@ function YouTab() {
     <div style={{ padding: "14px 22px 28px" }} className="rel-up">
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "14px 0 20px" }}>
         <div style={{ width: 74, height: 74, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", marginBottom: 12 }} />
-        <div style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 700 }}>{user?.fullName ?? "Guest"}</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 700 }}>{user ? `${user.firstName} ${user.lastName}` : "Guest"}</div>
         <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>{user?.phone ?? "Not signed in"} · ★ {stats?.rating.toFixed(1) ?? "4.8"} rider</div>
       </div>
       <div style={{ display: "flex", gap: 11, marginBottom: 18 }}>
@@ -1113,7 +1113,7 @@ function PassengerSidebar({ tab, walletBalance, onChange }: { tab: Tab; walletBa
           <div style={{ background: "#2a2520", borderRadius: 12, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700 }}>{user.fullName}</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700 }}>{`${user.firstName} ${user.lastName}`}</div>
               <div style={{ fontSize: 10.5, color: "#9a9186" }}>Passenger</div>
             </div>
             <button onClick={() => { signOut(); router.push("/"); }} title="Sign out" style={{ background: "none", border: "none", color: "#9a9186", cursor: "pointer", fontSize: 15 }}>⎋</button>

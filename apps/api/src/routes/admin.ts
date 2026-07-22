@@ -6,6 +6,7 @@ import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { hashPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
+import { fullNameOf } from "../lib/mappers";
 
 export const adminRouter = Router();
 
@@ -39,7 +40,7 @@ adminRouter.get(
       prisma.operator.count(),
       prisma.booking.count(),
       prisma.payment.findMany({ where: { status: "PAID" } }),
-      prisma.operator.findMany({ where: { status: "PENDING" }, orderBy: { createdAt: "asc" } }),
+      prisma.operator.findMany({ where: { status: "PENDING" }, orderBy: { createdAt: "asc" }, include: { documents: true, ownerUser: true } }),
       prisma.complaint.findMany({ where: { status: "OPEN" }, orderBy: { createdAt: "desc" }, take: 4 }),
     ]);
     const revenue = paidAll.reduce((s, p) => s + dec(p.amount), 0);
@@ -57,7 +58,19 @@ adminRouter.get(
       ],
       approvals: pendingOps.map((o) => {
         const t = operatorTypeLabel(o.modes);
-        return { id: o.id, company: o.companyName, type: t.type, color: t.color, bg: t.bg, initial: o.companyName[0], vehicles: "fleet pending", date: fmtDate(o.createdAt) };
+        return {
+          id: o.id,
+          company: o.companyName,
+          type: t.type,
+          color: t.color,
+          bg: t.bg,
+          initial: o.companyName[0],
+          vehicles: "fleet pending",
+          date: fmtDate(o.createdAt),
+          applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
+          idNumber: o.idNumber,
+          documents: o.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName })),
+        };
       }),
       revenueBars: months.map((m, i) => ({ m, value: base[i] })),
       complaints: complaints.map((c) => ({ id: c.id, who: c.who, message: c.message, priority: c.priority })),
@@ -80,7 +93,7 @@ adminRouter.get(
       paged(
         users.map((u) => ({
           id: u.id,
-          name: u.fullName,
+          name: fullNameOf(u),
           role: u.role,
           phone: u.phone,
           joined: fmtDate(u.createdAt),
@@ -93,17 +106,30 @@ adminRouter.get(
   })
 );
 
-// POST /admin/users — create a platform user
+// POST /admin/users — create a platform user. Creating an OPERATOR here also
+// creates their company record, already VERIFIED (admin creation is itself
+// the trust/approval signal — no pending step).
 adminRouter.post(
   "/users",
   asyncHandler(async (req, res) => {
     const body = createUserSchema.parse(req.body);
     const existing = await prisma.user.findFirst({ where: { OR: [{ email: body.email }, { phone: body.phone }] } });
     if (existing) throw new HttpError(409, "Email or phone already registered");
-    const user = await prisma.user.create({
-      data: { fullName: body.fullName, email: body.email, phone: body.phone, role: body.role, passwordHash: await hashPassword("password123"), phoneVerified: true },
+    const passwordHash = await hashPassword("password123");
+    const user = await prisma.$transaction(async (tx) => {
+      const u = await tx.user.create({
+        data: { firstName: body.firstName, lastName: body.lastName, email: body.email, phone: body.phone, role: body.role, passwordHash, phoneVerified: true },
+      });
+      if (body.role === "DRIVER") {
+        await tx.driver.create({ data: { userId: u.id, licenseNumber: "PENDING" } });
+      }
+      if (body.role === "OPERATOR") {
+        await tx.operator.create({
+          data: { companyName: body.companyName!, contactInfo: body.phone, modes: body.modes ?? ["BUS"], status: "VERIFIED", ownerUserId: u.id },
+        });
+      }
+      return u;
     });
-    if (body.role === "DRIVER") await prisma.driver.create({ data: { userId: user.id, licenseNumber: "PENDING" } });
     res.status(201).json({ id: user.id });
   })
 );
@@ -122,7 +148,7 @@ adminRouter.get(
         [
           p.reference,
           p.createdAt.toISOString(),
-          JSON.stringify(p.booking.passenger.fullName),
+          JSON.stringify(fullNameOf(p.booking.passenger)),
           JSON.stringify(p.booking.trip.operator.companyName),
           JSON.stringify(p.booking.trip.route.name),
           p.method,
@@ -167,15 +193,31 @@ adminRouter.get(
   })
 );
 
-// GET /admin/approvals — pending operators
+// GET /admin/approvals — pending operators with their KYC details/documents
 adminRouter.get(
   "/approvals",
   asyncHandler(async (_req, res) => {
-    const ops = await prisma.operator.findMany({ where: { status: "PENDING" }, orderBy: { createdAt: "asc" } });
+    const ops = await prisma.operator.findMany({
+      where: { status: "PENDING" },
+      orderBy: { createdAt: "asc" },
+      include: { documents: true, ownerUser: true },
+    });
     res.json(
       ops.map((o) => {
         const t = operatorTypeLabel(o.modes);
-        return { id: o.id, company: o.companyName, type: t.type, color: t.color, bg: t.bg, initial: o.companyName[0], vehicles: "fleet pending", date: fmtDate(o.createdAt) };
+        return {
+          id: o.id,
+          company: o.companyName,
+          type: t.type,
+          color: t.color,
+          bg: t.bg,
+          initial: o.companyName[0],
+          vehicles: "fleet pending",
+          date: fmtDate(o.createdAt),
+          applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
+          idNumber: o.idNumber,
+          documents: o.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName })),
+        };
       })
     );
   })
@@ -227,7 +269,7 @@ adminRouter.get(
       transactions: paged(
         payments.map((p) => ({
           id: p.reference,
-          user: p.booking.passenger.fullName,
+          user: fullNameOf(p.booking.passenger),
           operator: p.booking.trip.operator.companyName,
           method: p.method,
           amount: dec(p.amount),

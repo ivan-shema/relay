@@ -1,0 +1,36 @@
+import path from "path";
+import { Router } from "express";
+import { prisma } from "../prisma";
+import { asyncHandler, HttpError } from "../lib/http";
+import { requireAuth } from "../middleware/auth";
+import { UPLOADS_DIR } from "../lib/uploads";
+
+export const documentsRouter = Router();
+
+// GET /documents/:id — download a KYC document. These contain PII, so access
+// is restricted to: platform admins, the operator that owns the document, or
+// the operator that the document's driver belongs to.
+documentsRouter.get(
+  "/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.id },
+      include: { operator: true, driver: { include: { operator: true } } },
+    });
+    if (!doc) throw new HttpError(404, "Document not found");
+
+    const sub = req.auth!.sub;
+    const isAdmin = req.auth!.role === "ADMIN";
+    const ownsOperatorDoc = doc.operator?.ownerUserId === sub;
+    const ownsDriverDoc = doc.driver?.operator?.ownerUserId === sub;
+    const isDriverSelf = doc.driver?.userId === sub;
+    if (!isAdmin && !ownsOperatorDoc && !ownsDriverDoc && !isDriverSelf) {
+      throw new HttpError(403, "You don't have access to this document");
+    }
+
+    res.setHeader("Content-Type", doc.mimeType);
+    res.setHeader("Content-Disposition", `inline; filename="${doc.fileName.replace(/"/g, "")}"`);
+    res.sendFile(path.join(UPLOADS_DIR, doc.filePath));
+  })
+);

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
+import { fullNameOf } from "../lib/mappers";
 import { requireAuth, requireRole } from "../middleware/auth";
 
 export const driverRouter = Router();
@@ -54,7 +55,7 @@ driverRouter.get(
 
     res.json({
       id: driver.id,
-      name: driver.user.fullName,
+      name: fullNameOf(driver.user),
       phone: driver.user.phone,
       online: driver.online,
       suspended: driver.suspended,
@@ -98,7 +99,7 @@ driverRouter.get(
     res.json(
       bookings.map((b) => ({
         id: b.id,
-        passenger: b.passenger.fullName,
+        passenger: fullNameOf(b.passenger),
         passengerRating: 4.8,
         from: b.trip.route.origin.name,
         to: b.trip.route.destination.name,
@@ -120,7 +121,7 @@ driverRouter.post(
     await prisma.$transaction([
       prisma.booking.update({ where: { id: booking.id }, data: { status: "IN_PROGRESS" } }),
       prisma.trip.update({ where: { id: booking.tripId }, data: { status: "RUNNING" } }),
-      prisma.notification.create({ data: { userId: booking.passengerId, title: "Driver on the way", message: `${driver.user.fullName} accepted your trip.` } }),
+      prisma.notification.create({ data: { userId: booking.passengerId, title: "Driver on the way", message: `${fullNameOf(driver.user)} accepted your trip.` } }),
     ]);
     res.json({ accepted: true });
   })

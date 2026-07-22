@@ -62,14 +62,14 @@ const faqs = [
   { q: "Do I need an account to see trips?", a: "No — browse live routes, fares and arrival times freely. You only sign in when you're ready to book a seat." },
   { q: "How do I pay?", a: "Pay contactless with Mobile Money, your Relay wallet or a QR code — all from the booking screen." },
   { q: "Can I plan a trip for later?", a: "Yes. Set a trip in Plan ahead and Relay watches for a matching operator departure, then alerts you." },
-  { q: "I run a transport business — how do I join?", a: "Register as an Operator to list your fleet, publish schedules riders can book, and receive daily payouts." },
+  { q: "I run a transport business — how do I join?", a: "Apply as an operator partner with your RDB business certificate and ID. Once our team verifies your business, you get a console to list your fleet, publish schedules riders can book, and receive daily payouts." },
 ];
 
 export default function LandingPage() {
   const router = useRouter();
   const [openFaq, setOpenFaq] = useState(0);
 
-  const goAuth = (mode: "login" | "register") => router.push(`/auth?mode=${mode}`);
+  const goAuth = (mode: "login" | "register" | "apply-operator") => router.push(`/auth?mode=${mode}`);
   const browse = () => router.push("/app");
 
   return (
@@ -242,7 +242,7 @@ export default function LandingPage() {
               Manage vehicles, drivers and schedules from one console — and reach every rider searching your route. Drivers get
               assigned trips, live navigation and instant payouts.
             </p>
-            <button onClick={() => goAuth("register")} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: "15px 24px", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={() => goAuth("apply-operator")} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: "15px 24px", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
               Partner with Relay
             </button>
           </div>
@@ -309,7 +309,15 @@ export default function LandingPage() {
             <div key={col.h}>
               <div style={{ fontSize: 12, fontWeight: 800, color: "#1b1714", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 13 }}>{col.h}</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 9, fontSize: 13.5, color: "#6b6258", fontWeight: 600 }}>
-                {col.items.map((it) => <span key={it}>{it}</span>)}
+                {col.items.map((it) =>
+                  it === "Become a partner" ? (
+                    <button key={it} onClick={() => goAuth("apply-operator")} style={{ background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 13.5, color: "#ff6a1a", fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+                      {it} →
+                    </button>
+                  ) : (
+                    <span key={it}>{it}</span>
+                  )
+                )}
               </div>
             </div>
           ))}

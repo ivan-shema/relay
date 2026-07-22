@@ -82,9 +82,17 @@ enum WalletTxnKind {
   DEBIT
 }
 
+enum DocumentKind {
+  NATIONAL_ID
+  PASSPORT
+  DRIVING_LICENSE
+  BUSINESS_CERTIFICATE
+}
+
 model User {
   id            String   @id @default(cuid())
-  fullName      String
+  firstName     String
+  lastName      String
   email         String   @unique
   phone         String   @unique
   passwordHash  String
@@ -112,15 +120,18 @@ model Operator {
   id          String         @id @default(cuid())
   companyName String
   contactInfo String
+  // Applicant's national ID or passport number (KYC; collected on apply)
+  idNumber    String?
   modes       TransportMode[]
   status      OperatorStatus @default(PENDING)
   ownerUserId String?        @unique
   ownerUser   User?          @relation(fields: [ownerUserId], references: [id])
   createdAt   DateTime       @default(now())
 
-  vehicles Vehicle[]
-  drivers  Driver[]
-  trips    Trip[]
+  vehicles  Vehicle[]
+  drivers   Driver[]
+  trips     Trip[]
+  documents Document[]
 }
 
 model Driver {
@@ -130,13 +141,16 @@ model Driver {
   operatorId    String?
   operator      Operator? @relation(fields: [operatorId], references: [id])
   licenseNumber String
+  // Driver's national ID number (KYC; collected on operator invite)
+  nationalId    String?
   ratingAvg     Float    @default(5)
   online        Boolean  @default(false)
   suspended     Boolean  @default(false)
   createdAt     DateTime @default(now())
 
-  vehicle Vehicle?
-  trips   Trip[]
+  vehicle   Vehicle?
+  trips     Trip[]
+  documents Document[]
 }
 
 model Vehicle {
@@ -312,6 +326,22 @@ model SavedPlace {
   area      String
   icon      String   @default("◎")
   createdAt DateTime @default(now())
+}
+
+// KYC / verification uploads (ID, passport, driving licence, RDB business
+// certificate). PDF and images only — enforced at upload time.
+model Document {
+  id         String       @id @default(cuid())
+  kind       DocumentKind
+  fileName   String // original client filename
+  filePath   String // stored filename under apps/api/uploads/
+  mimeType   String
+  size       Int
+  operatorId String?
+  operator   Operator?    @relation(fields: [operatorId], references: [id])
+  driverId   String?
+  driver     Driver?      @relation(fields: [driverId], references: [id])
+  createdAt  DateTime     @default(now())
 }
 
 // Cash-outs / settlements for drivers and operators.

@@ -21,5 +21,8 @@ Thumbs.db
 # prisma
 apps/api/prisma/*.db
 
+# uploaded KYC documents (PII — never commit)
+apps/api/uploads/
+
 # handoff bundle (design source, kept out of app build)
 handoff-extracted/

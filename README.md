@@ -20,6 +20,17 @@ frontend. **All four roles are implemented** end-to-end against the database:
 After login each role is routed to its own workspace (`/app`, `/driver`, `/operator`,
 `/admin`); every console is guarded client-side and by role-checked API middleware.
 
+**Onboarding is vetted, not self-selected.** Public registration only ever creates
+Passenger accounts (no role picker). Drivers are onboarded exclusively by an Operator
+inviting them (with ID + driving-licence KYC and document uploads). Operators go
+through an **apply → admin-review → approve** flow: the applicant submits company
+info, an ID/passport number, and their RDB business certificate; the account is
+created as `PENDING` and the operator console stays locked (a review screen instead)
+until an admin approves it in Admin → Approvals. Admin-created operator accounts skip
+the queue (already `VERIFIED`) since the admin creating them is the trust signal.
+KYC documents are PDF/JPEG/PNG/WebP only (no GIFs), stored server-side, and served
+only via an authenticated, permission-checked `GET /documents/:id`.
+
 ## Tech stack
 
 | Layer    | Choice |

@@ -7,7 +7,6 @@ import type {
   Place,
   TripSummary,
   TrackingSnapshot,
-  UserRole,
   Paginated,
 } from "@relay/shared";
 
@@ -75,17 +74,33 @@ async function request<T>(
   return data as T;
 }
 
+// Multipart request (KYC document uploads). Browser sets the multipart
+// boundary itself — never set Content-Type manually here.
+async function requestMultipart<T>(path: string, formData: FormData, auth = false): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (auth && tokenStore.access) headers.Authorization = `Bearer ${tokenStore.access}`;
+  const res = await fetch(`${BASE}${path}`, { method: "POST", headers, body: formData });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiError(res.status, (data as { error?: string }).error ?? "Request failed");
+  }
+  return data as T;
+}
+
 type RegisterResp = AuthResponse & { requiresVerification?: boolean };
 
 export const api = {
-  // auth
+  // auth — public registration is passenger-only (no role field)
   register: (body: {
-    fullName: string;
+    firstName: string;
+    lastName: string;
     email: string;
     phone: string;
     password: string;
-    role: UserRole;
   }) => request<RegisterResp>("/auth/register", { method: "POST", body }),
+
+  // operator/partner application (multipart: fields + ID doc + RDB certificate)
+  applyOperator: (formData: FormData) => requestMultipart<RegisterResp>("/auth/apply-operator", formData),
 
   login: (body: { identifier: string; password: string }) =>
     request<AuthResponse>("/auth/login", { method: "POST", body }),
@@ -193,11 +208,25 @@ export const api = {
   operatorAddVehicle: (body: { plateNumber: string; type: string; capacity: number; model?: string }) => request<{ id: string }>("/operator/vehicles", { method: "POST", body, auth: true }),
   operatorAddRoute: (body: { originId: string; destinationId: string; distanceKm?: number }) => request<{ id: string; name: string }>("/operator/routes", { method: "POST", body, auth: true }),
   operatorAddDeparture: (body: { routeId: string; fare: number; departInMinutes?: number; durationMinutes?: number; capacity?: number; mode?: string; vehicleId?: string; driverId?: string }) => request<{ id: string }>("/operator/departures", { method: "POST", body, auth: true }),
-  operatorInviteDriver: (body: { fullName: string; phone: string; email?: string; vehicleId?: string }) => request<{ id: string }>("/operator/drivers/invite", { method: "POST", body, auth: true }),
+  // multipart: KYC fields + ID document + driving licence document
+  operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string }>("/operator/drivers/invite", formData, true),
   operatorWithdraw: () => request<{ amount: number; reference: string }>("/operator/payout", { method: "POST", auth: true }),
 
   // ---- admin writes ----
-  adminAddUser: (body: { fullName: string; phone: string; email: string; role: string }) => request<{ id: string }>("/admin/users", { method: "POST", body, auth: true }),
+  adminAddUser: (body: { firstName: string; lastName: string; phone: string; email: string; role: string; companyName?: string; modes?: string[] }) =>
+    request<{ id: string }>("/admin/users", { method: "POST", body, auth: true }),
+
+  // authed KYC document download (opens in a new tab via blob)
+  openDocument: async (id: string) => {
+    const res = await fetch(`${BASE}/documents/${id}`, {
+      headers: tokenStore.access ? { Authorization: `Bearer ${tokenStore.access}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Could not open document");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  },
   adminReportCsvUrl: () => `${BASE}/admin/reports/export`,
 
   // ---- admin ----
@@ -338,10 +367,18 @@ export interface OperatorDriverRow {
   revenue: number; // operator revenue from this driver's trips (not personal pay)
   status: string;
 }
+export interface KycDocument {
+  id: string;
+  kind: string; // NATIONAL_ID | PASSPORT | DRIVING_LICENSE | BUSINESS_CERTIFICATE
+  fileName: string;
+}
 export interface OperatorDriverDetail extends OperatorDriverRow {
   vehicleId: string | null;
+  nationalId: string | null;
+  licenseNumber: string;
   joined: string;
   suspended: boolean;
+  documents: KycDocument[];
 }
 export interface OperatorDriverTrip {
   id: string;
@@ -378,6 +415,9 @@ export interface AdminApproval {
   initial: string;
   vehicles: string;
   date: string;
+  applicant?: string | null;
+  idNumber?: string | null;
+  documents?: KycDocument[];
 }
 export interface AdminUser {
   id: string;

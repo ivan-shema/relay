@@ -1,5 +1,6 @@
 import type { TrackingSnapshot, TripStatus } from "@relay/shared";
 import type { Prisma } from "@prisma/client";
+import { fullNameOf } from "./mappers";
 
 type TripForTracking = Prisma.TripGetPayload<{
   include: {
@@ -51,7 +52,7 @@ export function buildTrackingSnapshot(trip: TripForTracking): TrackingSnapshot {
 
   const driver = trip.driver
     ? {
-        name: trip.driver.user.fullName,
+        name: fullNameOf(trip.driver.user),
         vehicle: trip.vehicle?.label ?? "Vehicle",
         plate: trip.vehicle?.plateNumber ?? "—",
         phone: trip.driver.user.phone,

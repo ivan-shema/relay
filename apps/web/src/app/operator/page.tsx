@@ -59,6 +59,7 @@ export default function OperatorConsole() {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
   const [company, setCompany] = useState("Operator");
+  const [status, setStatus] = useState<string | null>(null);
   const [selectedDriver, setSelectedDriver] = useState<string | null>(null);
 
   useEffect(() => {
@@ -67,10 +68,22 @@ export default function OperatorConsole() {
       router.replace("/auth?mode=login");
       return;
     }
-    api.operatorMe().then((o) => setCompany(o.companyName)).catch(() => undefined);
+    api
+      .operatorMe()
+      .then((o) => {
+        setCompany(o.companyName);
+        setStatus(o.status);
+      })
+      .catch(() => setStatus("ERROR"));
   }, [user, loading, router]);
 
   if (!user || (user.role !== "OPERATOR" && user.role !== "ADMIN")) return null;
+  // Only a VERIFIED company gets the console — pending applications see a
+  // review screen, rejected ones a not-approved screen.
+  if (status === null) return <OperatorStatusScreen kind="loading" company={company} />;
+  if (status === "PENDING") return <OperatorStatusScreen kind="pending" company={company} />;
+  if (status === "SUSPENDED") return <OperatorStatusScreen kind="rejected" company={company} />;
+  if (status === "ERROR") return <OperatorStatusScreen kind="no-operator" company={company} isAdmin={user.role === "ADMIN"} />;
 
   return (
     <div style={{ padding: "28px 24px 80px" }}>
@@ -95,6 +108,62 @@ export default function OperatorConsole() {
         {tab === "bookings" && <BookingsTab />}
         {tab === "payments" && <PaymentsTab />}
       </ConsoleShell>
+    </div>
+  );
+}
+
+// Non-console states: application pending / rejected / no linked company.
+function OperatorStatusScreen({ kind, company, isAdmin }: { kind: "loading" | "pending" | "rejected" | "no-operator"; company: string; isAdmin?: boolean }) {
+  const router = useRouter();
+  const { signOut } = useAuth();
+  const DISPLAY = "'Space Grotesk', sans-serif";
+
+  const content = {
+    loading: { icon: "◌", title: "Loading…", body: "Checking your operator profile.", accent: "#8c8378", bg: "#f1ece2" },
+    pending: {
+      icon: "◔",
+      title: "Your application is under review",
+      body: `Thanks for applying${company !== "Operator" ? `, ${company}` : ""}. Our team is verifying your documents and business certificate — this usually takes 1–2 business days. We'll notify you as soon as you're approved.`,
+      accent: "#ff6a1a",
+      bg: "#fff0e6",
+    },
+    rejected: {
+      icon: "✕",
+      title: "Your application was not approved",
+      body: "Unfortunately your operator application didn't pass verification. If you believe this is a mistake or want to reapply with updated documents, contact support@relay.app.",
+      accent: "#c2553f",
+      bg: "#fbeae6",
+    },
+    "no-operator": {
+      icon: "▤",
+      title: "No operator profile linked",
+      body: isAdmin
+        ? "This admin account doesn't own an operator company. Use the Admin console to manage operators across the platform."
+        : "No operator company is linked to this account. Apply as an operator to get started.",
+      accent: "#8c8378",
+      bg: "#f1ece2",
+    },
+  }[kind];
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ width: "100%", maxWidth: 480, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 24, padding: "44px 40px", textAlign: "center", boxShadow: "0 40px 90px -40px rgba(27,23,20,.45)" }} className="rel-up">
+        <div style={{ width: 64, height: 64, borderRadius: 18, background: content.bg, color: content.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, margin: "0 auto 20px" }} className={kind === "pending" ? "rel-pulse" : undefined}>
+          {content.icon}
+        </div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 24, fontWeight: 700, letterSpacing: "-.6px", marginBottom: 10 }}>{content.title}</div>
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: "#6b6258", margin: "0 0 26px" }}>{content.body}</p>
+        {kind !== "loading" && (
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+            {kind === "no-operator" && isAdmin ? (
+              <button onClick={() => router.push("/admin")} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 13, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Go to Admin console</button>
+            ) : (
+              <button onClick={() => router.push("/")} style={{ background: "#fff", color: "#1b1714", border: "1px solid #e3ddd1", borderRadius: 13, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Back to Relay</button>
+            )}
+            <button onClick={() => { signOut(); router.push("/"); }} style={{ background: "none", color: "#a39a8d", border: "none", borderRadius: 13, padding: "13px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Sign out</button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -392,6 +461,27 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
                 </div>
                 <button onClick={() => setAction("vehicle")} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 10, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, color: "#1b1714", cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>Reassign</button>
               </div>
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 8 }}>KYC</div>
+                <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginBottom: 8 }}>
+                  ID <span style={{ fontFamily: MONO }}>{detail.nationalId ?? "—"}</span> · Licence <span style={{ fontFamily: MONO }}>{detail.licenseNumber}</span>
+                </div>
+                {detail.documents.length > 0 ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {detail.documents.map((doc) => (
+                      <button
+                        key={doc.id}
+                        onClick={() => api.openDocument(doc.id).catch(() => window.alert("Could not open document"))}
+                        style={{ display: "flex", alignItems: "center", gap: 6, background: "#faf8f4", border: "1px solid #ece6db", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, color: "#6b6258", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
+                      >
+                        <span style={{ color: "#ff6a1a" }}>▤</span> {doc.kind === "DRIVING_LICENSE" ? "Driving licence" : "ID document"}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: "#a39a8d", fontWeight: 600 }}>No documents on file (onboarded before KYC).</div>
+                )}
+              </div>
             </Card>
 
             <Card>
@@ -439,11 +529,29 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
           submitLabel="Send invite"
           schema={inviteDriverSchema}
           fields={[
-            { name: "fullName", label: "Full name", placeholder: "Patrick H." },
+            { name: "firstName", label: "First name", placeholder: "Patrick" },
+            { name: "lastName", label: "Last name", placeholder: "Habimana" },
             { name: "phone", label: "Phone number", placeholder: "+250 78 000 0000" },
             { name: "email", label: "Email (optional)", placeholder: "driver@email.com" },
+            { name: "idNumber", label: "National ID number", placeholder: "1199…" },
+            { name: "licenseNumber", label: "Driving licence number", placeholder: "RW-DRV-…" },
+            { name: "idDocument", label: "ID document", type: "file" },
+            { name: "licenseDocument", label: "Driving licence document", type: "file" },
           ]}
-          onSubmit={async (v) => { const d = v as InviteDriverInput; await api.operatorInviteDriver({ fullName: d.fullName, phone: d.phone, email: d.email || undefined }); reload(); }}
+          onSubmit={async (v) => {
+            const d = v as InviteDriverInput & { idDocument: File; licenseDocument: File };
+            const fd = new FormData();
+            fd.append("firstName", d.firstName);
+            fd.append("lastName", d.lastName);
+            fd.append("phone", d.phone);
+            if (d.email) fd.append("email", d.email);
+            fd.append("idNumber", d.idNumber);
+            fd.append("licenseNumber", d.licenseNumber);
+            fd.append("idDocument", d.idDocument);
+            fd.append("licenseDocument", d.licenseDocument);
+            await api.operatorInviteDriver(fd);
+            reload();
+          }}
           onClose={() => setInviteModal(false)}
         />
       )}

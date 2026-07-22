@@ -14,6 +14,8 @@ import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { hashPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
+import { fullNameOf } from "../lib/mappers";
+import { upload, requireFile } from "../lib/uploads";
 
 export const operatorRouter = Router();
 
@@ -31,22 +33,37 @@ function startOfToday(): Date {
   return d;
 }
 
-async function resolveOperatorId(userId: string): Promise<string> {
+// The caller's OWN operator, strictly by ownerUserId — no fallback. (The old
+// "first operator" fallback silently handed control of an arbitrary company
+// to any operator-role user without one: cross-tenant access bug.)
+async function resolveOperator(userId: string) {
   const op = await prisma.operator.findFirst({ where: { ownerUserId: userId } });
-  if (op) return op.id;
-  // fallback for ADMIN acting without an owned operator: first operator
-  const first = await prisma.operator.findFirst({ orderBy: { createdAt: "asc" } });
-  if (!first) throw new HttpError(404, "No operator found");
-  return first.id;
+  if (!op) throw new HttpError(404, "No operator profile is linked to this account");
+  return op;
 }
 
-// GET /operator/me
+// Console routes additionally require the company to be VERIFIED — pending
+// applications and rejected/suspended companies get no operational access.
+async function resolveVerifiedOperatorId(userId: string): Promise<string> {
+  const op = await resolveOperator(userId);
+  if (op.status !== "VERIFIED") {
+    throw new HttpError(
+      403,
+      op.status === "SUSPENDED"
+        ? "Your operator application was not approved"
+        : "Your operator application is pending review"
+    );
+  }
+  return op.id;
+}
+
+// GET /operator/me — works at ANY status so the web can render the
+// pending / not-approved screens.
 operatorRouter.get(
   "/me",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
-    const op = await prisma.operator.findUnique({ where: { id: opId } });
-    res.json({ id: op!.id, companyName: op!.companyName, modes: op!.modes, status: op!.status, contactInfo: op!.contactInfo });
+    const op = await resolveOperator(req.auth!.sub);
+    res.json({ id: op.id, companyName: op.companyName, modes: op.modes, status: op.status, contactInfo: op.contactInfo });
   })
 );
 
@@ -54,7 +71,7 @@ operatorRouter.get(
 operatorRouter.get(
   "/overview",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const today = startOfToday();
 
     const [bookingsToday, paidToday, activeVehicles, totalVehicles, liveBookings, routes] = await Promise.all([
@@ -91,7 +108,7 @@ operatorRouter.get(
         { label: "Avg rating", value: "4.8", sub: "this week", delta: "+0.1" },
       ],
       liveBookings: liveBookings.map((b) => ({
-        passenger: b.passenger.fullName,
+        passenger: fullNameOf(b.passenger),
         route: b.trip.route.name,
         time: fmtTime(b.createdAt),
         fare: dec(b.fare),
@@ -107,7 +124,7 @@ operatorRouter.get(
 operatorRouter.get(
   "/vehicles",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const p = parsePage(req, 8);
     const where = { operatorId: opId };
     const [vehicles, total] = await prisma.$transaction([
@@ -122,7 +139,7 @@ operatorRouter.get(
           type: v.type,
           model: v.model,
           capacity: v.capacity,
-          driver: v.driver?.user.fullName ?? "Unassigned",
+          driver: v.driver ? fullNameOf(v.driver.user) : "Unassigned",
           util: v.status === "ACTIVE" ? "77%" : v.status === "IDLE" ? "0%" : "—",
           status: v.status,
         })),
@@ -137,7 +154,7 @@ operatorRouter.get(
 operatorRouter.post(
   "/vehicles",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const body = createVehicleSchema.parse(req.body);
     const v = await prisma.vehicle.create({
       data: { operatorId: opId, plateNumber: body.plateNumber, type: body.type, capacity: body.capacity, model: body.model, label: body.label ?? `${body.type} ${body.plateNumber.slice(-3)}`, status: "IDLE" },
@@ -150,7 +167,7 @@ operatorRouter.post(
 operatorRouter.get(
   "/routes",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const routes = await prisma.route.findMany({
       include: { origin: true, destination: true, trips: { where: { operatorId: opId }, include: { bookings: true } } },
     });
@@ -181,7 +198,7 @@ operatorRouter.get(
 operatorRouter.post(
   "/routes",
   asyncHandler(async (req, res) => {
-    await resolveOperatorId(req.auth!.sub); // authz
+    await resolveVerifiedOperatorId(req.auth!.sub); // authz
     const body = createRouteSchema.parse(req.body);
     const [origin, destination] = await Promise.all([
       prisma.place.findUnique({ where: { id: body.originId } }),
@@ -199,7 +216,7 @@ operatorRouter.post(
 operatorRouter.post(
   "/departures",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const body = createDepartureSchema.parse(req.body);
     const route = await prisma.route.findUnique({ where: { id: body.routeId } });
     if (!route) throw new HttpError(400, "Invalid route");
@@ -223,26 +240,40 @@ operatorRouter.post(
   })
 );
 
-// POST /operator/drivers/invite — onboard a new driver (+ optional vehicle)
+// POST /operator/drivers/invite — onboard a new driver with KYC (multipart):
+// ID number + driving licence number, plus their ID and licence documents.
 operatorRouter.post(
   "/drivers/invite",
+  upload.fields([
+    { name: "idDocument", maxCount: 1 },
+    { name: "licenseDocument", maxCount: 1 },
+  ]),
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const body = inviteDriverSchema.parse(req.body);
+    const idDocument = requireFile(req, "idDocument");
+    const licenseDocument = requireFile(req, "licenseDocument");
 
     const email = body.email && body.email.length > 0 ? body.email : `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
     const existing = await prisma.user.findFirst({ where: { OR: [{ email }, { phone: body.phone }] } });
     if (existing) throw new HttpError(409, "Phone or email already registered");
 
-    const user = await prisma.user.create({
-      data: { fullName: body.fullName, email, phone: body.phone, passwordHash: await hashPassword("password123"), role: "DRIVER", phoneVerified: false },
+    const passwordHash = await hashPassword("password123");
+    const driver = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", phoneVerified: false },
+      });
+      const d = await tx.driver.create({
+        data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber, nationalId: body.idNumber },
+      });
+      await tx.document.createMany({
+        data: [
+          { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idDocument.filename, mimeType: idDocument.mimetype, size: idDocument.size, driverId: d.id },
+          { kind: "DRIVING_LICENSE", fileName: licenseDocument.originalname, filePath: licenseDocument.filename, mimeType: licenseDocument.mimetype, size: licenseDocument.size, driverId: d.id },
+        ],
+      });
+      return d;
     });
-    const driver = await prisma.driver.create({
-      data: { userId: user.id, operatorId: opId, licenseNumber: "PENDING" },
-    });
-    if (body.vehicleId) {
-      await prisma.vehicle.update({ where: { id: body.vehicleId }, data: { driverId: driver.id } });
-    }
     res.status(201).json({ id: driver.id });
   })
 );
@@ -251,7 +282,7 @@ operatorRouter.post(
 operatorRouter.post(
   "/payout",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const today = startOfToday();
     const paid = await prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } });
     const gross = paid.reduce((s, p) => s + dec(p.amount), 0);
@@ -268,7 +299,7 @@ operatorRouter.post(
 operatorRouter.get(
   "/schedule",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const p = parsePage(req, 8);
     const where = { operatorId: opId };
     const [trips, total] = await prisma.$transaction([
@@ -290,7 +321,7 @@ operatorRouter.get(
             time: fmtTime(t.departAt),
             route: t.route.name,
             vehicle: t.vehicle?.plateNumber ?? "—",
-            driver: t.driver?.user.fullName ?? "—",
+            driver: t.driver ? fullNameOf(t.driver.user) : "—",
             booked,
             capacity: t.capacity,
             status: t.status,
@@ -307,7 +338,7 @@ operatorRouter.get(
 operatorRouter.get(
   "/drivers",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const p = parsePage(req, 8);
     const where = { operatorId: opId };
     const [drivers, total] = await prisma.$transaction([
@@ -323,7 +354,7 @@ operatorRouter.get(
         const paid = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: "PAID", booking: { trip: { driverId: d.id } } } });
         return {
           id: d.id,
-          name: d.user.fullName,
+          name: fullNameOf(d.user),
           phone: d.user.phone,
           vehicle: d.vehicle ? `${d.vehicle.type} · ${d.vehicle.plateNumber}` : "Unassigned",
           trips,
@@ -341,16 +372,21 @@ operatorRouter.get(
 operatorRouter.get(
   "/drivers/:id",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
-    const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId }, include: { user: true, vehicle: true } });
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const d = await prisma.driver.findFirst({
+      where: { id: req.params.id, operatorId: opId },
+      include: { user: true, vehicle: true, documents: true },
+    });
     if (!d) throw new HttpError(404, "Driver not found");
     const trips = await prisma.booking.count({ where: { status: "COMPLETED", trip: { driverId: d.id } } });
     // Operator revenue from this driver's trips (see note above) — not personal pay.
     const paid = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: "PAID", booking: { trip: { driverId: d.id } } } });
     res.json({
       id: d.id,
-      name: d.user.fullName,
+      name: fullNameOf(d.user),
       phone: d.user.phone,
+      nationalId: d.nationalId,
+      licenseNumber: d.licenseNumber,
       vehicleId: d.vehicle?.id ?? null,
       vehicle: d.vehicle ? `${d.vehicle.label} · ${d.vehicle.plateNumber}` : "Unassigned",
       trips,
@@ -359,6 +395,7 @@ operatorRouter.get(
       joined: d.createdAt.getFullYear().toString(),
       status: d.suspended ? "SUSPENDED" : d.online ? "ONLINE" : "OFFLINE",
       suspended: d.suspended,
+      documents: d.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName })),
     });
   })
 );
@@ -368,7 +405,7 @@ operatorRouter.get(
 operatorRouter.get(
   "/drivers/:id/trips",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId } });
     if (!d) throw new HttpError(404, "Driver not found");
     const bookings = await prisma.booking.findMany({
@@ -393,7 +430,7 @@ operatorRouter.get(
 operatorRouter.get(
   "/drivers/:id/lookups",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const [vehicles, trips] = await Promise.all([
       prisma.vehicle.findMany({ where: { operatorId: opId }, orderBy: { plateNumber: "asc" }, take: 100 }),
       prisma.trip.findMany({ where: { operatorId: opId, status: "SCHEDULED", departAt: { gt: new Date() } }, include: { route: true }, orderBy: { departAt: "asc" }, take: 50 }),
@@ -412,7 +449,7 @@ operatorRouter.get(
 operatorRouter.post(
   "/drivers/:id/assign-vehicle",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const { vehicleId } = assignVehicleSchema.parse(req.body);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId }, include: { vehicle: true } });
     if (!d) throw new HttpError(404, "Driver not found");
@@ -435,7 +472,7 @@ operatorRouter.post(
 operatorRouter.post(
   "/drivers/:id/assign-trip",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const { tripId } = assignTripSchema.parse(req.body);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId }, include: { vehicle: true } });
     if (!d) throw new HttpError(404, "Driver not found");
@@ -453,7 +490,7 @@ operatorRouter.post(
 operatorRouter.post(
   "/drivers/:id/remove",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId }, include: { vehicle: true } });
     if (!d) throw new HttpError(404, "Driver not found");
     await prisma.$transaction(async (tx) => {
@@ -468,7 +505,7 @@ operatorRouter.post(
 operatorRouter.post(
   "/drivers/:id/suspend",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const d = await prisma.driver.findFirst({ where: { id: req.params.id, operatorId: opId } });
     if (!d) throw new HttpError(404, "Driver not found");
     const updated = await prisma.driver.update({ where: { id: d.id }, data: { suspended: !d.suspended } });
@@ -480,7 +517,7 @@ operatorRouter.post(
 operatorRouter.get(
   "/bookings",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const p = parsePage(req, 10);
     const where = { trip: { operatorId: opId } };
     const [bookings, total] = await prisma.$transaction([
@@ -497,7 +534,7 @@ operatorRouter.get(
       paged(
         bookings.map((b) => ({
           id: b.reference,
-          passenger: b.passenger.fullName,
+          passenger: fullNameOf(b.passenger),
           route: b.trip.route.name,
           mode: (b.trip.legs as { mode: string }[]).map((l) => l.mode).join(" + "),
           fare: dec(b.fare),
@@ -514,7 +551,7 @@ operatorRouter.get(
 operatorRouter.get(
   "/payments",
   asyncHandler(async (req, res) => {
-    const opId = await resolveOperatorId(req.auth!.sub);
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const today = startOfToday();
     const p = parsePage(req, 10);
     const where = { booking: { trip: { operatorId: opId } } };

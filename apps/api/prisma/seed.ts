@@ -39,27 +39,27 @@ async function main() {
 
   // ---------- Users ----------
   const amara = await prisma.user.create({
-    data: { fullName: "Amara N.", email: "amara@relay.app", phone: "+250781104821", passwordHash: pw, role: "PASSENGER", phoneVerified: true, walletBalance: 12400 },
+    data: { firstName: "Amara", lastName: "Niyonsaba", email: "amara@relay.app", phone: "+250781104821", passwordHash: pw, role: "PASSENGER", phoneVerified: true, walletBalance: 12400 },
   });
   const passengers = [amara];
-  for (const [i, name] of ["Bea K.", "Chris M.", "Diane U.", "Eric T.", "Faith R."].entries()) {
+  for (const [i, name] of [["Bea", "Kamikazi"], ["Chris", "Mugisha"], ["Diane", "Uwase"], ["Eric", "Tuyishime"], ["Faith", "Rukundo"]].entries()) {
     passengers.push(
       await prisma.user.create({
-        data: { fullName: name, email: `passenger${i + 2}@relay.app`, phone: `+2507820000${10 + i}`, passwordHash: pw, role: "PASSENGER", phoneVerified: true, walletBalance: 4000 + i * 1500 },
+        data: { firstName: name[0], lastName: name[1], email: `passenger${i + 2}@relay.app`, phone: `+2507820000${10 + i}`, passwordHash: pw, role: "PASSENGER", phoneVerified: true, walletBalance: 4000 + i * 1500 },
       })
     );
   }
 
   const driverUser = await prisma.user.create({
-    data: { fullName: "Jean P.", email: "jean@relay.app", phone: "+250788000001", passwordHash: pw, role: "DRIVER", phoneVerified: true },
+    data: { firstName: "Jean", lastName: "Pierre", email: "jean@relay.app", phone: "+250788000001", passwordHash: pw, role: "DRIVER", phoneVerified: true },
   });
 
   const operatorUser = await prisma.user.create({
-    data: { fullName: "Kigali Bus Admin", email: "ops@kigalibus.app", phone: "+250788000002", passwordHash: pw, role: "OPERATOR", phoneVerified: true },
+    data: { firstName: "Kigali Bus", lastName: "Admin", email: "ops@kigalibus.app", phone: "+250788000002", passwordHash: pw, role: "OPERATOR", phoneVerified: true },
   });
 
   await prisma.user.create({
-    data: { fullName: "Relay Admin", email: "admin@relay.app", phone: "+250788000003", passwordHash: pw, role: "ADMIN", phoneVerified: true },
+    data: { firstName: "Relay", lastName: "Admin", email: "admin@relay.app", phone: "+250788000003", passwordHash: pw, role: "ADMIN", phoneVerified: true },
   });
 
   // ---------- Operators ----------
@@ -79,7 +79,7 @@ async function main() {
   // ---------- Drivers + vehicles ----------
   // primary demo driver
   const jean = await prisma.driver.create({
-    data: { userId: driverUser.id, operatorId: kigaliBus.id, licenseNumber: "RW-DRV-22841", ratingAvg: 4.9, online: true },
+    data: { userId: driverUser.id, operatorId: kigaliBus.id, licenseNumber: "RW-DRV-22841", nationalId: "1199080012345678", ratingAvg: 4.9, online: true },
   });
   const jeanVehicle = await prisma.vehicle.create({
     data: { operatorId: kigaliBus.id, driverId: jean.id, type: "BUS", plateNumber: "RAD 412 K", capacity: 33, label: "Bus 12", model: "Coaster HD", status: "ACTIVE" },
@@ -87,23 +87,23 @@ async function main() {
 
   // extra drivers for the operator console
   const extraDrivers: { driverId: string; vehicleId: string; name: string }[] = [];
-  const driverSpec: { name: string; plate: string; type: TransportMode; cap: number; model: string; rating: number; online: boolean }[] = [
-    { name: "David K.", plate: "RAD 482 C", type: "MOTO", cap: 1, model: "Boxer 150", rating: 4.9, online: true },
-    { name: "Grace I.", plate: "RAC 740 A", type: "BUS", cap: 30, model: "Coaster", rating: 4.7, online: true },
-    { name: "Henri B.", plate: "RAD 663 B", type: "MOTO", cap: 1, model: "TVS", rating: 4.6, online: false },
-    { name: "Ivan S.", plate: "RAB 220 D", type: "BUS", cap: 28, model: "Rosa", rating: 4.8, online: true },
+  const driverSpec: { first: string; last: string; plate: string; type: TransportMode; cap: number; model: string; rating: number; online: boolean }[] = [
+    { first: "David", last: "Kwizera", plate: "RAD 482 C", type: "MOTO", cap: 1, model: "Boxer 150", rating: 4.9, online: true },
+    { first: "Grace", last: "Ingabire", plate: "RAC 740 A", type: "BUS", cap: 30, model: "Coaster", rating: 4.7, online: true },
+    { first: "Henri", last: "Bizimana", plate: "RAD 663 B", type: "MOTO", cap: 1, model: "TVS", rating: 4.6, online: false },
+    { first: "Ivan", last: "Sibomana", plate: "RAB 220 D", type: "BUS", cap: 28, model: "Rosa", rating: 4.8, online: true },
   ];
   for (const [i, d] of driverSpec.entries()) {
     const u = await prisma.user.create({
-      data: { fullName: d.name, email: `driver${i + 2}@relay.app`, phone: `+2507880010${10 + i}`, passwordHash: pw, role: "DRIVER", phoneVerified: true },
+      data: { firstName: d.first, lastName: d.last, email: `driver${i + 2}@relay.app`, phone: `+2507880010${10 + i}`, passwordHash: pw, role: "DRIVER", phoneVerified: true },
     });
     const dr = await prisma.driver.create({
-      data: { userId: u.id, operatorId: kigaliBus.id, licenseNumber: `RW-DRV-${1000 + i}`, ratingAvg: d.rating, online: d.online },
+      data: { userId: u.id, operatorId: kigaliBus.id, licenseNumber: `RW-DRV-${1000 + i}`, nationalId: `11990800${20000000 + i}`, ratingAvg: d.rating, online: d.online },
     });
     const v = await prisma.vehicle.create({
       data: { operatorId: kigaliBus.id, driverId: dr.id, type: d.type, plateNumber: d.plate, capacity: d.cap, label: `${d.type} ${d.plate.slice(-3)}`, model: d.model, status: d.online ? "ACTIVE" : "IDLE" },
     });
-    extraDrivers.push({ driverId: dr.id, vehicleId: v.id, name: d.name });
+    extraDrivers.push({ driverId: dr.id, vehicleId: v.id, name: `${d.first} ${d.last}` });
   }
   // one maintenance vehicle with no driver
   await prisma.vehicle.create({

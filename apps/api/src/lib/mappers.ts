@@ -13,6 +13,12 @@ function dec(v: Prisma.Decimal | number): number {
   return typeof v === "number" ? v : Number(v.toString());
 }
 
+// Compose a display name from the split name columns. Response shapes that
+// expose display names (passenger, driver, etc.) stay unchanged for the web.
+export function fullNameOf(u: { firstName: string; lastName: string }): string {
+  return `${u.firstName} ${u.lastName}`;
+}
+
 function relativeLabel(target: Date): string {
   const diffMin = Math.round((target.getTime() - Date.now()) / 60_000);
   if (diffMin <= 0) return "now";
