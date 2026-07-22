@@ -1,0 +1,199 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap");
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100vh;
+  background: #f4f1ea;
+  font-family: "Manrope", sans-serif;
+  color: #1b1714;
+  background-image: radial-gradient(circle at 1px 1px, rgba(27, 23, 20, 0.04) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+
+button {
+  font-family: "Manrope", sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d8d1c4;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+@keyframes relUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes relPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 106, 26, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(255, 106, 26, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 106, 26, 0);
+  }
+}
+@keyframes relSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.rel-up {
+  animation: relUp 0.4s ease both;
+}
+.rel-pulse {
+  animation: relPulse 1.8s infinite;
+}
+
+/* ---- web app layout ---- */
+.rel-page {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 40px 80px;
+}
+.rel-narrow {
+  max-width: 640px;
+  margin: 0 auto;
+}
+.rel-mid {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.rel-wide {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+/* passenger app shell — dark sidebar + fluid content */
+.pax-shell {
+  display: flex;
+  min-height: 100vh;
+}
+.pax-side {
+  width: 240px;
+  flex: none;
+  background: #1b1714;
+  color: #fff;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 16px;
+}
+.pax-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pax-main {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 40px 64px;
+}
+@media (max-width: 820px) {
+  .pax-shell {
+    flex-direction: column;
+  }
+  .pax-side {
+    position: static;
+    width: auto;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    overflow-x: auto;
+  }
+  .pax-nav {
+    flex-direction: row;
+  }
+  .pax-only-desktop {
+    display: none !important;
+  }
+  .pax-main {
+    padding: 20px 18px 64px;
+  }
+}
+
+/* passenger home: search/planned on the left, live-trips rail on the right */
+.rel-home-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .rel-home-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* responsive trip grid on Available */
+.rel-trip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+/* two-column checkout: summary | methods */
+.rel-pay-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+/* track: map beside status panel */
+.rel-track-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.rel-cardgrid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 860px) {
+  .rel-page {
+    padding: 20px 18px 72px;
+  }
+  .rel-pay-grid,
+  .rel-track-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* console two-column blocks collapse on narrow screens (override inline grid) */
+@media (max-width: 900px) {
+  .op-two {
+    grid-template-columns: 1fr !important;
+  }
+}

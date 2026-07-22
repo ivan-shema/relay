@@ -1,0 +1,326 @@
+// Relay — Integrated Multimodal Transport Coordination Platform
+// Prisma schema. Covers the core domain from the project spec; the API
+// currently exercises the passenger vertical slice end-to-end.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PASSENGER
+  DRIVER
+  OPERATOR
+  ADMIN
+}
+
+enum TransportMode {
+  BUS
+  MOTO
+  RIDE
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum TripStatus {
+  SCHEDULED
+  BOARDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  MOBILE_MONEY
+  WALLET
+  QR
+  SMART_CARD
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum OperatorStatus {
+  PENDING
+  VERIFIED
+  SUSPENDED
+}
+
+enum VehicleStatus {
+  ACTIVE
+  IDLE
+  MAINTENANCE
+}
+
+enum ComplaintStatus {
+  OPEN
+  RESOLVED
+}
+
+enum ComplaintPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum WalletTxnKind {
+  CREDIT
+  DEBIT
+}
+
+model User {
+  id            String   @id @default(cuid())
+  fullName      String
+  email         String   @unique
+  phone         String   @unique
+  passwordHash  String
+  role          UserRole @default(PASSENGER)
+  phoneVerified Boolean  @default(false)
+  walletBalance Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // role extensions
+  driverProfile   Driver?
+  operatorProfile Operator?
+
+  bookings      Booking[]
+  ratings       Rating[]
+  notifications Notification[]
+  plannedTrips  PlannedTrip[]
+  otps          Otp[]
+  complaints    Complaint[]
+  walletTxns    WalletTransaction[]
+  savedPlaces   SavedPlace[]
+}
+
+model Operator {
+  id          String         @id @default(cuid())
+  companyName String
+  contactInfo String
+  modes       TransportMode[]
+  status      OperatorStatus @default(PENDING)
+  ownerUserId String?        @unique
+  ownerUser   User?          @relation(fields: [ownerUserId], references: [id])
+  createdAt   DateTime       @default(now())
+
+  vehicles Vehicle[]
+  drivers  Driver[]
+  trips    Trip[]
+}
+
+model Driver {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+  operatorId    String?
+  operator      Operator? @relation(fields: [operatorId], references: [id])
+  licenseNumber String
+  ratingAvg     Float    @default(5)
+  online        Boolean  @default(false)
+  suspended     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  vehicle Vehicle?
+  trips   Trip[]
+}
+
+model Vehicle {
+  id          String        @id @default(cuid())
+  operatorId  String
+  operator    Operator      @relation(fields: [operatorId], references: [id])
+  driverId    String?       @unique
+  driver      Driver?       @relation(fields: [driverId], references: [id])
+  type        TransportMode
+  plateNumber String        @unique
+  capacity    Int
+  label       String // e.g. "Bus 12"
+  model       String        @default("—")
+  status      VehicleStatus @default(ACTIVE)
+  createdAt   DateTime      @default(now())
+
+  trips Trip[]
+}
+
+model Place {
+  id        String  @id @default(cuid())
+  name      String
+  area      String
+  lat       Float
+  lng       Float
+  isPopular Boolean @default(false)
+
+  routesFrom Route[] @relation("RouteOrigin")
+  routesTo   Route[] @relation("RouteDest")
+}
+
+model Route {
+  id            String  @id @default(cuid())
+  name          String // "Kabeza → Central Market"
+  originId      String
+  origin        Place   @relation("RouteOrigin", fields: [originId], references: [id])
+  destinationId String
+  destination   Place   @relation("RouteDest", fields: [destinationId], references: [id])
+  distanceKm    Float
+  // ordered list of [lng,lat] points used to animate tracking
+  polyline      Json?
+
+  trips Trip[]
+}
+
+// A Trip is a concrete scheduled departure a passenger can book.
+model Trip {
+  id           String        @id @default(cuid())
+  routeId      String
+  route        Route         @relation(fields: [routeId], references: [id])
+  operatorId   String
+  operator     Operator      @relation(fields: [operatorId], references: [id])
+  vehicleId    String?
+  vehicle      Vehicle?      @relation(fields: [vehicleId], references: [id])
+  driverId     String?
+  driver       Driver?       @relation(fields: [driverId], references: [id])
+
+  // legs encodes the multimodal chain, e.g. [{mode:"BUS"},{mode:"MOTO"}]
+  legs         Json
+  departAt     DateTime
+  arriveAt     DateTime
+  fare         Decimal       @db.Decimal(10, 2)
+  surge        Boolean       @default(false)
+  capacity     Int
+  seatsLeft    Int
+  status       TripStatus    @default(SCHEDULED)
+  tag          String? // "Fastest" | "Cheapest" | "Direct"
+  createdAt    DateTime      @default(now())
+
+  bookings Booking[]
+}
+
+model Booking {
+  id           String        @id @default(cuid())
+  reference    String        @unique
+  passengerId  String
+  passenger    User          @relation(fields: [passengerId], references: [id])
+  tripId       String
+  trip         Trip          @relation(fields: [tripId], references: [id])
+  seats        Int           @default(1)
+  fare         Decimal       @db.Decimal(10, 2)
+  status       BookingStatus @default(PENDING)
+  seatNumber   String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  payment Payment?
+  rating  Rating?
+}
+
+model Payment {
+  id        String        @id @default(cuid())
+  bookingId String        @unique
+  booking   Booking       @relation(fields: [bookingId], references: [id])
+  amount    Decimal       @db.Decimal(10, 2)
+  method    PaymentMethod
+  status    PaymentStatus @default(PENDING)
+  reference String        @unique
+  createdAt DateTime      @default(now())
+}
+
+model Rating {
+  id        String   @id @default(cuid())
+  bookingId String   @unique
+  booking   Booking  @relation(fields: [bookingId], references: [id])
+  passengerId String
+  passenger User     @relation(fields: [passengerId], references: [id])
+  score     Int
+  comment   String?
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+// A passenger's "Plan ahead" watch — Relay notifies on matching departures.
+model PlannedTrip {
+  id            String   @id @default(cuid())
+  passengerId   String
+  passenger     User     @relation(fields: [passengerId], references: [id])
+  originLabel   String
+  destLabel     String
+  whenLabel     String
+  notify        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+model Otp {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  code      String
+  purpose   String // "VERIFY_PHONE" | "RESET_PASSWORD"
+  expiresAt DateTime
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Complaint {
+  id          String            @id @default(cuid())
+  raisedById  String?
+  raisedBy    User?             @relation(fields: [raisedById], references: [id])
+  who         String // display label, e.g. "Passenger · Amara N."
+  message     String
+  priority    ComplaintPriority @default(MEDIUM)
+  status      ComplaintStatus   @default(OPEN)
+  createdAt   DateTime          @default(now())
+}
+
+// Unified wallet ledger — ride charges (DEBIT) and top-ups (CREDIT).
+model WalletTransaction {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id])
+  kind      WalletTxnKind
+  amount    Decimal       @db.Decimal(10, 2)
+  label     String
+  createdAt DateTime      @default(now())
+}
+
+model SavedPlace {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  label     String // "Home", "Work"
+  area      String
+  icon      String   @default("◎")
+  createdAt DateTime @default(now())
+}
+
+// Cash-outs / settlements for drivers and operators.
+model Payout {
+  id         String   @id @default(cuid())
+  reference  String   @unique
+  driverId   String?
+  operatorId String?
+  amount     Decimal  @db.Decimal(10, 2)
+  method     String   @default("MTN MoMo")
+  createdAt  DateTime @default(now())
+}

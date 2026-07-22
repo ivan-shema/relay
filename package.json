@@ -1,0 +1,23 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Relay — Integrated Multimodal Transport Coordination Platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @relay/api & npm run dev --workspace @relay/web",
+    "dev:api": "npm run dev --workspace @relay/api",
+    "dev:web": "npm run dev --workspace @relay/web",
+    "build": "npm run build --workspace @relay/shared && npm run build --workspace @relay/api && npm run build --workspace @relay/web",
+    "db:up": "docker compose up -d db",
+    "db:migrate": "npm run prisma:migrate --workspace @relay/api",
+    "db:seed": "npm run seed --workspace @relay/api",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
