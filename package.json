@@ -14,6 +14,9 @@
     "build": "npm run build --workspace @relay/shared && npm run build --workspace @relay/api && npm run build --workspace @relay/web",
     "db:up": "docker compose up -d db",
     "db:migrate": "npm run prisma:migrate --workspace @relay/api",
+    "db:mig:dep": "npm run mig:dep --workspace @relay/api",
+    "db:gen": "npm run prisma:generate --workspace @relay/api",
+    "db:studio": "npm run studio --workspace @relay/api",
     "db:seed": "npm run seed --workspace @relay/api",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
