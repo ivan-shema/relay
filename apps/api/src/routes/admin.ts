@@ -216,13 +216,29 @@ adminRouter.get(
   })
 );
 
-// POST /admin/operators/:id/approve
+// POST /admin/operators/:id/approve — verify the company AND promote its owner
+// to the OPERATOR role. Applicants stay PASSENGERs while pending, so approval is
+// what actually unlocks the operator console for them.
 adminRouter.post(
   "/operators/:id/approve",
   asyncHandler(async (req, res) => {
     const op = await prisma.operator.findUnique({ where: { id: req.params.id } });
     if (!op) throw new HttpError(404, "Operator not found");
-    await prisma.operator.update({ where: { id: op.id }, data: { status: "VERIFIED" } });
+    await prisma.$transaction([
+      prisma.operator.update({ where: { id: op.id }, data: { status: "VERIFIED" } }),
+      ...(op.ownerUserId
+        ? [
+            prisma.user.update({ where: { id: op.ownerUserId }, data: { role: "OPERATOR" } }),
+            prisma.notification.create({
+              data: {
+                userId: op.ownerUserId,
+                title: "Operator application approved",
+                message: `${op.companyName} is verified — your operator console is now live.`,
+              },
+            }),
+          ]
+        : []),
+    ]);
     res.json({ approved: true });
   })
 );
@@ -233,7 +249,20 @@ adminRouter.post(
   asyncHandler(async (req, res) => {
     const op = await prisma.operator.findUnique({ where: { id: req.params.id } });
     if (!op) throw new HttpError(404, "Operator not found");
-    await prisma.operator.update({ where: { id: op.id }, data: { status: "SUSPENDED" } });
+    await prisma.$transaction([
+      prisma.operator.update({ where: { id: op.id }, data: { status: "SUSPENDED" } }),
+      ...(op.ownerUserId
+        ? [
+            prisma.notification.create({
+              data: {
+                userId: op.ownerUserId,
+                title: "Operator application rejected",
+                message: `Your application for ${op.companyName} was not approved. Contact support for details.`,
+              },
+            }),
+          ]
+        : []),
+    ]);
     res.json({ rejected: true });
   })
 );

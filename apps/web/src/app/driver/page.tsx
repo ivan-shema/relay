@@ -66,7 +66,7 @@ export default function DriverConsole() {
   const s = me.stats;
 
   return (
-    <div style={{ maxWidth: 1180, margin: "0 auto", padding: "28px 24px 80px" }}>
+    <div className="rel-console-page" style={{ maxWidth: 1180, margin: "0 auto" }}>
       <div style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 20, overflow: "hidden", boxShadow: "0 30px 70px -34px rgba(27,23,20,.4)" }}>
         {/* header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 28px", borderBottom: "1px solid #ece6db", background: "#faf8f4", flexWrap: "wrap", gap: 12 }}>
@@ -91,7 +91,7 @@ export default function DriverConsole() {
         <div className="rel-track-grid" style={{ padding: "24px 28px", gap: 20 }}>
           {/* left column */}
           <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+            <div className="rel-driver-tiles" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
               <Tile dark label="Today" value={formatRWF(s.earningsToday)} />
               <Tile label="Trips" value={String(s.tripsToday)} />
               <Tile label="Online" value={`${s.onlineHours}h`} />

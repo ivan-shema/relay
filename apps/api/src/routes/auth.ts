@@ -7,7 +7,6 @@ import {
   verifyOtpSchema,
   forgotSchema,
   resetSchema,
-  applyOperatorSchema,
 } from "@relay/shared";
 import { prisma } from "../prisma";
 import { env } from "../env";
@@ -20,7 +19,6 @@ import {
   verifyRefreshToken,
 } from "../lib/auth";
 import { requireAuth } from "../middleware/auth";
-import { upload, requireFile } from "../lib/uploads";
 
 export const authRouter = Router();
 
@@ -92,78 +90,6 @@ authRouter.post(
         passwordHash: await hashPassword(data.password),
         role: "PASSENGER",
       },
-    });
-
-    await issueOtp(user.id, "VERIFY_PHONE");
-
-    const tokens = issueTokens(user);
-    const body: AuthResponse = { ...tokens, user: toAuthUser(user) };
-    res.status(201).json({ ...body, requiresVerification: true });
-  })
-);
-
-// Operator/partner application (multipart): account + company details + KYC
-// documents (applicant ID/passport + RDB business certificate). Creates the
-// company as PENDING — an admin must approve it before console access.
-authRouter.post(
-  "/apply-operator",
-  upload.fields([
-    { name: "idDocument", maxCount: 1 },
-    { name: "businessCertificate", maxCount: 1 },
-  ]),
-  asyncHandler(async (req, res) => {
-    const data = applyOperatorSchema.parse(req.body);
-    const idDocument = requireFile(req, "idDocument");
-    const businessCertificate = requireFile(req, "businessCertificate");
-
-    const existing = await prisma.user.findFirst({
-      where: { OR: [{ email: data.email }, { phone: data.phone }] },
-    });
-    if (existing) throw new HttpError(409, "Email or phone already registered");
-
-    const passwordHash = await hashPassword(data.password);
-    const user = await prisma.$transaction(async (tx) => {
-      const u = await tx.user.create({
-        data: {
-          firstName: data.firstName,
-          lastName: data.lastName,
-          email: data.email,
-          phone: data.phone,
-          passwordHash,
-          role: "OPERATOR",
-        },
-      });
-      const operator = await tx.operator.create({
-        data: {
-          companyName: data.companyName,
-          contactInfo: data.contactInfo,
-          idNumber: data.idNumber,
-          modes: data.modes,
-          status: "PENDING",
-          ownerUserId: u.id,
-        },
-      });
-      await tx.document.createMany({
-        data: [
-          {
-            kind: "NATIONAL_ID",
-            fileName: idDocument.originalname,
-            filePath: idDocument.filename,
-            mimeType: idDocument.mimetype,
-            size: idDocument.size,
-            operatorId: operator.id,
-          },
-          {
-            kind: "BUSINESS_CERTIFICATE",
-            fileName: businessCertificate.originalname,
-            filePath: businessCertificate.filename,
-            mimeType: businessCertificate.mimetype,
-            size: businessCertificate.size,
-            operatorId: operator.id,
-          },
-        ],
-      });
-      return u;
     });
 
     await issueOtp(user.id, "VERIFY_PHONE");

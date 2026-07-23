@@ -32,15 +32,12 @@ const modesField = z
   .transform((m) => (Array.isArray(m) ? m : [m]))
   .pipe(z.array(modeEnum).min(1, "Select at least one mode"));
 
-// Operator/partner application — creates a PENDING company that an admin must
-// approve. Text fields only; the ID document + RDB business certificate files
+// Operator onboarding — submitted by an already-authenticated passenger from
+// their dashboard. Creates a PENDING company that an admin must approve; the
+// user stays a PASSENGER until approval. Account fields are NOT collected here
+// (the user already exists). The ID document + RDB business certificate files
 // are validated server-side (PDF/JPEG/PNG/WebP, no GIFs).
-export const applyOperatorSchema = z.object({
-  firstName: z.string().min(2, "Enter your first name"),
-  lastName: z.string().min(2, "Enter your last name"),
-  email: z.string().email("Enter a valid email"),
-  phone: z.string().min(6, "Enter a valid phone number"),
-  password: z.string().min(8, "At least 8 characters"),
+export const operatorOnboardingSchema = z.object({
   companyName: z.string().min(2, "Enter your company name"),
   contactInfo: z.string().min(6, "Enter a company contact phone or email"),
   idNumber: z.string().min(5, "Enter your ID or passport number"),
@@ -167,7 +164,7 @@ export const savedPlaceSchema = z.object({
 /* Inferred types (LoginInput/RegisterInput live in dto.ts to avoid a clash;
    infer inline in components via z.infer<typeof loginSchema> when needed). */
 export type NewPasswordInput = z.infer<typeof newPasswordSchema>;
-export type ApplyOperatorInput = z.infer<typeof applyOperatorSchema>;
+export type OperatorOnboardingInput = z.infer<typeof operatorOnboardingSchema>;
 export type CreateVehicleInput = z.infer<typeof createVehicleSchema>;
 export type InviteDriverInput = z.infer<typeof inviteDriverSchema>;
 export type CreateUserInput = z.infer<typeof createUserSchema>;

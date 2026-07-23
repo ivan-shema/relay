@@ -10,16 +10,24 @@ import type {
   TripSummary,
 } from "@relay/shared";
 import { QRCodeSVG } from "qrcode.react";
-import { formatRWF, topUpSchema, savedPlaceSchema, type TopUpInput, type SavedPlaceInput } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type NotificationList, type MeStats } from "@/lib/api";
+import { useForm, type UseFormRegisterReturn } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import type { z } from "zod";
+import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, type TopUpInput, type SavedPlaceInput, type TransportMode } from "@relay/shared";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
+import { NotificationBell } from "@/components/notification-bell";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
 type PlanScreen = "home" | "search" | "available" | "planAhead" | "pay" | "track" | "done";
 type Tab = "plan" | "trips" | "wallet" | "you";
+
+// Operator application status for the current passenger: undefined = still
+// loading, null = never applied, object = has an application on file.
+type OperatorStatus = { status: string; companyName: string } | null | undefined;
 
 const PAY_METHODS: { method: PaymentMethod; name: string; sub: string; glyph: string; gbg: string; gink: string }[] = [
   { method: "MOBILE_MONEY", name: "MTN MoMo", sub: "•••• 4821", glyph: "M", gbg: "#ffd400", gink: "#1b1714" },
@@ -37,6 +45,16 @@ export default function PassengerApp() {
 
   const [tab, setTab] = useState<Tab>("plan");
   const [screen, setScreen] = useState<PlanScreen>("home");
+  const [onboardOpen, setOnboardOpen] = useState(false);
+  const [operatorStatus, setOperatorStatus] = useState<OperatorStatus>(undefined);
+
+  const loadOperatorStatus = useCallback(() => {
+    api.operatorApplication().then(setOperatorStatus).catch(() => setOperatorStatus(null));
+  }, []);
+
+  useEffect(() => {
+    if (user) loadOperatorStatus();
+  }, [user, loadOperatorStatus]);
 
   const [origin, setOrigin] = useState("Kabeza");
   const [dest, setDest] = useState("Central Market");
@@ -131,6 +149,18 @@ export default function PassengerApp() {
 
   if (loading || !user) return null;
 
+  // Operator onboarding takes over the whole screen — its own full page.
+  if (onboardOpen) {
+    return (
+      <OperatorOnboarding
+        onClose={(applied) => {
+          setOnboardOpen(false);
+          if (applied) loadOperatorStatus();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="pax-shell">
       <PassengerSidebar
@@ -142,6 +172,9 @@ export default function PassengerApp() {
         }}
       />
       <main className="pax-main">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", marginBottom: 18 }}>
+          <NotificationBell />
+        </div>
         {error && (
           <div className="rel-narrow" style={{ background: "#fff0e6", border: "1px solid #ffd9c2", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 18 }}>
             {error}
@@ -155,6 +188,8 @@ export default function PassengerApp() {
               dest={dest}
               walletBalance={user?.walletBalance ?? null}
               busy={busy}
+              operatorStatus={operatorStatus}
+              onApplyOperator={() => setOnboardOpen(true)}
               onSearch={() => setScreen("search")}
               onSeeTrips={goAvailable}
               onPlanAhead={() => setScreen("planAhead")}
@@ -189,7 +224,7 @@ export default function PassengerApp() {
 
         {tab === "trips" && <div className="rel-mid"><TripsTab /></div>}
         {tab === "wallet" && <div className="rel-mid"><WalletTab /></div>}
-        {tab === "you" && <div className="rel-mid"><YouTab /></div>}
+        {tab === "you" && <div className="rel-mid"><YouTab operatorStatus={operatorStatus} onApplyOperator={() => setOnboardOpen(true)} /></div>}
       </main>
     </div>
   );
@@ -207,6 +242,8 @@ function HomeScreen({
   dest,
   walletBalance,
   busy,
+  operatorStatus,
+  onApplyOperator,
   onSearch,
   onSeeTrips,
   onPlanAhead,
@@ -216,6 +253,8 @@ function HomeScreen({
   dest: string;
   walletBalance: number | null;
   busy: boolean;
+  operatorStatus: OperatorStatus;
+  onApplyOperator: () => void;
   onSearch: () => void;
   onSeeTrips: () => void;
   onPlanAhead: () => void;
@@ -327,6 +366,8 @@ function HomeScreen({
               </div>
             </>
           )}
+
+          <OperatorHomeCard status={operatorStatus} onApply={onApplyOperator} />
         </div>
 
         {/* RIGHT — live-trips rail */}
@@ -951,91 +992,352 @@ function PayMethodRow({ glyph, bg, ink, name, sub, badge }: { glyph: string; bg:
 }
 
 /* ============ YOU TAB ============ */
-type YouView = "menu" | "notifications" | "saved" | "wallet";
+type YouView = "menu" | "saved" | "wallet";
 
-function YouTab() {
+const PROFILE_MENU: { label: string; sub: string; icon: string; color: string; bg: string; view?: YouView }[] = [
+  { label: "Saved places", sub: "Home, work & favourites", icon: "⌂", color: "#2f6bff", bg: "#e9f0ff", view: "saved" },
+  { label: "Payment & wallet", sub: "Top up & payment methods", icon: "◈", color: "#1f9d6b", bg: "#e7f6ee", view: "wallet" },
+  { label: "Settings", sub: "Preferences & privacy", icon: "⚙", color: "#7c5cff", bg: "#efeaff" },
+];
+
+function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorStatus; onApplyOperator: () => void }) {
   const { user, signOut } = useAuth();
   const router = useRouter();
   const [view, setView] = useState<YouView>("menu");
   const [stats, setStats] = useState<MeStats | null>(null);
-  const [unread, setUnread] = useState(0);
 
   useEffect(() => {
     api.meStats().then(setStats).catch(() => undefined);
-    api.notifications().then((n) => setUnread(n.unread)).catch(() => undefined);
   }, []);
 
-  if (view === "notifications") return <NotificationsView onBack={() => { setView("menu"); api.notifications().then((n) => setUnread(n.unread)).catch(() => undefined); }} />;
   if (view === "saved") return <SavedPlacesView onBack={() => setView("menu")} />;
   if (view === "wallet") return <div className="rel-up"><ScreenHeader onBack={() => setView("menu")} title="Payment & wallet" /><WalletTab /></div>;
 
-  const menu: { label: string; icon: string; view?: YouView; badge?: number }[] = [
-    { label: "Saved places", icon: "⌂", view: "saved" },
-    { label: "Notifications", icon: "◔", view: "notifications", badge: unread },
-    { label: "Payment & wallet", icon: "◈", view: "wallet" },
-    { label: "Settings", icon: "⚙" },
-  ];
+  const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "?";
 
   return (
-    <div style={{ padding: "14px 22px 28px" }} className="rel-up">
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "14px 0 20px" }}>
-        <div style={{ width: 74, height: 74, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", marginBottom: 12 }} />
-        <div style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 700 }}>{user ? `${user.firstName} ${user.lastName}` : "Guest"}</div>
-        <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>{user?.phone ?? "Not signed in"} · ★ {stats?.rating.toFixed(1) ?? "4.8"} rider</div>
-      </div>
-      <div style={{ display: "flex", gap: 11, marginBottom: 18 }}>
-        <Stat big={stats ? String(stats.trips) : "—"} label="Trips" />
-        <Stat big={stats ? `${stats.co2SavedKg}kg` : "—"} label="CO₂ saved" />
-        <Stat big={stats ? `${stats.memberYears}y` : "—"} label="Member" />
-      </div>
-      <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, overflow: "hidden" }}>
-        {menu.map((it, i, a) => (
-          <button key={it.label} onClick={() => it.view && setView(it.view)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "15px 16px", border: "none", borderBottom: i < a.length - 1 ? "1px solid #f1ece2" : "none", fontSize: 14, fontWeight: 600, background: "none", cursor: "pointer", textAlign: "left" }}>
-            <span style={{ width: 26, textAlign: "center" }}>{it.icon}</span>{it.label}
-            <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-              {it.badge ? <span style={{ background: "#ff6a1a", color: "#fff", fontSize: 10, fontWeight: 800, borderRadius: 20, padding: "1px 7px" }}>{it.badge}</span> : null}
-              <span style={{ color: "#cbc3b6" }}>›</span>
+    <div style={{ maxWidth: 880, margin: "0 auto", padding: "0 4px 28px" }} className="rel-up">
+      <div style={{ fontFamily: DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: "-.7px", marginBottom: 18 }}>Profile</div>
+
+      <div className="pax-profile-grid">
+        {/* LEFT — summary rail */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: "24px 20px", textAlign: "center" }}>
+            <div style={{ width: 76, height: 76, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, color: "#fff", margin: "0 auto 14px", boxShadow: "0 12px 26px -12px rgba(224,86,12,.8)" }}>{initials}</div>
+            <div style={{ fontFamily: DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: "-.3px" }}>{user ? `${user.firstName} ${user.lastName}` : "Guest"}</div>
+            <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.email ?? "Not signed in"}</div>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#fff0e6", borderRadius: 20, padding: "5px 12px", marginTop: 12 }}>
+              <span style={{ color: "#ff6a1a", fontSize: 12 }}>★</span>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a" }}>{stats?.rating.toFixed(1) ?? "4.8"} rider</span>
             </span>
-          </button>
-        ))}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <ActivityStat big={stats ? String(stats.trips) : "—"} label="Trips" />
+            <ActivityStat big={stats ? `${stats.co2SavedKg}kg` : "—"} label="CO₂ saved" />
+            <ActivityStat big={stats ? `${stats.memberYears}y` : "—"} label="Member" />
+          </div>
+        </div>
+
+        {/* RIGHT — account + preferences */}
+        <div>
+          <SectionHeading first>Account information</SectionHeading>
+          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, overflow: "hidden" }}>
+            <InfoField label="Full name" value={user ? `${user.firstName} ${user.lastName}` : "—"} />
+            <InfoField label="Email" value={user?.email ?? "—"} />
+            <InfoField label="Phone" value={user?.phone ?? "—"} mono />
+            <InfoField label="Member since" value={stats ? `${stats.memberYears} year${stats.memberYears === 1 ? "" : "s"}` : "—"} last />
+          </div>
+
+          <SectionHeading>Preferences</SectionHeading>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {PROFILE_MENU.map((it) => (
+              <button key={it.label} onClick={() => it.view && setView(it.view)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, cursor: "pointer", textAlign: "left" }}>
+                <span style={{ width: 40, height: 40, borderRadius: 12, background: it.bg, color: it.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flex: "none" }}>{it.icon}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 14.5, fontWeight: 700 }}>{it.label}</span>
+                  <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 1 }}>{it.sub}</span>
+                </span>
+                <span style={{ color: "#cbc3b6", fontSize: 18, flex: "none" }}>›</span>
+              </button>
+            ))}
+          </div>
+
+          <OperatorProfileRow status={operatorStatus} onApply={onApplyOperator} />
+        </div>
       </div>
-      <button onClick={() => { signOut(); router.push("/"); }} style={{ width: "100%", marginTop: 16, background: "#fff", border: "1px solid #f0d4cc", borderRadius: 14, padding: 15, fontSize: 14, fontWeight: 700, color: "#c2553f", cursor: "pointer" }}>Sign out</button>
+
+      {/* mobile keeps a sign-out here since the sidebar footer is desktop-only */}
+      <button className="pax-mobile-only" onClick={() => { signOut(); router.push("/"); }} style={{ width: "100%", marginTop: 16, background: "#fff", border: "1px solid #f0d4cc", borderRadius: 14, padding: 15, fontSize: 14, fontWeight: 700, color: "#c2553f", cursor: "pointer" }}>Sign out</button>
     </div>
   );
 }
 
-function NotificationsView({ onBack }: { onBack: () => void }) {
-  const [data, setData] = useState<NotificationList | null>(null);
-  const [page, setPage] = useState(1);
-  const load = useCallback(() => { api.notifications(page).then(setData).catch(() => undefined); }, [page]);
-  useEffect(() => { load(); }, [load]);
+function SectionHeading({ children, first }: { children: React.ReactNode; first?: boolean }) {
+  return <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em", margin: first ? "0 0 10px 2px" : "22px 0 10px 2px" }}>{children}</div>;
+}
 
-  const readAll = async () => { await api.markAllNotificationsRead(); load(); };
-  const readOne = async (id: string) => { await api.markNotificationRead(id); load(); };
+function InfoField({ label, value, mono, last }: { label: string; value: string; mono?: boolean; last?: boolean }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "14px 16px", borderBottom: last ? "none" : "1px solid #f1ece2" }}>
+      <span style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, flex: "none" }}>{label}</span>
+      <span style={{ fontSize: 13.5, fontWeight: 700, textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: mono ? MONO : undefined }}>{value}</span>
+    </div>
+  );
+}
+
+function ActivityStat({ big, label }: { big: string; label: string }) {
+  return (
+    <div style={{ flex: 1, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 14, padding: "15px 12px", textAlign: "center" }}>
+      <div style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.3px" }}>{big}</div>
+      <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>{label}</div>
+    </div>
+  );
+}
+
+/* ============ OPERATOR ONBOARDING ============ */
+
+// Shared status text for the two operator entry points (Home card + Profile row).
+// Returns null while the status is still loading so nothing flashes in.
+function operatorCtaCopy(status: OperatorStatus): { title: string; body: string; actionable: boolean } | null {
+  if (status === undefined) return null;
+  if (!status) return { title: "Run a transport business?", body: "Put your fleet on Relay and reach every rider on your route.", actionable: true };
+  if (status.status === "PENDING") return { title: "Operator application under review", body: "Our team is verifying your documents. We'll let you know once you're approved.", actionable: false };
+  if (status.status === "SUSPENDED") return { title: "Application not approved", body: "Your operator application wasn't approved. Contact support if you think this is a mistake.", actionable: false };
+  return null; // VERIFIED — the account is already an operator, handled elsewhere
+}
+
+function OperatorHomeCard({ status, onApply }: { status: OperatorStatus; onApply: () => void }) {
+  const copy = operatorCtaCopy(status);
+  if (!copy) return null;
+  return (
+    <div style={{ background: "#1b1714", borderRadius: 20, padding: 20, marginTop: 26, position: "relative", overflow: "hidden" }}>
+      <div style={{ position: "absolute", right: -70, top: -70, width: 200, height: 200, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.22),transparent 68%)" }} />
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "#ff6a1a", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>For operators</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 700, color: "#fff", letterSpacing: "-.3px", marginBottom: 6 }}>{copy.title}</div>
+        <p style={{ fontSize: 13, lineHeight: 1.55, color: "#cfc7bb", margin: "0 0 14px" }}>{copy.body}</p>
+        {copy.actionable ? (
+          <button onClick={onApply} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Become an operator →</button>
+        ) : (
+          <span style={{ display: "inline-block", background: "rgba(255,106,26,.16)", color: "#ff6a1a", borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" }}>
+            {status && status.status === "PENDING" ? "Pending review" : "Not approved"}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OperatorProfileRow({ status, onApply }: { status: OperatorStatus; onApply: () => void }) {
+  const copy = operatorCtaCopy(status);
+  if (!copy) return null;
+  return (
+    <button
+      onClick={copy.actionable ? onApply : undefined}
+      style={{ width: "100%", marginTop: 16, display: "flex", alignItems: "center", gap: 13, padding: "15px 16px", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, fontSize: 14, fontWeight: 600, cursor: copy.actionable ? "pointer" : "default", textAlign: "left" }}
+    >
+      <span style={{ width: 32, height: 32, borderRadius: 9, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flex: "none" }}>▤</span>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: "block", fontWeight: 700 }}>{copy.actionable ? "Become an operator" : copy.title}</span>
+        <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>{copy.actionable ? "Apply to run your fleet on Relay" : copy.body}</span>
+      </span>
+      {copy.actionable
+        ? <span style={{ color: "#cbc3b6", flex: "none" }}>›</span>
+        : <span style={{ fontSize: 10.5, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 7, padding: "4px 8px", textTransform: "uppercase", flex: "none" }}>{status && status.status === "PENDING" ? "Review" : "—"}</span>}
+    </button>
+  );
+}
+
+const ONBOARD_MODES: { value: TransportMode; label: string }[] = [
+  { value: "BUS", label: "Buses" },
+  { value: "MOTO", label: "Moto-taxis" },
+  { value: "RIDE", label: "Shared rides" },
+];
+
+// Full-page operator onboarding for a signed-in passenger: company details + KYC
+// documents (with live previews). Creates a PENDING application; the account
+// stays a passenger until an admin approves.
+function OperatorOnboarding({ onClose }: { onClose: (applied: boolean) => void }) {
+  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof operatorOnboardingSchema>>({
+    resolver: zodResolver(operatorOnboardingSchema),
+    defaultValues: { companyName: "", contactInfo: "", idNumber: "", modes: [] },
+  });
+  const modes = watch("modes") ?? [];
+  const [idDocument, setIdDocument] = useState<File | null>(null);
+  const [businessCertificate, setBusinessCertificate] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+
+  const toggleMode = (m: TransportMode) => {
+    const next = modes.includes(m) ? modes.filter((x) => x !== m) : [...modes, m];
+    setValue("modes", next, { shouldValidate: true });
+  };
+
+  const submit = handleSubmit(async (v) => {
+    if (!idDocument || !businessCertificate) {
+      setFileError("Upload your ID document and RDB business certificate (PDF or image, no GIFs).");
+      return;
+    }
+    setFileError(null);
+    try {
+      const fd = new FormData();
+      fd.append("companyName", v.companyName);
+      fd.append("contactInfo", v.contactInfo);
+      fd.append("idNumber", v.idNumber);
+      for (const m of v.modes) fd.append("modes", m);
+      fd.append("idDocument", idDocument);
+      fd.append("businessCertificate", businessCertificate);
+      await api.applyOperator(fd);
+      setSubmitted(true);
+    } catch (e) {
+      setError("root", { message: e instanceof ApiError ? e.message : "Could not submit application" });
+    }
+  });
 
   return (
-    <div style={{ padding: "14px 22px 28px" }} className="rel-up">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-        <ScreenHeader onBack={onBack} title="Notifications" />
-        {data && data.unread > 0 && <button onClick={readAll} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Mark all read</button>}
+    <div style={{ minHeight: "100vh", background: "#f4f1ea", backgroundImage: "radial-gradient(circle at 1px 1px,rgba(27,23,20,.04) 1px,transparent 0)", backgroundSize: "22px 22px" }}>
+      {/* top bar */}
+      <div style={{ position: "sticky", top: 0, zIndex: 20, background: "rgba(244,241,234,.82)", backdropFilter: "blur(12px)", borderBottom: "1px solid #e9e3d8" }}>
+        <div style={{ maxWidth: 720, margin: "0 auto", padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+          <button onClick={() => onClose(submitted)} style={{ display: "flex", alignItems: "center", gap: 9, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "9px 15px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>← Back to app</button>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8c8378" }}>Operator onboarding</div>
+        </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {data && data.items.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No notifications yet.</div>}
-        {data?.items.map((n) => (
-          <button key={n.id} onClick={() => !n.read && readOne(n.id)} style={{ textAlign: "left", display: "flex", gap: 12, background: n.read ? "#fff" : "#fff6f0", border: `1px solid ${n.read ? "#e9e3d8" : "#ffd9c2"}`, borderRadius: 14, padding: 14, cursor: "pointer" }}>
-            <div style={{ width: 38, height: 38, borderRadius: 11, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flex: "none" }}>◔</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                <span style={{ fontSize: 14, fontWeight: 700 }}>{n.title}</span>
-                {!n.read && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#ff6a1a" }} />}
+
+      <div style={{ maxWidth: 720, margin: "0 auto", padding: "28px 24px 60px" }} className="rel-up">
+        {submitted ? (
+          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 22, padding: 40, textAlign: "center" }}>
+            <div style={{ width: 60, height: 60, borderRadius: 16, background: "#e7f6ee", color: "#1f9d6b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, margin: "0 auto 18px" }}>✓</div>
+            <div style={{ fontFamily: DISPLAY, fontSize: 24, fontWeight: 700, letterSpacing: "-.5px", marginBottom: 10 }}>Application submitted</div>
+            <p style={{ fontSize: 14.5, lineHeight: 1.6, color: "#6b6258", margin: "0 auto 22px", maxWidth: 420 }}>
+              Thanks! Our team will verify your ID and business certificate. You&apos;ll keep using Relay as a passenger, and we&apos;ll unlock your operator console as soon as you&apos;re approved.
+            </p>
+            <button onClick={() => onClose(true)} style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 13, padding: "14px 26px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Back to app</button>
+          </div>
+        ) : (
+          <form onSubmit={submit} noValidate>
+            <div style={{ fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, letterSpacing: "-.7px" }}>Become an operator</div>
+            <p style={{ fontSize: 14, color: "#8c8378", fontWeight: 600, margin: "6px 0 24px" }}>Tell us about your business — our team reviews every application before your console unlocks.</p>
+
+            {errors.root?.message && (
+              <div style={{ background: "#fff0e6", border: "1px solid #ffd9c2", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{errors.root.message}</div>
+            )}
+
+            <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 22, marginBottom: 16 }}>
+              <OnboardLabel>Company name</OnboardLabel>
+              <OnboardInput reg={register("companyName")} error={errors.companyName?.message} placeholder="Kigali Bus Co." />
+              <div style={{ height: 14 }} />
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <OnboardLabel>Company contact</OnboardLabel>
+                  <OnboardInput reg={register("contactInfo")} error={errors.contactInfo?.message} placeholder="+250 78 000 0042" mono />
+                </div>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <OnboardLabel>ID / passport number</OnboardLabel>
+                  <OnboardInput reg={register("idNumber")} error={errors.idNumber?.message} placeholder="1199…" mono />
+                </div>
               </div>
-              <div style={{ fontSize: 12.5, color: "#6b6258", lineHeight: 1.4, marginTop: 2 }}>{n.body}</div>
+              <div style={{ height: 14 }} />
+              <OnboardLabel>Modes you operate</OnboardLabel>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {ONBOARD_MODES.map((m) => {
+                  const active = modes.includes(m.value);
+                  return (
+                    <button key={m.value} type="button" onClick={() => toggleMode(m.value)} style={{ flex: 1, minWidth: 100, padding: "11px 6px", borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", border: active ? "1px solid #ff6a1a" : "1px solid #e3ddd1", background: active ? "#fff6f0" : "#fff", color: active ? "#ff6a1a" : "#6b6258" }}>{m.label}</button>
+                  );
+                })}
+              </div>
+              {errors.modes && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginTop: 8 }}>{errors.modes.message as string}</div>}
             </div>
-            <div style={{ fontSize: 11.5, color: "#a39a8d", fontFamily: MONO, flex: "none" }}>{fmtDate(n.time)}</div>
-          </button>
-        ))}
+
+            <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 22, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 4 }}>Verification documents</div>
+              <p style={{ fontSize: 12.5, color: "#a39a8d", fontWeight: 600, margin: "0 0 16px" }}>PDF, JPG, PNG or WebP · max 5 MB per file</p>
+              <FilePreview label="ID / passport document" file={idDocument} onPick={setIdDocument} />
+              <div style={{ height: 14 }} />
+              <FilePreview label="RDB business certificate" file={businessCertificate} onPick={setBusinessCertificate} />
+              {fileError && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginTop: 12 }}>{fileError}</div>}
+            </div>
+
+            <button type="submit" disabled={isSubmitting} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: 15, fontSize: 15, fontWeight: 700, cursor: isSubmitting ? "default" : "pointer", opacity: isSubmitting ? 0.7 : 1, boxShadow: "0 12px 26px -10px rgba(255,106,26,.7)", fontFamily: "'Manrope', sans-serif" }}>
+              {isSubmitting ? "Submitting…" : "Submit application"}
+            </button>
+          </form>
+        )}
       </div>
-      {data && <Pagination page={page} totalPages={data.totalPages} total={data.total} onPage={setPage} />}
+    </div>
+  );
+}
+
+function OnboardLabel({ children }: { children: React.ReactNode }) {
+  return <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 7 }}>{children}</div>;
+}
+
+function OnboardInput({ reg, error, placeholder, mono }: { reg: UseFormRegisterReturn; error?: string; placeholder?: string; mono?: boolean }) {
+  return (
+    <div>
+      <input {...reg} placeholder={placeholder} style={{ width: "100%", border: `1px solid ${error ? "#e0a99a" : "#e3ddd1"}`, borderRadius: 13, padding: "13px 15px", fontSize: 14, fontWeight: 600, color: "#1b1714", outline: "none", background: "#fff", fontFamily: mono ? MONO : "'Manrope', sans-serif" }} />
+      {error && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginTop: 6 }}>{error}</div>}
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Upload input WITH a live preview: image thumbnail for images, a document card
+// for PDFs. Manages the object-URL lifecycle so previews don't leak.
+function FilePreview({ label, file, onPick }: { label: string; file: File | null; onPick: (f: File | null) => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!file || !file.type.startsWith("image/")) { setUrl(null); return; }
+    const u = URL.createObjectURL(file);
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [file]);
+
+  const accept = ".pdf,.jpg,.jpeg,.png,.webp";
+
+  if (!file) {
+    return (
+      <label style={{ display: "flex", alignItems: "center", gap: 12, border: "1px dashed #cbc3b6", borderRadius: 14, padding: "14px 16px", cursor: "pointer", background: "#faf8f4" }}>
+        <span style={{ width: 34, height: 34, borderRadius: 9, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flex: "none" }}>⇧</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, color: "#1b1714" }}>{label}</span>
+          <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600 }}>Tap to upload — PDF or image</span>
+        </span>
+        <input type="file" accept={accept} style={{ display: "none" }} onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
+      </label>
+    );
+  }
+
+  const isImage = file.type.startsWith("image/");
+
+  return (
+    <div style={{ border: "1px solid #e9e3d8", borderRadius: 14, overflow: "hidden", background: "#fff" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 13, padding: 12 }}>
+        <div style={{ width: 56, height: 56, borderRadius: 10, flex: "none", overflow: "hidden", background: "#f4f1ea", display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid #ece6db" }}>
+          {isImage && url
+            ? <img src={url} alt={file.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            : <span style={{ fontSize: 10, fontWeight: 800, color: "#c2553f", letterSpacing: ".04em" }}>PDF</span>}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 3 }}>{label}</div>
+          <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</div>
+          <div style={{ fontSize: 11.5, color: "#a39a8d", fontWeight: 600, fontFamily: MONO }}>{formatBytes(file.size)}</div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: "none" }}>
+          <label style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 9, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, color: "#1b1714", cursor: "pointer", textAlign: "center", fontFamily: "'Manrope', sans-serif" }}>
+            Replace
+            <input type="file" accept={accept} style={{ display: "none" }} onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
+          </label>
+          <button type="button" onClick={() => onPick(null)} style={{ background: "none", border: "1px solid #f0d4cc", borderRadius: 9, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, color: "#c2553f", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Remove</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1075,15 +1377,6 @@ function SavedPlacesView({ onBack }: { onBack: () => void }) {
         ))}
       </div>
       <button onClick={() => setShowAdd(true)} style={{ width: "100%", background: "#fff", border: "1px dashed #cbc3b6", borderRadius: 14, padding: 14, fontSize: 13.5, fontWeight: 700, color: "#8c8378", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>+ Add a place</button>
-    </div>
-  );
-}
-
-function Stat({ big, label }: { big: string; label: string }) {
-  return (
-    <div style={{ flex: 1, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 14, padding: 14, textAlign: "center" }}>
-      <div style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 700 }}>{big}</div>
-      <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600 }}>{label}</div>
     </div>
   );
 }
@@ -1149,16 +1442,26 @@ function PassengerSidebar({ tab, walletBalance, onChange }: { tab: Tab; walletBa
         })}
       </nav>
 
-      <div className="pax-only-desktop" style={{ marginTop: "auto" }}>
+      <div className="pax-only-desktop" style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
         {user ? (
-          <div style={{ background: "#2a2520", borderRadius: 12, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700 }}>{`${user.firstName} ${user.lastName}`}</div>
-              <div style={{ fontSize: 10.5, color: "#9a9186" }}>Passenger</div>
+          <>
+            <div style={{ background: "#2a2520", borderRadius: 12, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12.5, fontWeight: 800, color: "#fff", flex: "none" }}>
+                {`${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{`${user.firstName} ${user.lastName}`}</div>
+                <div style={{ fontSize: 10.5, color: "#9a9186" }}>Passenger</div>
+              </div>
             </div>
-            <button onClick={() => { signOut(); router.push("/"); }} title="Sign out" style={{ background: "none", border: "none", color: "#9a9186", cursor: "pointer", fontSize: 15 }}>⎋</button>
-          </div>
+            <button
+              onClick={() => { signOut(); router.push("/"); }}
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", background: "transparent", border: "1px solid #3a332c", borderRadius: 12, padding: "11px", fontSize: 13, fontWeight: 700, color: "#e0876b", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></svg>
+              Sign out
+            </button>
+          </>
         ) : (
           <button onClick={() => router.push("/auth?mode=login")} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: "12px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Sign in</button>
         )}
