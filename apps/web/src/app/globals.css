@@ -152,6 +152,27 @@ button {
   .pax-main {
     padding: 20px 18px 64px;
   }
+  .pax-mobile-only {
+    display: block !important;
+  }
+}
+
+/* shown only where the desktop sidebar footer is hidden (mobile) */
+.pax-mobile-only {
+  display: none;
+}
+
+/* profile: summary rail on the left, account + preferences on the right */
+.pax-profile-grid {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 18px;
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .pax-profile-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* passenger home: search/planned on the left, live-trips rail on the right */
@@ -206,9 +227,152 @@ button {
   }
 }
 
+/* driver console stat tiles: 4-up on desktop, 2-up on narrow screens */
+@media (max-width: 480px) {
+  .rel-driver-tiles {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
 /* console two-column blocks collapse on narrow screens (override inline grid) */
 @media (max-width: 900px) {
   .op-two {
     grid-template-columns: 1fr !important;
+  }
+}
+
+/* admin/operator console shell — boxed dark-sidebar card, collapses to a
+   horizontal top strip on narrow screens (same technique as .pax-shell). */
+.rel-console-shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid #e3ddd1;
+  border-radius: 20px;
+  overflow: hidden;
+  display: flex;
+  box-shadow: 0 30px 70px -34px rgba(27, 23, 20, 0.4);
+  min-height: 720px;
+}
+.rel-console-side {
+  width: 236px;
+  flex: none;
+  background: #1b1714;
+  color: #fff;
+  padding: 22px 16px;
+  display: flex;
+  flex-direction: column;
+}
+.rel-console-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rel-console-main {
+  flex: 1;
+  min-width: 0;
+  padding: 26px 30px;
+  background: #faf8f4;
+  overflow-x: auto;
+}
+@media (max-width: 860px) {
+  .rel-console-shell {
+    flex-direction: column;
+    min-height: auto !important;
+    border-radius: 14px !important;
+  }
+  .rel-console-side {
+    width: auto !important;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px !important;
+    overflow-x: auto;
+  }
+  .rel-console-nav {
+    flex-direction: row;
+  }
+  .rel-console-only-desktop {
+    display: none !important;
+  }
+  .rel-console-account {
+    margin-top: 0 !important;
+  }
+  .rel-console-main {
+    padding: 18px 16px 48px !important;
+  }
+}
+@media (max-width: 600px) {
+  .rel-console-shell {
+    border-left: none;
+    border-right: none;
+    border-radius: 0 !important;
+  }
+}
+
+/* page wrapper around the console shell */
+.rel-console-page {
+  padding: 28px 24px 80px;
+}
+@media (max-width: 600px) {
+  .rel-console-page {
+    padding: 16px 0 60px;
+  }
+}
+
+/* ---- auth card: brand rail + form, brand rail hidden on narrow screens ---- */
+@media (max-width: 760px) {
+  .rel-auth-page {
+    padding: 16px !important;
+  }
+  .rel-auth-card {
+    min-height: auto !important;
+  }
+  .rel-auth-brand {
+    display: none !important;
+  }
+  .rel-auth-form {
+    padding: 30px 22px !important;
+  }
+}
+
+/* ---- marketing landing page ---- */
+@media (max-width: 900px) {
+  .rel-footer-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
+@media (max-width: 700px) {
+  .rel-landing .rel-header-inner,
+  .rel-landing section,
+  .rel-landing footer > div {
+    padding-left: 18px !important;
+    padding-right: 18px !important;
+  }
+  .rel-hero-grid,
+  .rel-split-grid-rev,
+  .rel-grid-3,
+  .rel-grid-4,
+  .rel-grid-2,
+  .rel-footer-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .rel-hero-h1 {
+    font-size: 36px !important;
+  }
+  .rel-section-h2 {
+    font-size: 25px !important;
+  }
+  .rel-panel-40 {
+    padding: 22px !important;
+  }
+  .rel-op-banner {
+    padding: 26px !important;
+  }
+  .rel-cta-box {
+    padding: 28px 22px !important;
+  }
+  .rel-site-nav {
+    display: none !important;
   }
 }

@@ -99,9 +99,6 @@ export const api = {
     password: string;
   }) => request<RegisterResp>("/auth/register", { method: "POST", body }),
 
-  // operator/partner application (multipart: fields + ID doc + RDB certificate)
-  applyOperator: (formData: FormData) => requestMultipart<RegisterResp>("/auth/apply-operator", formData),
-
   login: (body: { identifier: string; password: string }) =>
     request<AuthResponse>("/auth/login", { method: "POST", body }),
 
@@ -171,6 +168,11 @@ export const api = {
   driverTrips: () => request<DriverTrip[]>("/driver/trips", { auth: true }),
 
   // ---- operator ----
+  // Onboarding — a signed-in passenger applies to become an operator (multipart:
+  // company fields + ID doc + RDB certificate). Stays a passenger until approved.
+  applyOperator: (formData: FormData) => requestMultipart<{ id: string; status: string }>("/operator/apply", formData, true),
+  // The caller's own application status, or null if they haven't applied.
+  operatorApplication: () => request<{ status: string; companyName: string } | null>("/operator/application", { auth: true }),
   operatorMe: () => request<{ id: string; companyName: string; modes: string[]; status: string; contactInfo: string }>("/operator/me", { auth: true }),
   operatorOverview: () => request<OperatorOverview>("/operator/overview", { auth: true }),
   operatorVehicles: (page?: number) => request<Paginated<OperatorVehicle>>(`/operator/vehicles${pageQuery(page)}`, { auth: true }),

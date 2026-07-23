@@ -6,20 +6,11 @@ import type { Place, TripSummary } from "@relay/shared";
 import { formatRWF } from "@relay/shared";
 import { api, ApiError } from "@/lib/api";
 import { useAuth, homePathForRole } from "@/lib/auth-context";
+import { SiteHeader } from "@/components/site-header";
+import { SiteFooter } from "@/components/site-footer";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
-
-function Logo() {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-      <div style={{ width: 32, height: 32, borderRadius: 10, background: "#1b1714", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff6a1a" }} />
-      </div>
-      <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 22, letterSpacing: "-.5px" }}>Relay</div>
-    </div>
-  );
-}
 
 function fmtTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -96,20 +87,8 @@ export default function BrowsePage() {
   const bookTrip = () => router.push("/auth?mode=login");
 
   return (
-    <div style={{ minHeight: "100vh" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24, padding: "20px 40px", maxWidth: 1180, margin: "0 auto" }}>
-        <button onClick={() => router.push("/")} style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-          <Logo />
-        </button>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <button onClick={() => router.push("/auth?mode=login")} style={{ background: "none", border: "none", fontSize: 14, fontWeight: 700, color: "#1b1714", cursor: "pointer", padding: "10px 14px" }}>
-            Sign in
-          </button>
-          <button onClick={() => router.push("/auth?mode=register")} style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 12, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-            Get started
-          </button>
-        </div>
-      </header>
+    <div className="rel-landing" style={{ minHeight: "100vh" }}>
+      <SiteHeader active="/browse" />
 
       <div className="rel-page rel-up">
         <div style={{ marginBottom: 22 }}>
@@ -206,6 +185,8 @@ export default function BrowsePage() {
           </button>
         </div>
       </div>
+
+      <SiteFooter />
     </div>
   );
 }

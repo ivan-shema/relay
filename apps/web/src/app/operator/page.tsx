@@ -29,6 +29,7 @@ import {
 } from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
 import { ConsoleShell, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, type NavItem } from "@/components/console";
+import { NotificationBell } from "@/components/notification-bell";
 
 const MONO = "'JetBrains Mono', monospace";
 
@@ -62,12 +63,7 @@ export default function OperatorConsole() {
   const [status, setStatus] = useState<string | null>(null);
   const [selectedDriver, setSelectedDriver] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (loading) return;
-    if (!user || (user.role !== "OPERATOR" && user.role !== "ADMIN")) {
-      router.replace("/auth?mode=login");
-      return;
-    }
+  const checkStatus = useCallback(() => {
     api
       .operatorMe()
       .then((o) => {
@@ -75,18 +71,27 @@ export default function OperatorConsole() {
         setStatus(o.status);
       })
       .catch(() => setStatus("ERROR"));
-  }, [user, loading, router]);
+  }, []);
+
+  useEffect(() => {
+    if (loading) return;
+    if (!user || (user.role !== "OPERATOR" && user.role !== "ADMIN")) {
+      router.replace("/auth?mode=login");
+      return;
+    }
+    checkStatus();
+  }, [user, loading, router, checkStatus]);
 
   if (!user || (user.role !== "OPERATOR" && user.role !== "ADMIN")) return null;
   // Only a VERIFIED company gets the console — pending applications see a
   // review screen, rejected ones a not-approved screen.
   if (status === null) return <OperatorStatusScreen kind="loading" company={company} />;
-  if (status === "PENDING") return <OperatorStatusScreen kind="pending" company={company} />;
+  if (status === "PENDING") return <OperatorStatusScreen kind="pending" company={company} onRefresh={checkStatus} />;
   if (status === "SUSPENDED") return <OperatorStatusScreen kind="rejected" company={company} />;
   if (status === "ERROR") return <OperatorStatusScreen kind="no-operator" company={company} isAdmin={user.role === "ADMIN"} />;
 
   return (
-    <div style={{ padding: "28px 24px 80px" }}>
+    <div className="rel-console-page">
       <ConsoleShell
         role="Operator"
         nav={NAV}
@@ -97,6 +102,7 @@ export default function OperatorConsole() {
         actions={<>
           <button style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "10px 15px", fontSize: 13, fontWeight: 700, fontFamily: "'Manrope', sans-serif", cursor: "pointer" }}>Last 24h ▾</button>
           <PrimaryButton>Export report</PrimaryButton>
+          <NotificationBell />
         </>}
       >
         {tab === "overview" && <OverviewTab />}
@@ -113,7 +119,7 @@ export default function OperatorConsole() {
 }
 
 // Non-console states: application pending / rejected / no linked company.
-function OperatorStatusScreen({ kind, company, isAdmin }: { kind: "loading" | "pending" | "rejected" | "no-operator"; company: string; isAdmin?: boolean }) {
+function OperatorStatusScreen({ kind, company, isAdmin, onRefresh }: { kind: "loading" | "pending" | "rejected" | "no-operator"; company: string; isAdmin?: boolean; onRefresh?: () => void }) {
   const router = useRouter();
   const { signOut } = useAuth();
   const DISPLAY = "'Space Grotesk', sans-serif";
@@ -147,6 +153,11 @@ function OperatorStatusScreen({ kind, company, isAdmin }: { kind: "loading" | "p
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      {kind === "pending" && (
+        <div style={{ position: "fixed", top: 24, right: 24, zIndex: 10 }}>
+          <NotificationBell />
+        </div>
+      )}
       <div style={{ width: "100%", maxWidth: 480, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 24, padding: "44px 40px", textAlign: "center", boxShadow: "0 40px 90px -40px rgba(27,23,20,.45)" }} className="rel-up">
         <div style={{ width: 64, height: 64, borderRadius: 18, background: content.bg, color: content.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, margin: "0 auto 20px" }} className={kind === "pending" ? "rel-pulse" : undefined}>
           {content.icon}
@@ -155,7 +166,9 @@ function OperatorStatusScreen({ kind, company, isAdmin }: { kind: "loading" | "p
         <p style={{ fontSize: 14, lineHeight: 1.6, color: "#6b6258", margin: "0 0 26px" }}>{content.body}</p>
         {kind !== "loading" && (
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-            {kind === "no-operator" && isAdmin ? (
+            {kind === "pending" ? (
+              <button onClick={onRefresh} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 13, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Check status</button>
+            ) : kind === "no-operator" && isAdmin ? (
               <button onClick={() => router.push("/admin")} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 13, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Go to Admin console</button>
             ) : (
               <button onClick={() => router.push("/")} style={{ background: "#fff", color: "#1b1714", border: "1px solid #e3ddd1", borderRadius: 13, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Back to Relay</button>

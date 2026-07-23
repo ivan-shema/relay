@@ -8,6 +8,7 @@ import {
   inviteDriverSchema,
   assignVehicleSchema,
   assignTripSchema,
+  operatorOnboardingSchema,
 } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
@@ -19,6 +20,66 @@ import { upload, requireFile } from "../lib/uploads";
 
 export const operatorRouter = Router();
 
+/* -------- Operator onboarding (accessible to any authenticated user) --------
+   A passenger applies from their dashboard: this creates a PENDING company +
+   KYC docs linked to their account. The user stays a PASSENGER — an admin's
+   approval is what promotes them to OPERATOR and unlocks the console. These two
+   routes are declared BEFORE the operator-role guard below, so a passenger can
+   reach them. */
+
+// GET /operator/application — the caller's own application status, or null if
+// they haven't applied. Used by the passenger app to show "under review".
+operatorRouter.get(
+  "/application",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const op = await prisma.operator.findFirst({ where: { ownerUserId: req.auth!.sub } });
+    res.json(op ? { status: op.status, companyName: op.companyName } : null);
+  })
+);
+
+// POST /operator/apply (multipart) — company details + KYC (applicant ID/passport
+// + RDB business certificate). Creates the company as PENDING for the current user.
+operatorRouter.post(
+  "/apply",
+  requireAuth,
+  upload.fields([
+    { name: "idDocument", maxCount: 1 },
+    { name: "businessCertificate", maxCount: 1 },
+  ]),
+  asyncHandler(async (req, res) => {
+    const data = operatorOnboardingSchema.parse(req.body);
+    const idDocument = requireFile(req, "idDocument");
+    const businessCertificate = requireFile(req, "businessCertificate");
+
+    const existing = await prisma.operator.findFirst({ where: { ownerUserId: req.auth!.sub } });
+    if (existing) throw new HttpError(409, "You already have an operator application on file");
+
+    const operator = await prisma.$transaction(async (tx) => {
+      const op = await tx.operator.create({
+        data: {
+          companyName: data.companyName,
+          contactInfo: data.contactInfo,
+          idNumber: data.idNumber,
+          modes: data.modes,
+          status: "PENDING",
+          ownerUserId: req.auth!.sub,
+        },
+      });
+      await tx.document.createMany({
+        data: [
+          { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idDocument.filename, mimeType: idDocument.mimetype, size: idDocument.size, operatorId: op.id },
+          { kind: "BUSINESS_CERTIFICATE", fileName: businessCertificate.originalname, filePath: businessCertificate.filename, mimeType: businessCertificate.mimetype, size: businessCertificate.size, operatorId: op.id },
+        ],
+      });
+      return op;
+    });
+
+    res.status(201).json({ id: operator.id, status: operator.status });
+  })
+);
+
+// Everything below requires an approved OPERATOR (or ADMIN) account.
 operatorRouter.use(requireAuth, requireRole("OPERATOR", "ADMIN"));
 
 function dec(v: Prisma.Decimal | number): number {

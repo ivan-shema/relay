@@ -5,15 +5,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import type { AuthUser, UserRole, TransportMode } from "@relay/shared";
-import { loginSchema, registerSchema, forgotSchema, otpFormSchema, newPasswordSchema, applyOperatorSchema } from "@relay/shared";
+import type { AuthUser, UserRole } from "@relay/shared";
+import { loginSchema, registerSchema, forgotSchema, otpFormSchema, newPasswordSchema } from "@relay/shared";
 import { api, ApiError } from "@/lib/api";
 import { useAuth, homePathForRole } from "@/lib/auth-context";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
-type Screen = "login" | "register" | "apply-operator" | "verify" | "forgot" | "sent" | "newpass";
+type Screen = "login" | "register" | "verify" | "forgot" | "sent" | "newpass";
 
 export default function AuthPage() {
   return (
@@ -29,7 +29,7 @@ function AuthInner() {
   const { signIn, setSession } = useAuth();
 
   const mode = params.get("mode");
-  const [screen, setScreen] = useState<Screen>(mode === "apply-operator" ? "apply-operator" : mode === "register" ? "register" : "login");
+  const [screen, setScreen] = useState<Screen>(mode === "register" ? "register" : "login");
   const [pendingUserId, setPendingUserId] = useState<string | null>(null);
   const [resetCode, setResetCode] = useState("");
 
@@ -42,10 +42,10 @@ function AuthInner() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 32 }}>
-      <div style={{ width: "100%", maxWidth: 960, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 24, overflow: "hidden", display: "flex", boxShadow: "0 40px 90px -40px rgba(27,23,20,.45)", minHeight: 600 }}>
+    <div className="rel-auth-page" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 32 }}>
+      <div className="rel-auth-card" style={{ width: "100%", maxWidth: 960, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 24, overflow: "hidden", display: "flex", boxShadow: "0 40px 90px -40px rgba(27,23,20,.45)", minHeight: 600 }}>
         <BrandPanel />
-        <div style={{ flex: 1, padding: "42px 46px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+        <div className="rel-auth-form" style={{ flex: 1, padding: "42px 46px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
           {screen === "login" && (
             <LoginForm signIn={signIn} onForgot={() => setScreen("forgot")} onRegister={() => setScreen("register")} onDone={goHome} />
           )}
@@ -53,12 +53,8 @@ function AuthInner() {
             <RegisterForm
               setSession={setSession}
               onLogin={() => setScreen("login")}
-              onApplyOperator={() => setScreen("apply-operator")}
               onRegistered={onRegistered}
             />
-          )}
-          {screen === "apply-operator" && (
-            <ApplyOperatorForm setSession={setSession} onBack={() => setScreen("register")} onApplied={onRegistered} />
           )}
           {screen === "verify" && <VerifyForm userId={pendingUserId} onBack={() => setScreen("register")} onDone={goHome} />}
           {screen === "forgot" && <ForgotForm onLogin={() => setScreen("login")} onSent={(userId) => { setPendingUserId(userId); setScreen("sent"); }} />}
@@ -105,9 +101,10 @@ function LoginForm({ signIn, onForgot, onRegister, onDone }: { signIn: (id: stri
   );
 }
 
-// Public registration — passenger accounts only. Drivers are invited by their
-// operator; transport businesses use the operator application below.
-function RegisterForm({ setSession, onLogin, onApplyOperator, onRegistered }: { setSession: (r: import("@relay/shared").AuthResponse) => void; onLogin: () => void; onApplyOperator: () => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void }) {
+// Public registration — everyone signs up as a passenger. Drivers are invited by
+// their operator; running a transport business is an application you make from
+// the passenger dashboard after signing up (Profile → Become an operator).
+function RegisterForm({ setSession, onLogin, onRegistered }: { setSession: (r: import("@relay/shared").AuthResponse) => void; onLogin: () => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void }) {
   const { register, handleSubmit, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof registerSchema>>({
     resolver: zodResolver(registerSchema),
     defaultValues: { firstName: "", lastName: "", email: "", phone: "", password: "" },
@@ -147,139 +144,11 @@ function RegisterForm({ setSession, onLogin, onApplyOperator, onRegistered }: { 
         <PasswordField reg={register("password")} error={errors.password?.message} />
         <PrimaryButton busy={isSubmitting}>Create account</PrimaryButton>
         <Switcher prompt="Already have an account?" actionLabel="Sign in" onClick={onLogin} />
-        <div style={{ textAlign: "center", marginTop: 10 }}>
-          <LinkBtn onClick={onApplyOperator}>Run a transport business? Apply as an operator →</LinkBtn>
+        <div style={{ textAlign: "center", fontSize: 11.5, color: "#a39a8d", fontWeight: 600, marginTop: 12 }}>
+          Run a transport business? Sign up, then apply from Profile → Become an operator.
         </div>
       </form>
     </Panel>
-  );
-}
-
-const MODE_OPTIONS: { value: TransportMode; label: string }[] = [
-  { value: "BUS", label: "Buses" },
-  { value: "MOTO", label: "Moto-taxis" },
-  { value: "RIDE", label: "Shared rides" },
-];
-
-// Operator/partner application — collects company info + KYC (ID/passport
-// number, ID document, RDB business certificate). Creates a PENDING company
-// that an admin must approve before the console unlocks.
-function ApplyOperatorForm({ setSession, onBack, onApplied }: { setSession: (r: import("@relay/shared").AuthResponse) => void; onBack: () => void; onApplied: (userId: string, role: UserRole, needsVerify: boolean) => void }) {
-  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof applyOperatorSchema>>({
-    resolver: zodResolver(applyOperatorSchema),
-    defaultValues: { firstName: "", lastName: "", email: "", phone: "", password: "", companyName: "", contactInfo: "", idNumber: "", modes: [] },
-  });
-  const modes = watch("modes") ?? [];
-  const [idDocument, setIdDocument] = useState<File | null>(null);
-  const [businessCertificate, setBusinessCertificate] = useState<File | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
-
-  const toggleMode = (m: TransportMode) => {
-    const next = modes.includes(m) ? modes.filter((x) => x !== m) : [...modes, m];
-    setValue("modes", next, { shouldValidate: true });
-  };
-
-  const submit = handleSubmit(async (v) => {
-    if (!idDocument || !businessCertificate) {
-      setFileError("Upload your ID document and RDB business certificate (PDF or image, no GIFs).");
-      return;
-    }
-    setFileError(null);
-    try {
-      const fd = new FormData();
-      fd.append("firstName", v.firstName);
-      fd.append("lastName", v.lastName);
-      fd.append("email", v.email);
-      fd.append("phone", v.phone);
-      fd.append("password", v.password);
-      fd.append("companyName", v.companyName);
-      fd.append("contactInfo", v.contactInfo);
-      fd.append("idNumber", v.idNumber);
-      for (const m of v.modes) fd.append("modes", m);
-      fd.append("idDocument", idDocument);
-      fd.append("businessCertificate", businessCertificate);
-      const resp = await api.applyOperator(fd);
-      setSession(resp);
-      onApplied(resp.user.id, resp.user.role, !!resp.requiresVerification);
-    } catch (e) {
-      setError("root", { message: e instanceof ApiError ? e.message : "Could not submit application" });
-    }
-  });
-
-  return (
-    <Panel width={420}>
-      <form onSubmit={submit} noValidate>
-        <Title sub="Tell us about your business — our team reviews every application before the console unlocks.">Apply as an operator</Title>
-        <ErrorBanner message={errors.root?.message} />
-        <div style={{ display: "flex", gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <Label>First name</Label>
-            <TextField reg={register("firstName")} error={errors.firstName?.message} placeholder="Chantal" />
-          </div>
-          <div style={{ flex: 1 }}>
-            <Label>Last name</Label>
-            <TextField reg={register("lastName")} error={errors.lastName?.message} placeholder="Mukamana" />
-          </div>
-        </div>
-        <div style={{ height: 12 }} />
-        <div style={{ display: "flex", gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <Label>Phone number</Label>
-            <TextField reg={register("phone")} error={errors.phone?.message} placeholder="+250 78 000 0000" mono />
-          </div>
-          <div style={{ flex: 1 }}>
-            <Label>Email</Label>
-            <TextField reg={register("email")} error={errors.email?.message} placeholder="you@company.rw" />
-          </div>
-        </div>
-        <div style={{ height: 12 }} />
-        <Label>Password</Label>
-        <PasswordField reg={register("password")} error={errors.password?.message} />
-        <div style={{ height: 12 }} />
-        <Label>Company name</Label>
-        <TextField reg={register("companyName")} error={errors.companyName?.message} placeholder="Kigali Bus Co." />
-        <div style={{ height: 12 }} />
-        <div style={{ display: "flex", gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <Label>Company contact</Label>
-            <TextField reg={register("contactInfo")} error={errors.contactInfo?.message} placeholder="+250 78 000 0042" mono />
-          </div>
-          <div style={{ flex: 1 }}>
-            <Label>ID / passport number</Label>
-            <TextField reg={register("idNumber")} error={errors.idNumber?.message} placeholder="1199…" mono />
-          </div>
-        </div>
-        <div style={{ height: 12 }} />
-        <Label>Modes you operate</Label>
-        <div style={{ display: "flex", gap: 10, marginBottom: errors.modes ? 4 : 12 }}>
-          {MODE_OPTIONS.map((m) => (
-            <RoleButton key={m.value} active={modes.includes(m.value)} onClick={() => toggleMode(m.value)}>
-              {m.label}
-            </RoleButton>
-          ))}
-        </div>
-        {errors.modes && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginBottom: 10 }}>{errors.modes.message as string}</div>}
-        <Label>ID / passport document</Label>
-        <FilePick file={idDocument} onPick={setIdDocument} placeholder="Upload your ID or passport" />
-        <div style={{ height: 12 }} />
-        <Label>RDB business certificate</Label>
-        <FilePick file={businessCertificate} onPick={setBusinessCertificate} placeholder="Upload your business certificate" />
-        {fileError && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginTop: 8 }}>{fileError}</div>}
-        <PrimaryButton busy={isSubmitting}>Submit application</PrimaryButton>
-        <div style={{ textAlign: "center", fontSize: 11.5, color: "#a39a8d", fontWeight: 600, marginTop: 10 }}>PDF, JPG, PNG or WebP · max 5 MB per file</div>
-        <BackBtn onClick={onBack} full>← Back to passenger sign-up</BackBtn>
-      </form>
-    </Panel>
-  );
-}
-
-function FilePick({ file, onPick, placeholder }: { file: File | null; onPick: (f: File | null) => void; placeholder: string }) {
-  return (
-    <label style={{ display: "flex", alignItems: "center", gap: 10, border: "1px dashed #cbc3b6", borderRadius: 13, padding: "12px 14px", cursor: "pointer", fontSize: 13.5, fontWeight: 600, color: file ? "#1b1714" : "#8c8378", background: "#fff" }}>
-      <span style={{ width: 28, height: 28, borderRadius: 8, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flex: "none" }}>⇧</span>
-      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file?.name ?? placeholder}</span>
-      <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" style={{ display: "none" }} onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
-    </label>
   );
 }
 
@@ -394,15 +263,19 @@ function NewPasswordForm({ userId, code, onLogin }: { userId: string | null; cod
 /* ---------------- pieces ---------------- */
 
 function BrandPanel() {
+  const router = useRouter();
   return (
-    <div style={{ width: 380, flex: "none", background: "#1b1714", color: "#fff", padding: "38px 36px", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 11, position: "relative", zIndex: 1 }}>
+    <div className="rel-auth-brand" style={{ width: 380, flex: "none", background: "#1b1714", color: "#fff", padding: "38px 36px", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
+      <button
+        onClick={() => router.push("/")}
+        style={{ display: "flex", alignItems: "center", gap: 11, position: "relative", zIndex: 1, background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit" }}
+      >
         <div style={{ width: 34, height: 34, borderRadius: 10, background: "#2a2520", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{ width: 13, height: 13, borderRadius: "50%", background: "#ff6a1a" }} />
         </div>
         <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 22, letterSpacing: "-.5px" }}>Relay</div>
         <div style={{ fontSize: 11, fontWeight: 600, color: "#9a9186", letterSpacing: ".04em", textTransform: "uppercase", paddingTop: 3 }}>Transit OS</div>
-      </div>
+      </button>
       <div style={{ marginTop: "auto", position: "relative", zIndex: 1 }}>
         <div style={{ fontFamily: DISPLAY, fontSize: 30, fontWeight: 700, lineHeight: 1.2, letterSpacing: "-.8px", marginBottom: 14 }}>One account for every ride in the city.</div>
         <p style={{ fontSize: 14, lineHeight: 1.6, color: "#cfc7bb", margin: "0 0 28px" }}>Buses, moto-taxis and shared rides — planned, paid and tracked from a single login.</p>
@@ -548,14 +421,6 @@ function Switcher({ prompt, actionLabel, onClick }: { prompt: string; actionLabe
     <div style={{ textAlign: "center", fontSize: 13.5, color: "#8c8378", fontWeight: 600, marginTop: 24 }}>
       {prompt} <button type="button" onClick={onClick} style={{ background: "none", border: "none", fontSize: 13.5, fontWeight: 800, color: "#ff6a1a", cursor: "pointer" }}>{actionLabel}</button>
     </div>
-  );
-}
-
-function RoleButton({ children, active, onClick }: { children: React.ReactNode; active: boolean; onClick: () => void }) {
-  return (
-    <button type="button" onClick={onClick} style={{ flex: 1, padding: "11px 6px", borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", border: active ? "1px solid #ff6a1a" : "1px solid #e3ddd1", background: active ? "#fff6f0" : "#fff", color: active ? "#ff6a1a" : "#6b6258" }}>
-      {children}
-    </button>
   );
 }
 

@@ -32,6 +32,8 @@ async function downloadReport() {
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
+type ToastMsg = { kind: "success" | "error"; msg: string };
+
 export default function AdminConsole() {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -39,6 +41,7 @@ export default function AdminConsole() {
   const [reportOpen, setReportOpen] = useState(false);
   const [pending, setPending] = useState(0);
   const [reviewId, setReviewId] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastMsg | null>(null);
 
   const loadPending = useCallback(() => {
     api.adminApprovals().then((a) => setPending(a.length)).catch(() => undefined);
@@ -63,6 +66,7 @@ export default function AdminConsole() {
         id={reviewId}
         onNavigate={setReviewId}
         onClose={(changed) => { setReviewId(null); if (changed) loadPending(); }}
+        onToast={setToast}
       />
     );
   }
@@ -88,7 +92,8 @@ export default function AdminConsole() {
   };
 
   return (
-    <div style={{ padding: "28px 24px 80px" }}>
+    <div className="rel-console-page">
+      <Toast toast={toast} onClose={() => setToast(null)} />
       <ConsoleShell
         role="Admin"
         nav={nav}
@@ -107,7 +112,7 @@ export default function AdminConsole() {
           <GenerateReport onClose={() => setReportOpen(false)} />
         ) : (
           <>
-            {tab === "dashboard" && <Dashboard onApprovalsChanged={loadPending} onReview={setReviewId} onReviewAll={() => setTab("approvals")} />}
+            {tab === "dashboard" && <Dashboard onReview={setReviewId} onReviewAll={() => setTab("approvals")} />}
             {tab === "users" && <UsersTab />}
             {tab === "operators" && <OperatorsTab />}
             {tab === "approvals" && <ApprovalsTab onReview={setReviewId} />}
@@ -128,15 +133,9 @@ function useData<T>(fn: () => Promise<T>) {
   return [data, load] as const;
 }
 
-function Dashboard({ onApprovalsChanged, onReview, onReviewAll }: { onApprovalsChanged: () => void; onReview: (id: string) => void; onReviewAll: () => void }) {
-  const [data, reload] = useData<AdminOverview>(() => api.adminOverview());
+function Dashboard({ onReview, onReviewAll }: { onReview: (id: string) => void; onReviewAll: () => void }) {
+  const [data] = useData<AdminOverview>(() => api.adminOverview());
   if (!data) return <Loading />;
-
-  const act = async (id: string, approve: boolean) => {
-    await (approve ? api.adminApprove(id) : api.adminReject(id));
-    reload();
-    onApprovalsChanged();
-  };
 
   return (
     <>
@@ -152,7 +151,7 @@ function Dashboard({ onApprovalsChanged, onReview, onReviewAll }: { onApprovalsC
                 <span style={{ fontSize: 13.5, fontWeight: 700 }}>Queue cleared — all operators verified.</span>
               </div>
             )}
-            {data.approvals.map((a) => <ApprovalRow key={a.id} a={a} onReview={() => onReview(a.id)} onAct={act} />)}
+            {data.approvals.map((a) => <ApprovalRow key={a.id} a={a} onReview={() => onReview(a.id)} />)}
           </Card>
           <Card>
             <CardTitle right={<span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: "#1f9d6b" }}>+19% MoM</span>}>Platform revenue</CardTitle>
@@ -183,8 +182,10 @@ const DOC_LABELS: Record<string, string> = {
   BUSINESS_CERTIFICATE: "RDB business certificate",
 };
 
-// Compact dashboard row — summary + a "Review" jump to the full Approvals tab.
-function ApprovalRow({ a, onReview, onAct }: { a: AdminApproval; onReview: () => void; onAct: (id: string, approve: boolean) => void }) {
+// Compact dashboard row — summary + a "Review" jump to the full review page.
+// There is deliberately no inline approve here: verifying an operator requires
+// reading their documents on the review page first.
+function ApprovalRow({ a, onReview }: { a: AdminApproval; onReview: () => void }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 13, padding: "13px 0", borderTop: "1px solid #f1ece2" }}>
       <div style={{ width: 40, height: 40, borderRadius: 11, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flex: "none" }}>{a.initial}</div>
@@ -196,8 +197,7 @@ function ApprovalRow({ a, onReview, onAct }: { a: AdminApproval; onReview: () =>
           {(a.documents?.length ?? 0) > 0 && <> · {a.documents!.length} docs</>}
         </div>
       </div>
-      <button onClick={onReview} style={{ background: "#fff", border: "1px solid #e3ddd1", color: "#1b1714", borderRadius: 10, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Review</button>
-      <button onClick={() => onAct(a.id, true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Approve</button>
+      <button onClick={onReview} style={{ background: "#1b1714", border: "none", color: "#fff", borderRadius: 10, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Review →</button>
     </div>
   );
 }
@@ -258,9 +258,10 @@ function InfoRow({ label, value, mono }: { label: string; value?: string | null;
 }
 
 // Full-page operator verification review — takes over the whole screen.
-function ApprovalReviewPage({ id, onClose, onNavigate }: { id: string; onClose: (changed: boolean) => void; onNavigate: (id: string) => void }) {
+function ApprovalReviewPage({ id, onClose, onNavigate, onToast }: { id: string; onClose: (changed: boolean) => void; onNavigate: (id: string) => void; onToast: (t: ToastMsg) => void }) {
   const [list, setList] = useState<AdminApproval[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => { api.adminApprovals().then(setList).catch(() => setList([])); }, []);
 
@@ -269,19 +270,19 @@ function ApprovalReviewPage({ id, onClose, onNavigate }: { id: string; onClose: 
   const prev = list && idx > 0 ? list[idx - 1] : null;
   const next = list && idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
 
+  // Approve/reject the operator you're actually looking at, confirm what
+  // happened with a toast, then hand control back to the queue — no silent
+  // jump to a different application, and failures surface instead of vanishing.
   const act = async (approve: boolean) => {
+    if (!a) return;
     setBusy(true);
+    setError(null);
     try {
       await (approve ? api.adminApprove(id) : api.adminReject(id));
-      const fresh = await api.adminApprovals();
-      setList(fresh);
-      if (fresh.length === 0) onClose(true);
-      else {
-        // jump to the next still-pending application, or the previous one
-        const target = fresh[Math.min(idx, fresh.length - 1)];
-        onNavigate(target.id);
-      }
-    } finally {
+      onToast({ kind: "success", msg: `${a.company} ${approve ? "approved & verified" : "application rejected"}.` });
+      onClose(true);
+    } catch {
+      setError("Something went wrong — the action didn't go through. Please try again.");
       setBusy(false);
     }
   };
@@ -352,7 +353,9 @@ function ApprovalReviewPage({ id, onClose, onNavigate }: { id: string; onClose: 
       {a && (
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 20, background: "rgba(244,241,234,.9)", backdropFilter: "blur(12px)", borderTop: "1px solid #e9e3d8" }}>
           <div style={{ maxWidth: 1080, margin: "0 auto", padding: "14px 32px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-            <div style={{ fontSize: 13, color: "#6b6258", fontWeight: 600 }}>Verify the ID and business certificate before approving — this unlocks the operator console.</div>
+            <div style={{ fontSize: 13, color: error ? "#c2553f" : "#6b6258", fontWeight: error ? 700 : 600 }}>
+              {error ?? "Verify the ID and business certificate before approving — this unlocks the operator console."}
+            </div>
             <div style={{ display: "flex", gap: 11 }}>
               <button disabled={busy} onClick={() => act(false)} style={{ background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Reject</button>
               <button disabled={busy} onClick={() => act(true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 12, padding: "13px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 12px 26px -12px rgba(31,157,107,.7)" }}>{busy ? "Saving…" : "Approve & verify"}</button>
@@ -633,6 +636,47 @@ function GenerateReport({ onClose }: { onClose: () => void }) {
 }
 
 /* helpers */
+// Transient confirmation banner — auto-dismisses. Used to confirm the outcome
+// of an approval/rejection so the action never feels silent.
+function Toast({ toast, onClose }: { toast: ToastMsg | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(onClose, 4200);
+    return () => clearTimeout(t);
+  }, [toast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!toast) return null;
+  const success = toast.kind === "success";
+  return (
+    <div
+      role="status"
+      className="rel-up"
+      style={{
+        position: "fixed",
+        top: 20,
+        right: 20,
+        zIndex: 60,
+        display: "flex",
+        alignItems: "center",
+        gap: 11,
+        maxWidth: 380,
+        background: "#fff",
+        border: `1px solid ${success ? "#bfe6d3" : "#f0d4cc"}`,
+        borderLeft: `4px solid ${success ? "#1f9d6b" : "#c2553f"}`,
+        borderRadius: 12,
+        padding: "13px 16px",
+        boxShadow: "0 18px 44px -20px rgba(27,23,20,.4)",
+      }}
+    >
+      <span style={{ width: 22, height: 22, borderRadius: "50%", flex: "none", background: success ? "#e7f6ee" : "#fbeae6", color: success ? "#1f9d6b" : "#c2553f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800 }}>
+        {success ? "✓" : "!"}
+      </span>
+      <span style={{ fontSize: 13.5, fontWeight: 700, color: "#1b1714" }}>{toast.msg}</span>
+      <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#a39a8d", fontSize: 16, fontWeight: 700, padding: 0, marginLeft: 4, flex: "none", lineHeight: 1 }}>×</button>
+    </div>
+  );
+}
+
 function Loading() {
   return <div style={{ padding: 40, textAlign: "center", color: "#a39a8d", fontWeight: 600 }}>Loading…</div>;
 }

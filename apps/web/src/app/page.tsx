@@ -2,42 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { SiteHeader } from "@/components/site-header";
+import { SiteFooter } from "@/components/site-footer";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
-
-function Logo({ size = 32 }: { size?: number }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-      <div
-        style={{
-          width: size,
-          height: size,
-          borderRadius: 10,
-          background: "#1b1714",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <div style={{ width: size * 0.375, height: size * 0.375, borderRadius: "50%", background: "#ff6a1a" }} />
-      </div>
-      <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 22, letterSpacing: "-.5px" }}>Relay</div>
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 600,
-          color: "#8c8378",
-          letterSpacing: ".04em",
-          textTransform: "uppercase",
-          paddingTop: 3,
-        }}
-      >
-        Transit OS
-      </div>
-    </div>
-  );
-}
 
 const modeCards = [
   { code: "B", color: "#2f6bff", bg: "#e9f0ff", title: "City buses", body: "Scheduled routes across town with live seat counts and exact arrival times.", from: "RWF 700" },
@@ -69,49 +38,28 @@ export default function LandingPage() {
   const router = useRouter();
   const [openFaq, setOpenFaq] = useState(0);
 
-  const goAuth = (mode: "login" | "register" | "apply-operator") => router.push(`/auth?mode=${mode}`);
+  const goAuth = (mode: "login" | "register") => router.push(`/auth?mode=${mode}`);
   const browse = () => router.push("/browse");
 
   return (
-    <div style={{ minHeight: "100vh" }}>
-      {/* header */}
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 24,
-          padding: "20px 40px",
-          maxWidth: 1180,
-          margin: "0 auto",
-        }}
-      >
-        <Logo />
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <button onClick={() => goAuth("login")} style={{ background: "none", border: "none", fontSize: 14, fontWeight: 700, color: "#1b1714", cursor: "pointer", padding: "10px 14px" }}>
-            Sign in
-          </button>
-          <button onClick={() => goAuth("register")} style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 12, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-            Get started
-          </button>
-        </div>
-      </header>
+    <div className="rel-landing" style={{ minHeight: "100vh" }}>
+      <SiteHeader active="/" />
 
       {/* hero */}
-      <section style={{ maxWidth: 1180, margin: "0 auto", padding: "48px 40px 36px", display: "grid", gridTemplateColumns: "1.1fr .9fr", gap: 48, alignItems: "center" }}>
+      <section className="rel-hero-grid" style={{ maxWidth: 1180, margin: "0 auto", padding: "48px 40px 36px", display: "grid", gridTemplateColumns: "1.1fr .9fr", gap: 48, alignItems: "center" }}>
         <div>
           <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 30, padding: "7px 14px", marginBottom: 22 }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#1f9d6b" }} />
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "#6b6258" }}>Live across 37 operators</span>
           </div>
-          <h1 style={{ fontFamily: DISPLAY, fontSize: 54, lineHeight: 1.04, fontWeight: 700, letterSpacing: "-1.6px", margin: "0 0 18px" }}>
+          <h1 className="rel-hero-h1" style={{ fontFamily: DISPLAY, fontSize: 54, lineHeight: 1.04, fontWeight: 700, letterSpacing: "-1.6px", margin: "0 0 18px" }}>
             Every ride in your city, one app.
           </h1>
           <p style={{ fontSize: 17, lineHeight: 1.6, color: "#6b6258", margin: "0 0 28px", maxWidth: 480 }}>
             Relay brings buses, moto-taxis and shared rides from every operator into a single place — see live routes, fares,
             seats and arrival times, then book and track in seconds.
           </p>
-          <div style={{ display: "flex", gap: 13, marginBottom: 18 }}>
+          <div style={{ display: "flex", gap: 13, marginBottom: 18, flexWrap: "wrap" }}>
             <button onClick={browse} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: "17px 28px", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 14px 30px -12px rgba(255,106,26,.7)" }}>
               Browse live trips
             </button>
@@ -158,9 +106,9 @@ export default function LandingPage() {
       <section style={{ maxWidth: 1180, margin: "0 auto", padding: "44px 40px 8px" }}>
         <div style={{ textAlign: "center", maxWidth: 560, margin: "0 auto 28px" }}>
           <div style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 10 }}>One app, every mode</div>
-          <h2 style={{ fontFamily: DISPLAY, fontSize: 34, fontWeight: 700, letterSpacing: "-1px", margin: 0 }}>Whatever&apos;s running, you can ride it.</h2>
+          <h2 className="rel-section-h2" style={{ fontFamily: DISPLAY, fontSize: 34, fontWeight: 700, letterSpacing: "-1px", margin: 0 }}>Whatever&apos;s running, you can ride it.</h2>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
+        <div className="rel-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
           {modeCards.map((m) => (
             <div key={m.title} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 26 }}>
               <div style={{ width: 46, height: 46, borderRadius: 13, background: m.bg, color: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: 800, fontFamily: MONO, marginBottom: 16 }}>{m.code}</div>
@@ -176,7 +124,7 @@ export default function LandingPage() {
 
       {/* live tracking */}
       <section style={{ maxWidth: 1180, margin: "0 auto", padding: "44px 40px" }}>
-        <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 24, padding: 40, display: "grid", gridTemplateColumns: ".9fr 1.1fr", gap: 40, alignItems: "center" }}>
+        <div className="rel-split-grid-rev rel-panel-40" style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 24, padding: 40, display: "grid", gridTemplateColumns: ".9fr 1.1fr", gap: 40, alignItems: "center" }}>
           <div style={{ position: "relative", height: 300, borderRadius: 18, overflow: "hidden", background: "#eef0e9", border: "1px solid #d8e0d6" }}>
             <MapArt />
             <div style={{ position: "absolute", left: 16, top: 16, background: "rgba(255,255,255,.94)", borderRadius: 11, padding: "8px 13px", display: "flex", alignItems: "center", gap: 9, boxShadow: "0 4px 14px -6px rgba(0,0,0,.25)" }}>
@@ -186,7 +134,7 @@ export default function LandingPage() {
           </div>
           <div>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 10 }}>Live tracking</div>
-            <h2 style={{ fontFamily: DISPLAY, fontSize: 32, fontWeight: 700, letterSpacing: "-.9px", lineHeight: 1.1, margin: "0 0 14px" }}>Watch your ride come to you.</h2>
+            <h2 className="rel-section-h2" style={{ fontFamily: DISPLAY, fontSize: 32, fontWeight: 700, letterSpacing: "-.9px", lineHeight: 1.1, margin: "0 0 14px" }}>Watch your ride come to you.</h2>
             <p style={{ fontSize: 15, lineHeight: 1.6, color: "#6b6258", margin: "0 0 20px" }}>
               Once you book, follow your vehicle on the map in real time — know exactly when to step outside, board with a tap,
               then track every leg to your stop.
@@ -204,7 +152,7 @@ export default function LandingPage() {
       </section>
 
       {/* steps */}
-      <section style={{ maxWidth: 1180, margin: "0 auto", padding: "36px 40px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
+      <section className="rel-grid-3" style={{ maxWidth: 1180, margin: "0 auto", padding: "36px 40px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
         {steps.map((s) => (
           <div key={s.n} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 24 }}>
             <div style={{ width: 40, height: 40, borderRadius: 11, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 800, marginBottom: 14 }}>{s.n}</div>
@@ -218,9 +166,9 @@ export default function LandingPage() {
       <section style={{ maxWidth: 1180, margin: "0 auto", padding: "44px 40px 16px" }}>
         <div style={{ textAlign: "center", maxWidth: 560, margin: "0 auto 28px" }}>
           <div style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 10 }}>Real-time everything</div>
-          <h2 style={{ fontFamily: DISPLAY, fontSize: 34, fontWeight: 700, letterSpacing: "-1px", margin: 0 }}>No more guessing at the stop.</h2>
+          <h2 className="rel-section-h2" style={{ fontFamily: DISPLAY, fontSize: 34, fontWeight: 700, letterSpacing: "-1px", margin: 0 }}>No more guessing at the stop.</h2>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+        <div className="rel-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
           {realtime.map((r) => (
             <div key={r.big} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 22 }}>
               <div style={{ fontFamily: DISPLAY, fontSize: 24, fontWeight: 700, letterSpacing: "-.5px", marginBottom: 8 }}>{r.big}</div>
@@ -233,7 +181,7 @@ export default function LandingPage() {
 
       {/* operators */}
       <section style={{ maxWidth: 1180, margin: "0 auto", padding: "24px 40px" }}>
-        <div style={{ background: "#1b1714", borderRadius: 24, padding: 44, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, position: "relative", overflow: "hidden" }}>
+        <div className="rel-grid-2 rel-op-banner" style={{ background: "#1b1714", borderRadius: 24, padding: 44, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, position: "relative", overflow: "hidden" }}>
           <div style={{ position: "absolute", right: -90, top: -90, width: 280, height: 280, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.2),transparent 68%)" }} />
           <div style={{ color: "#fff", position: "relative", zIndex: 1 }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>For operators &amp; drivers</div>
@@ -242,7 +190,7 @@ export default function LandingPage() {
               Manage vehicles, drivers and schedules from one console — and reach every rider searching your route. Drivers get
               assigned trips, live navigation and instant payouts.
             </p>
-            <button onClick={() => goAuth("apply-operator")} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: "15px 24px", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={() => goAuth("register")} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: "15px 24px", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
               Partner with Relay
             </button>
           </div>
@@ -266,7 +214,7 @@ export default function LandingPage() {
 
       {/* faq */}
       <section style={{ maxWidth: 780, margin: "0 auto", padding: "44px 40px" }}>
-        <h2 style={{ fontFamily: DISPLAY, fontSize: 30, fontWeight: 700, letterSpacing: "-.8px", textAlign: "center", margin: "0 0 28px" }}>Questions, answered</h2>
+        <h2 className="rel-section-h2" style={{ fontFamily: DISPLAY, fontSize: 30, fontWeight: 700, letterSpacing: "-.8px", textAlign: "center", margin: "0 0 28px" }}>Questions, answered</h2>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {faqs.map((f, i) => (
             <button key={f.q} onClick={() => setOpenFaq(openFaq === i ? -1 : i)} style={{ textAlign: "left", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "20px 22px", cursor: "pointer" }}>
@@ -282,8 +230,8 @@ export default function LandingPage() {
 
       {/* bottom CTA */}
       <section style={{ maxWidth: 1180, margin: "0 auto", padding: "8px 40px 56px" }}>
-        <div style={{ background: "#fff6f0", border: "1px solid #ffd9c2", borderRadius: 24, padding: 48, textAlign: "center" }}>
-          <h2 style={{ fontFamily: DISPLAY, fontSize: 36, fontWeight: 700, letterSpacing: "-1.1px", margin: "0 0 12px" }}>Your next ride is already running.</h2>
+        <div className="rel-cta-box" style={{ background: "#fff6f0", border: "1px solid #ffd9c2", borderRadius: 24, padding: 48, textAlign: "center" }}>
+          <h2 className="rel-section-h2" style={{ fontFamily: DISPLAY, fontSize: 36, fontWeight: 700, letterSpacing: "-1.1px", margin: "0 0 12px" }}>Your next ride is already running.</h2>
           <p style={{ fontSize: 16, color: "#6b6258", margin: "0 0 24px" }}>See what&apos;s departing near you right now.</p>
           <div style={{ display: "flex", gap: 13, justifyContent: "center", flexWrap: "wrap" }}>
             <button onClick={browse} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: "17px 30px", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 14px 30px -12px rgba(255,106,26,.7)" }}>Browse live trips</button>
@@ -292,43 +240,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* footer */}
-      <footer style={{ borderTop: "1px solid #e9e3d8", background: "#fbf9f4" }}>
-        <div style={{ maxWidth: 1180, margin: "0 auto", padding: "44px 40px", display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", gap: 32 }}>
-          <div>
-            <Logo size={28} />
-            <p style={{ fontSize: 13.5, lineHeight: 1.6, color: "#8c8378", margin: "12px 0 0", maxWidth: 260 }}>
-              The transport operating system for the city — every operator, every ride, one app.
-            </p>
-          </div>
-          {[
-            { h: "Product", items: ["Browse trips", "Plan ahead", "Wallet", "Live tracking"] },
-            { h: "Operators", items: ["Become a partner", "Operator console", "Driver app", "Payouts"] },
-            { h: "Company", items: ["About", "Careers", "Support", "Privacy"] },
-          ].map((col) => (
-            <div key={col.h}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: "#1b1714", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 13 }}>{col.h}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 9, fontSize: 13.5, color: "#6b6258", fontWeight: 600 }}>
-                {col.items.map((it) =>
-                  it === "Become a partner" ? (
-                    <button key={it} onClick={() => goAuth("apply-operator")} style={{ background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 13.5, color: "#ff6a1a", fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
-                      {it} →
-                    </button>
-                  ) : (
-                    <span key={it}>{it}</span>
-                  )
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div style={{ maxWidth: 1180, margin: "0 auto", padding: "0 40px 36px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, borderTop: "1px solid #ece6db", paddingTop: 24 }}>
-          <div style={{ fontSize: 13, color: "#a39a8d", fontWeight: 600 }}>© 2026 Relay Transit OS · Kigali</div>
-          <div style={{ display: "flex", gap: 18, fontSize: 13, color: "#a39a8d", fontWeight: 600 }}>
-            <span>Terms</span><span>Privacy</span><span>Status</span>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

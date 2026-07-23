@@ -44,18 +44,18 @@ export function ConsoleShell({
   const { user, signOut } = useAuth();
 
   return (
-    <div style={{ maxWidth: 1180, margin: "0 auto", background: "#fff", border: "1px solid #e3ddd1", borderRadius: 20, overflow: "hidden", display: "flex", boxShadow: "0 30px 70px -34px rgba(27,23,20,.4)", minHeight: 720 }}>
-      <aside style={{ width: 236, background: "#1b1714", color: "#fff", padding: "22px 16px", display: "flex", flexDirection: "column", flex: "none" }}>
-        <button onClick={() => router.push("/")} style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px 22px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
-          <div style={{ width: 30, height: 30, borderRadius: 9, background: "#2a2520", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div className="rel-console-shell">
+      <aside className="rel-console-side">
+        <button onClick={() => router.push("/")} style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px 22px", background: "none", border: "none", cursor: "pointer", textAlign: "left", flex: "none" }}>
+          <div style={{ width: 30, height: 30, borderRadius: 9, background: "#2a2520", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
             <div style={{ width: 11, height: 11, borderRadius: "50%", background: "#ff6a1a" }} />
           </div>
-          <div>
+          <div className="rel-console-only-desktop">
             <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 16, color: "#fff" }}>Relay</div>
             <div style={{ fontSize: 10, color: "#9a9186", letterSpacing: ".08em", textTransform: "uppercase" }}>{role}</div>
           </div>
         </button>
-        <nav style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <nav className="rel-console-nav">
           {nav.map((n) => {
             const on = n.key === active;
             return (
@@ -74,6 +74,7 @@ export function ConsoleShell({
                   fontWeight: 700,
                   fontFamily: "'Manrope', sans-serif",
                   textAlign: "left",
+                  whiteSpace: "nowrap",
                   background: on ? "#2a2520" : "transparent",
                   color: on ? "#fff" : "#9a9186",
                 }}
@@ -87,26 +88,24 @@ export function ConsoleShell({
             );
           })}
         </nav>
-        <div style={{ marginTop: "auto" }}>
-          {footer}
-          <div style={{ background: "#2a2520", borderRadius: 12, padding: 13, display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
-            <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700 }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
-              <div style={{ fontSize: 10.5, color: "#9a9186" }}>{role} account</div>
-            </div>
-            <button onClick={() => { signOut(); router.push("/"); }} title="Sign out" style={{ background: "none", border: "none", color: "#9a9186", cursor: "pointer", fontSize: 15 }}>⎋</button>
+        <div className="rel-console-only-desktop" style={{ marginTop: "auto" }}>{footer}</div>
+        <div className="rel-console-account" style={{ background: "#2a2520", borderRadius: 12, padding: 13, display: "flex", alignItems: "center", gap: 10, marginTop: 12, flex: "none" }}>
+          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
+          <div className="rel-console-only-desktop" style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap" }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
+            <div style={{ fontSize: 10.5, color: "#9a9186", whiteSpace: "nowrap" }}>{role} account</div>
           </div>
+          <button onClick={() => { signOut(); router.push("/"); }} title="Sign out" style={{ background: "none", border: "none", color: "#9a9186", cursor: "pointer", fontSize: 15, flex: "none" }}>⎋</button>
         </div>
       </aside>
 
-      <div style={{ flex: 1, padding: "26px 30px", background: "#faf8f4", overflowX: "auto" }}>
+      <div className="rel-console-main">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, gap: 16, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontFamily: DISPLAY, fontSize: 24, fontWeight: 700, letterSpacing: "-.5px" }}>{title}</div>
             {subtitle && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>{subtitle}</div>}
           </div>
-          {actions && <div style={{ display: "flex", gap: 10 }}>{actions}</div>}
+          {actions && <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>{actions}</div>}
         </div>
         {children}
       </div>
