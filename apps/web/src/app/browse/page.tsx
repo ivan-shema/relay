@@ -25,6 +25,22 @@ function fmtTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function TripCardSkeleton() {
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 18 }}>
+      <div className="rel-skel" style={{ width: "70%", height: 15, borderRadius: 6, marginBottom: 16 }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+        <div className="rel-skel" style={{ width: 46, height: 20, borderRadius: 6 }} />
+        <div className="rel-skel" style={{ width: 46, height: 20, borderRadius: 6 }} />
+      </div>
+      <div style={{ borderTop: "1px solid #f1ece2", paddingTop: 11, display: "flex", justifyContent: "space-between" }}>
+        <div className="rel-skel" style={{ width: "40%", height: 13, borderRadius: 6 }} />
+        <div className="rel-skel" style={{ width: 60, height: 13, borderRadius: 6 }} />
+      </div>
+    </div>
+  );
+}
+
 function StatusPill({ status }: { status: string }) {
   const map: Record<string, { c: string; bg: string; label: string }> = {
     ON_TIME: { c: "#1f9d6b", bg: "#e7f6ee", label: "On time" },
@@ -133,13 +149,16 @@ export default function BrowsePage() {
         )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "18px 0 14px" }}>
-          <span className="rel-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: "#2f6bff" }} />
-          <span style={{ fontSize: 12, color: "#2f6bff", fontWeight: 700 }}>Live · {trips.length} {trips.length === 1 ? "trip" : "trips"}</span>
+          <span className="rel-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: busy ? "#a39a8d" : "#2f6bff" }} />
+          <span style={{ fontSize: 12, color: busy ? "#8c8378" : "#2f6bff", fontWeight: 700 }}>
+            {busy ? "Searching for trips…" : `Live · ${trips.length} ${trips.length === 1 ? "trip" : "trips"}`}
+          </span>
         </div>
 
         <div className="rel-trip-grid">
-          {trips.length === 0 && !busy && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>No live trips on this route right now.</div>}
-          {trips.map((t) => (
+          {busy && [0, 1, 2].map((i) => <TripCardSkeleton key={i} />)}
+          {!busy && trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>No live trips on this route right now.</div>}
+          {!busy && trips.map((t) => (
             <button
               key={t.id}
               disabled={t.seatsLeft === 0}

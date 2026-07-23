@@ -60,6 +60,21 @@ button {
     transform: rotate(360deg);
   }
 }
+@keyframes relShimmer {
+  0% {
+    background-position: -200px 0;
+  }
+  100% {
+    background-position: calc(200px + 100%) 0;
+  }
+}
+
+/* loading-state skeleton block */
+.rel-skel {
+  background: linear-gradient(90deg, #ece6db 25%, #f4f1ea 37%, #ece6db 63%);
+  background-size: 400px 100%;
+  animation: relShimmer 1.4s ease infinite;
+}
 
 .rel-up {
   animation: relUp 0.4s ease both;
