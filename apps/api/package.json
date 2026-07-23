@@ -11,7 +11,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "mig:dep": "prisma migrate deploy",
     "prisma:push": "prisma db push",
+    "studio": "prisma studio",
     "seed": "tsx prisma/seed.ts"
   },
   "prisma": {
@@ -25,7 +27,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
+    "multer": "^2.2.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
