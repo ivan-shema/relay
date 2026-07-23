@@ -42,6 +42,7 @@ export default function PassengerApp() {
   const [dest, setDest] = useState("Central Market");
 
   const [trips, setTrips] = useState<TripSummary[]>([]);
+  const [tripsLoading, setTripsLoading] = useState(false);
   const [selected, setSelected] = useState<TripSummary | null>(null);
   const [booking, setBooking] = useState<BookingDetail | null>(null);
   const [payMethod, setPayMethod] = useState<PaymentMethod>("MOBILE_MONEY");
@@ -59,10 +60,13 @@ export default function PassengerApp() {
 
   const loadTrips = useCallback(async () => {
     setError(null);
+    setTripsLoading(true);
     try {
       setTrips(await api.trips(origin, dest));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not load trips");
+    } finally {
+      setTripsLoading(false);
     }
   }, [origin, dest]);
 
@@ -164,7 +168,7 @@ export default function PassengerApp() {
           </div>
         )}
         {tab === "plan" && screen === "available" && (
-          <AvailableScreen origin={origin} dest={dest} trips={trips} busy={busy} onBack={() => setScreen("home")} onBook={startBooking} />
+          <AvailableScreen origin={origin} dest={dest} trips={trips} loadingTrips={tripsLoading} busy={busy} onBack={() => setScreen("home")} onBook={startBooking} />
         )}
         {tab === "plan" && screen === "planAhead" && (
           <div className="rel-narrow">
@@ -221,9 +225,11 @@ function HomeScreen({
   const [planned, setPlanned] = useState<{ id: string; from: string; to: string; when: string }[]>([]);
   const [places, setPlaces] = useState<SavedPlace[]>([]);
   const [live, setLive] = useState<TripSummary[]>([]);
+  const [liveLoading, setLiveLoading] = useState(true);
 
   useEffect(() => {
-    api.trips(origin, dest).then(setLive).catch(() => undefined);
+    setLiveLoading(true);
+    api.trips(origin, dest).then(setLive).catch(() => undefined).finally(() => setLiveLoading(false));
     if (user) {
       api.planned().then(setPlanned).catch(() => undefined);
       api.savedPlaces().then(setPlaces).catch(() => undefined);
@@ -329,7 +335,7 @@ function HomeScreen({
             <HomeMapArt />
             <div style={{ position: "absolute", left: 14, top: 14, background: "rgba(255,255,255,.94)", borderRadius: 11, padding: "7px 12px", display: "flex", alignItems: "center", gap: 8, boxShadow: "0 4px 14px -6px rgba(0,0,0,.25)" }}>
               <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#1f9d6b" }} />
-              <span style={{ fontSize: 12, fontWeight: 700 }}>{live.length} live near you</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>{liveLoading ? "Loading…" : `${live.length} live near you`}</span>
             </div>
           </div>
           <div style={{ padding: "18px 18px 20px" }}>
@@ -341,8 +347,18 @@ function HomeScreen({
               <button onClick={onSeeTrips} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>See all →</button>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {live.length === 0 && <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, padding: "6px 0" }}>No live trips on this route right now.</div>}
-              {live.slice(0, 4).map((t) => (
+              {liveLoading && [0, 1, 2].map((i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 11, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 15, padding: "12px 13px" }}>
+                  <div className="rel-skel" style={{ width: 22, height: 22, borderRadius: 6 }} />
+                  <div style={{ flex: 1 }}>
+                    <div className="rel-skel" style={{ width: "70%", height: 12, borderRadius: 5, marginBottom: 6 }} />
+                    <div className="rel-skel" style={{ width: "45%", height: 10, borderRadius: 5 }} />
+                  </div>
+                  <div className="rel-skel" style={{ width: 44, height: 12, borderRadius: 5 }} />
+                </div>
+              ))}
+              {!liveLoading && live.length === 0 && <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, padding: "6px 0" }}>No live trips on this route right now.</div>}
+              {!liveLoading && live.slice(0, 4).map((t) => (
                 <button key={t.id} disabled={busy || t.seatsLeft === 0} onClick={() => onBook(t)} style={{ textAlign: "left", background: t.seatsLeft === 0 ? "#faf8f4" : "#fff", border: "1px solid #e9e3d8", borderRadius: 15, padding: "12px 13px", cursor: busy ? "default" : "pointer", opacity: t.seatsLeft === 0 ? 0.6 : 1, display: "flex", alignItems: "center", gap: 11 }}>
                   <div style={{ display: "flex", gap: 4 }}>
                     {t.legs.map((lg, i) => (
@@ -454,8 +470,24 @@ function FromToRow({ value, onChange, label, dotBorder, highlight }: { value: st
   );
 }
 
+function TripCardSkeleton() {
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 18 }}>
+      <div className="rel-skel" style={{ width: "70%", height: 15, borderRadius: 6, marginBottom: 16 }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+        <div className="rel-skel" style={{ width: 46, height: 20, borderRadius: 6 }} />
+        <div className="rel-skel" style={{ width: 46, height: 20, borderRadius: 6 }} />
+      </div>
+      <div style={{ borderTop: "1px solid #f1ece2", paddingTop: 11, display: "flex", justifyContent: "space-between" }}>
+        <div className="rel-skel" style={{ width: "40%", height: 13, borderRadius: 6 }} />
+        <div className="rel-skel" style={{ width: 60, height: 13, borderRadius: 6 }} />
+      </div>
+    </div>
+  );
+}
+
 /* ============ AVAILABLE ============ */
-function AvailableScreen({ origin, dest, trips, busy, onBack, onBook }: { origin: string; dest: string; trips: TripSummary[]; busy: boolean; onBack: () => void; onBook: (t: TripSummary) => void }) {
+function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBook }: { origin: string; dest: string; trips: TripSummary[]; loadingTrips: boolean; busy: boolean; onBack: () => void; onBook: (t: TripSummary) => void }) {
   return (
     <div className="rel-up rel-wide">
       <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18 }}>
@@ -471,15 +503,18 @@ function AvailableScreen({ origin, dest, trips, busy, onBack, onBook }: { origin
               <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.4px" }}>{dest}</span>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#eef5ff", border: "1px solid #d8e6ff", borderRadius: 30, padding: "8px 14px" }}>
-            <span className="rel-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: "#2f6bff" }} />
-            <span style={{ fontSize: 12, color: "#2f6bff", fontWeight: 700 }}>Live · {trips.length} {trips.length === 1 ? "trip" : "trips"}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: loadingTrips ? "#f4f1ea" : "#eef5ff", border: `1px solid ${loadingTrips ? "#e9e3d8" : "#d8e6ff"}`, borderRadius: 30, padding: "8px 14px" }}>
+            <span className="rel-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: loadingTrips ? "#a39a8d" : "#2f6bff" }} />
+            <span style={{ fontSize: 12, color: loadingTrips ? "#8c8378" : "#2f6bff", fontWeight: 700 }}>
+              {loadingTrips ? "Searching…" : `Live · ${trips.length} ${trips.length === 1 ? "trip" : "trips"}`}
+            </span>
           </div>
         </div>
       </div>
       <div className="rel-trip-grid">
-        {trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>No live trips on this route right now.</div>}
-        {trips.map((t) => (
+        {loadingTrips && [0, 1, 2].map((i) => <TripCardSkeleton key={i} />)}
+        {!loadingTrips && trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>No live trips on this route right now.</div>}
+        {!loadingTrips && trips.map((t) => (
           <button key={t.id} disabled={busy || t.seatsLeft === 0} onClick={() => onBook(t)} style={{ textAlign: "left", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 18, cursor: busy ? "default" : "pointer", opacity: t.seatsLeft === 0 ? 0.55 : 1 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 11 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
