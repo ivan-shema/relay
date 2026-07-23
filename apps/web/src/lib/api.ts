@@ -216,6 +216,17 @@ export const api = {
   adminAddUser: (body: { firstName: string; lastName: string; phone: string; email: string; role: string; companyName?: string; modes?: string[] }) =>
     request<{ id: string }>("/admin/users", { method: "POST", body, auth: true }),
 
+  // authed KYC document — returns an object URL + mime for inline preview.
+  // Caller is responsible for revoking the URL when done.
+  documentBlob: async (id: string): Promise<{ url: string; type: string }> => {
+    const res = await fetch(`${BASE}/documents/${id}`, {
+      headers: tokenStore.access ? { Authorization: `Bearer ${tokenStore.access}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, "Could not load document");
+    const blob = await res.blob();
+    return { url: URL.createObjectURL(blob), type: blob.type };
+  },
+
   // authed KYC document download (opens in a new tab via blob)
   openDocument: async (id: string) => {
     const res = await fetch(`${BASE}/documents/${id}`, {
@@ -371,6 +382,7 @@ export interface KycDocument {
   id: string;
   kind: string; // NATIONAL_ID | PASSPORT | DRIVING_LICENSE | BUSINESS_CERTIFICATE
   fileName: string;
+  mimeType?: string;
 }
 export interface OperatorDriverDetail extends OperatorDriverRow {
   vehicleId: string | null;
@@ -415,8 +427,13 @@ export interface AdminApproval {
   initial: string;
   vehicles: string;
   date: string;
+  submittedAt?: string;
   applicant?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  contactInfo?: string | null;
   idNumber?: string | null;
+  modes?: string[];
   documents?: KycDocument[];
 }
 export interface AdminUser {

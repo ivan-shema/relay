@@ -31,6 +31,31 @@ function operatorTypeLabel(modes: string[]): { type: string; color: string; bg: 
   return { type: modes.length > 1 ? `${meta.label} +${modes.length - 1}` : meta.label, color: meta.color, bg: meta.bg };
 }
 
+type ApprovalOperator = Prisma.OperatorGetPayload<{ include: { documents: true; ownerUser: true } }>;
+
+// Full applicant + KYC detail for the admin review panel.
+function mapApproval(o: ApprovalOperator) {
+  const t = operatorTypeLabel(o.modes);
+  return {
+    id: o.id,
+    company: o.companyName,
+    type: t.type,
+    color: t.color,
+    bg: t.bg,
+    initial: o.companyName[0]?.toUpperCase() ?? "?",
+    vehicles: "fleet pending",
+    date: fmtDate(o.createdAt),
+    submittedAt: o.createdAt.toISOString(),
+    applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
+    email: o.ownerUser?.email ?? null,
+    phone: o.ownerUser?.phone ?? null,
+    contactInfo: o.contactInfo,
+    idNumber: o.idNumber,
+    modes: o.modes.map((m) => TYPE_META[m]?.label ?? m),
+    documents: o.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName, mimeType: doc.mimeType })),
+  };
+}
+
 // GET /admin/overview — KPIs, approvals, revenue, complaints
 adminRouter.get(
   "/overview",
@@ -56,22 +81,7 @@ adminRouter.get(
         { label: "Trips", value: trips.toLocaleString(), sub: "all time", delta: "+11%" },
         { label: "Revenue", value: formatRWF(revenue), sub: "processed", delta: "+19%" },
       ],
-      approvals: pendingOps.map((o) => {
-        const t = operatorTypeLabel(o.modes);
-        return {
-          id: o.id,
-          company: o.companyName,
-          type: t.type,
-          color: t.color,
-          bg: t.bg,
-          initial: o.companyName[0],
-          vehicles: "fleet pending",
-          date: fmtDate(o.createdAt),
-          applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
-          idNumber: o.idNumber,
-          documents: o.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName })),
-        };
-      }),
+      approvals: pendingOps.map(mapApproval),
       revenueBars: months.map((m, i) => ({ m, value: base[i] })),
       complaints: complaints.map((c) => ({ id: c.id, who: c.who, message: c.message, priority: c.priority })),
     });
@@ -202,24 +212,7 @@ adminRouter.get(
       orderBy: { createdAt: "asc" },
       include: { documents: true, ownerUser: true },
     });
-    res.json(
-      ops.map((o) => {
-        const t = operatorTypeLabel(o.modes);
-        return {
-          id: o.id,
-          company: o.companyName,
-          type: t.type,
-          color: t.color,
-          bg: t.bg,
-          initial: o.companyName[0],
-          vehicles: "fleet pending",
-          date: fmtDate(o.createdAt),
-          applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
-          idNumber: o.idNumber,
-          documents: o.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName })),
-        };
-      })
-    );
+    res.json(ops.map(mapApproval));
   })
 );
 

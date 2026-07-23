@@ -70,7 +70,7 @@ export default function LandingPage() {
   const [openFaq, setOpenFaq] = useState(0);
 
   const goAuth = (mode: "login" | "register" | "apply-operator") => router.push(`/auth?mode=${mode}`);
-  const browse = () => router.push("/app");
+  const browse = () => router.push("/browse");
 
   return (
     <div style={{ minHeight: "100vh" }}>

@@ -1,7 +1,27 @@
+import fs from "fs";
+import path from "path";
 import { PrismaClient, type TransportMode } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
+
+// Write sample KYC files into the uploads dir so seeded pending applications
+// have viewable documents in the admin review panel.
+const UPLOADS_DIR = path.resolve(__dirname, "../uploads");
+const SAMPLE_PDF = Buffer.from(
+  "JVBERi0xLjEKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMzAwIDE0NF0+PmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9G",
+  "base64"
+);
+const SAMPLE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64"
+);
+
+function writeSampleDoc(name: string, buf: Buffer): string {
+  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(UPLOADS_DIR, name), buf);
+  return name;
+}
 
 function inMinutes(min: number) {
   return new Date(Date.now() + min * 60_000);
@@ -17,6 +37,7 @@ async function main() {
   console.log("Seeding Relay database…");
 
   // wipe (dev only) in FK-safe order
+  await prisma.document.deleteMany();
   await prisma.payout.deleteMany();
   await prisma.walletTransaction.deleteMany();
   await prisma.savedPlace.deleteMany();
@@ -69,12 +90,32 @@ async function main() {
   const volcano = await prisma.operator.create({
     data: { companyName: "Volcano Shuttle", contactInfo: "+250 78 •• 1180", modes: ["BUS"], status: "VERIFIED" },
   });
-  const twiga = await prisma.operator.create({
-    data: { companyName: "Twiga Moto", contactInfo: "+250 78 •• 3321", modes: ["MOTO"], status: "PENDING" },
-  });
-  const rideLink = await prisma.operator.create({
-    data: { companyName: "RideLink Pool", contactInfo: "+250 78 •• 7788", modes: ["RIDE"], status: "PENDING" },
-  });
+  // Pending applications — full applicants + KYC documents so the admin
+  // review panel has real content to show.
+  const pendingApps = [
+    { company: "Twiga Moto", first: "Chantal", last: "Mukamana", email: "chantal@twigamoto.rw", phone: "+250788330011", contact: "+250 78 833 0011", modes: ["MOTO"] as TransportMode[], idNumber: "1198770055443322" },
+    { company: "RideLink Pool", first: "Olivier", last: "Habyarimana", email: "olivier@ridelink.rw", phone: "+250788778822", contact: "+250 78 877 8822", modes: ["RIDE"] as TransportMode[], idNumber: "1199088077665544" },
+  ];
+  const pendingOps: { id: string }[] = [];
+  for (const [i, app] of pendingApps.entries()) {
+    const owner = await prisma.user.create({
+      data: { firstName: app.first, lastName: app.last, email: app.email, phone: app.phone, passwordHash: pw, role: "OPERATOR", phoneVerified: true },
+    });
+    const op = await prisma.operator.create({
+      data: { companyName: app.company, contactInfo: app.contact, idNumber: app.idNumber, modes: app.modes, status: "PENDING", ownerUserId: owner.id },
+    });
+    const idFile = writeSampleDoc(`seed-id-${i}.pdf`, SAMPLE_PDF);
+    const certFile = writeSampleDoc(`seed-cert-${i}.png`, SAMPLE_PNG);
+    await prisma.document.createMany({
+      data: [
+        { kind: "NATIONAL_ID", fileName: `${app.first}-national-id.pdf`, filePath: idFile, mimeType: "application/pdf", size: SAMPLE_PDF.length, operatorId: op.id },
+        { kind: "BUSINESS_CERTIFICATE", fileName: `${app.company}-rdb-certificate.png`, filePath: certFile, mimeType: "image/png", size: SAMPLE_PNG.length, operatorId: op.id },
+      ],
+    });
+    pendingOps.push(op);
+  }
+  const twiga = pendingOps[0];
+  const rideLink = pendingOps[1];
 
   // ---------- Drivers + vehicles ----------
   // primary demo driver

@@ -29,7 +29,11 @@ const PAY_METHODS: { method: PaymentMethod; name: string; sub: string; glyph: st
 
 export default function PassengerApp() {
   const router = useRouter();
-  const { user, refreshUser } = useAuth();
+  const { user, loading, refreshUser } = useAuth();
+
+  useEffect(() => {
+    if (!loading && !user) router.replace("/browse");
+  }, [user, loading, router]);
 
   const [tab, setTab] = useState<Tab>("plan");
   const [screen, setScreen] = useState<PlanScreen>("home");
@@ -120,6 +124,8 @@ export default function PassengerApp() {
     setBooking(null);
     setTab("plan");
   };
+
+  if (loading || !user) return null;
 
   return (
     <div className="pax-shell">

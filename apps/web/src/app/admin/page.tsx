@@ -10,6 +10,7 @@ import {
   type AdminApproval,
   type AdminPayments,
   type AdminReports,
+  type KycDocument,
 } from "@/lib/api";
 import { formatRWF, createUserSchema, type CreateUserInput } from "@relay/shared";
 import { tokenStore } from "@/lib/api";
@@ -37,6 +38,7 @@ export default function AdminConsole() {
   const [tab, setTab] = useState("dashboard");
   const [reportOpen, setReportOpen] = useState(false);
   const [pending, setPending] = useState(0);
+  const [reviewId, setReviewId] = useState<string | null>(null);
 
   const loadPending = useCallback(() => {
     api.adminApprovals().then((a) => setPending(a.length)).catch(() => undefined);
@@ -52,6 +54,18 @@ export default function AdminConsole() {
   }, [user, loading, router, loadPending]);
 
   if (!user || user.role !== "ADMIN") return null;
+
+  // Reviewing an operator application takes over the whole screen — its own
+  // full page, not a panel inside the console.
+  if (reviewId) {
+    return (
+      <ApprovalReviewPage
+        id={reviewId}
+        onNavigate={setReviewId}
+        onClose={(changed) => { setReviewId(null); if (changed) loadPending(); }}
+      />
+    );
+  }
 
   const nav: NavItem[] = [
     { key: "dashboard", label: "Dashboard", icon: "▦" },
@@ -93,10 +107,10 @@ export default function AdminConsole() {
           <GenerateReport onClose={() => setReportOpen(false)} />
         ) : (
           <>
-            {tab === "dashboard" && <Dashboard onApprovalsChanged={loadPending} />}
+            {tab === "dashboard" && <Dashboard onApprovalsChanged={loadPending} onReview={setReviewId} onReviewAll={() => setTab("approvals")} />}
             {tab === "users" && <UsersTab />}
             {tab === "operators" && <OperatorsTab />}
-            {tab === "approvals" && <ApprovalsTab onChanged={loadPending} />}
+            {tab === "approvals" && <ApprovalsTab onReview={setReviewId} />}
             {tab === "payments" && <PaymentsTab />}
             {tab === "reports" && <ReportsTab />}
             {tab === "complaints" && <ComplaintsTab />}
@@ -114,7 +128,7 @@ function useData<T>(fn: () => Promise<T>) {
   return [data, load] as const;
 }
 
-function Dashboard({ onApprovalsChanged }: { onApprovalsChanged: () => void }) {
+function Dashboard({ onApprovalsChanged, onReview, onReviewAll }: { onApprovalsChanged: () => void; onReview: (id: string) => void; onReviewAll: () => void }) {
   const [data, reload] = useData<AdminOverview>(() => api.adminOverview());
   if (!data) return <Loading />;
 
@@ -130,7 +144,7 @@ function Dashboard({ onApprovalsChanged }: { onApprovalsChanged: () => void }) {
       <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16 }} className="op-two">
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <Card>
-            <CardTitle right={<span style={{ fontSize: 12, fontWeight: 700, color: "#ff6a1a" }}>{data.approvals.length} pending</span>}>Operator approvals</CardTitle>
+            <CardTitle right={data.approvals.length > 0 ? <button onClick={onReviewAll} style={{ background: "none", border: "none", fontSize: 12, fontWeight: 700, color: "#ff6a1a", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Review all →</button> : <span style={{ fontSize: 12, fontWeight: 700, color: "#1f9d6b" }}>All clear</span>}>Operator approvals</CardTitle>
             <div style={{ fontSize: 12.5, color: "#8c8378", marginBottom: 6 }}>New companies awaiting verification before they can onboard drivers.</div>
             {data.approvals.length === 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "18px 0 6px", borderTop: "1px solid #f1ece2", color: "#1f9d6b" }}>
@@ -138,7 +152,7 @@ function Dashboard({ onApprovalsChanged }: { onApprovalsChanged: () => void }) {
                 <span style={{ fontSize: 13.5, fontWeight: 700 }}>Queue cleared — all operators verified.</span>
               </div>
             )}
-            {data.approvals.map((a) => <ApprovalRow key={a.id} a={a} onAct={act} />)}
+            {data.approvals.map((a) => <ApprovalRow key={a.id} a={a} onReview={() => onReview(a.id)} onAct={act} />)}
           </Card>
           <Card>
             <CardTitle right={<span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: "#1f9d6b" }}>+19% MoM</span>}>Platform revenue</CardTitle>
@@ -166,36 +180,184 @@ const DOC_LABELS: Record<string, string> = {
   NATIONAL_ID: "ID document",
   PASSPORT: "Passport",
   DRIVING_LICENSE: "Driving licence",
-  BUSINESS_CERTIFICATE: "RDB certificate",
+  BUSINESS_CERTIFICATE: "RDB business certificate",
 };
 
-function ApprovalRow({ a, onAct }: { a: AdminApproval; onAct: (id: string, approve: boolean) => void }) {
+// Compact dashboard row — summary + a "Review" jump to the full Approvals tab.
+function ApprovalRow({ a, onReview, onAct }: { a: AdminApproval; onReview: () => void; onAct: (id: string, approve: boolean) => void }) {
   return (
-    <div style={{ padding: "13px 0", borderTop: "1px solid #f1ece2" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 11, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flex: "none" }}>{a.initial}</div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700 }}>{a.company}</div>
-          <div style={{ fontSize: 12, color: "#8c8378" }}>
-            <span style={{ fontWeight: 700, color: a.color }}>{a.type}</span> · {a.date}
-            {a.applicant && <> · {a.applicant}</>}
-            {a.idNumber && <> · ID <span style={{ fontFamily: MONO }}>{a.idNumber}</span></>}
+    <div style={{ display: "flex", alignItems: "center", gap: 13, padding: "13px 0", borderTop: "1px solid #f1ece2" }}>
+      <div style={{ width: 40, height: 40, borderRadius: 11, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flex: "none" }}>{a.initial}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 700 }}>{a.company}</div>
+        <div style={{ fontSize: 12, color: "#8c8378" }}>
+          <span style={{ fontWeight: 700, color: a.color }}>{a.type}</span>
+          {a.applicant && <> · {a.applicant}</>} · {a.date}
+          {(a.documents?.length ?? 0) > 0 && <> · {a.documents!.length} docs</>}
+        </div>
+      </div>
+      <button onClick={onReview} style={{ background: "#fff", border: "1px solid #e3ddd1", color: "#1b1714", borderRadius: 10, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Review</button>
+      <button onClick={() => onAct(a.id, true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Approve</button>
+    </div>
+  );
+}
+
+// Inline preview of a KYC document (image thumbnail or embedded PDF), loaded
+// through the authenticated blob endpoint.
+function DocPreview({ doc, height = 200 }: { doc: KycDocument; height?: number }) {
+  const [blob, setBlob] = useState<{ url: string; type: string } | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let created: string | null = null;
+    api
+      .documentBlob(doc.id)
+      .then((r) => { if (active) { created = r.url; setBlob(r); } else URL.revokeObjectURL(r.url); })
+      .catch(() => active && setFailed(true));
+    return () => { active = false; if (created) URL.revokeObjectURL(created); };
+  }, [doc.id]);
+
+  const mime = blob?.type || doc.mimeType || "";
+  const isImage = mime.startsWith("image/");
+  const isPdf = mime.includes("pdf");
+
+  return (
+    <div style={{ border: "1px solid #ece6db", borderRadius: 16, overflow: "hidden", background: "#fff", boxShadow: "0 12px 34px -26px rgba(27,23,20,.4)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", borderBottom: "1px solid #f1ece2", background: "#faf8f4" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>{DOC_LABELS[doc.kind] ?? doc.kind}</div>
+          <div style={{ fontSize: 11, color: "#a39a8d", fontFamily: MONO, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}>{doc.fileName}</div>
+        </div>
+        <button onClick={() => api.openDocument(doc.id).catch(() => window.alert("Could not open document"))} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 9, padding: "7px 12px", fontSize: 11.5, fontWeight: 700, color: "#1b1714", cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>Open ↗</button>
+      </div>
+      <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center", background: "#f4f1ea" }}>
+        {failed ? (
+          <span style={{ fontSize: 12.5, color: "#c2553f", fontWeight: 600 }}>Couldn&apos;t load document</span>
+        ) : !blob ? (
+          <span style={{ fontSize: 12.5, color: "#a39a8d", fontWeight: 600 }}>Loading…</span>
+        ) : isImage ? (
+          <img src={blob.url} alt={doc.fileName} style={{ maxWidth: "100%", maxHeight: height, objectFit: "contain" }} />
+        ) : isPdf ? (
+          <iframe src={`${blob.url}#toolbar=0`} title={doc.fileName} style={{ width: "100%", height, border: "none" }} />
+        ) : (
+          <span style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>{doc.fileName}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value, mono }: { label: string; value?: string | null; mono?: boolean }) {
+  return (
+    <div style={{ background: "#faf8f4", border: "1px solid #f1ece2", borderRadius: 12, padding: "12px 14px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, fontFamily: mono ? MONO : undefined, color: value ? "#1b1714" : "#cbc3b6" }}>{value || "—"}</div>
+    </div>
+  );
+}
+
+// Full-page operator verification review — takes over the whole screen.
+function ApprovalReviewPage({ id, onClose, onNavigate }: { id: string; onClose: (changed: boolean) => void; onNavigate: (id: string) => void }) {
+  const [list, setList] = useState<AdminApproval[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { api.adminApprovals().then(setList).catch(() => setList([])); }, []);
+
+  const idx = list ? list.findIndex((x) => x.id === id) : -1;
+  const a = idx >= 0 ? list![idx] : null;
+  const prev = list && idx > 0 ? list[idx - 1] : null;
+  const next = list && idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
+
+  const act = async (approve: boolean) => {
+    setBusy(true);
+    try {
+      await (approve ? api.adminApprove(id) : api.adminReject(id));
+      const fresh = await api.adminApprovals();
+      setList(fresh);
+      if (fresh.length === 0) onClose(true);
+      else {
+        // jump to the next still-pending application, or the previous one
+        const target = fresh[Math.min(idx, fresh.length - 1)];
+        onNavigate(target.id);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f4f1ea", backgroundImage: "radial-gradient(circle at 1px 1px,rgba(27,23,20,.04) 1px,transparent 0)", backgroundSize: "22px 22px" }}>
+      {/* top bar */}
+      <div style={{ position: "sticky", top: 0, zIndex: 20, background: "rgba(244,241,234,.82)", backdropFilter: "blur(12px)", borderBottom: "1px solid #e9e3d8" }}>
+        <div style={{ maxWidth: 1080, margin: "0 auto", padding: "16px 32px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+          <button onClick={() => onClose(false)} style={{ display: "flex", alignItems: "center", gap: 9, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "9px 15px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>← Back to queue</button>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8c8378" }}>{list && idx >= 0 ? `Application ${idx + 1} of ${list.length}` : "Operator verification"}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!prev} onClick={() => prev && onNavigate(prev.id)} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 10, padding: "9px 13px", fontSize: 13, fontWeight: 700, cursor: prev ? "pointer" : "default", color: prev ? "#1b1714" : "#cbc3b6", fontFamily: "'Manrope', sans-serif" }}>← Prev</button>
+            <button disabled={!next} onClick={() => next && onNavigate(next.id)} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 10, padding: "9px 13px", fontSize: 13, fontWeight: 700, cursor: next ? "pointer" : "default", color: next ? "#1b1714" : "#cbc3b6", fontFamily: "'Manrope', sans-serif" }}>Next →</button>
           </div>
         </div>
-        <button onClick={() => onAct(a.id, false)} style={{ background: "#fff", border: "1px solid #e3ddd1", color: "#8c8378", borderRadius: 10, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Reject</button>
-        <button onClick={() => onAct(a.id, true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Approve</button>
       </div>
-      {(a.documents?.length ?? 0) > 0 && (
-        <div style={{ display: "flex", gap: 8, marginTop: 9, marginLeft: 53, flexWrap: "wrap" }}>
-          {a.documents!.map((doc) => (
-            <button
-              key={doc.id}
-              onClick={() => api.openDocument(doc.id).catch(() => window.alert("Could not open document"))}
-              style={{ display: "flex", alignItems: "center", gap: 6, background: "#faf8f4", border: "1px solid #ece6db", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontWeight: 700, color: "#6b6258", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
-            >
-              <span style={{ color: "#ff6a1a" }}>▤</span> {DOC_LABELS[doc.kind] ?? doc.kind}
-            </button>
-          ))}
+
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "28px 32px 120px" }} className="rel-up">
+        {!list ? (
+          <Loading />
+        ) : !a ? (
+          <div style={{ textAlign: "center", padding: "80px 0", color: "#8c8378", fontWeight: 700 }}>This application is no longer in the queue.</div>
+        ) : (
+          <>
+            {/* hero */}
+            <div style={{ background: "#1b1714", borderRadius: 24, padding: "34px 36px", color: "#fff", position: "relative", overflow: "hidden", marginBottom: 20 }}>
+              <div style={{ position: "absolute", right: -80, top: -80, width: 260, height: 260, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.24),transparent 68%)" }} />
+              <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+                <div style={{ width: 64, height: 64, borderRadius: 18, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, fontWeight: 800, flex: "none" }}>{a.initial}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                    <div style={{ fontFamily: DISPLAY, fontSize: 30, fontWeight: 700, letterSpacing: "-.9px" }}>{a.company}</div>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: "#ff6a1a", background: "rgba(255,106,26,.16)", borderRadius: 7, padding: "5px 10px", textTransform: "uppercase", letterSpacing: ".04em" }}>Pending review</span>
+                  </div>
+                  <div style={{ fontSize: 13.5, color: "#cfc7bb", fontWeight: 600, marginTop: 6 }}>
+                    {a.modes?.join(" · ")} · applied {a.date}{a.applicant && <> · by {a.applicant}</>}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* applicant + company details */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".05em", margin: "6px 0 12px" }}>Applicant &amp; company</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12, marginBottom: 26 }}>
+              <InfoRow label="Applicant" value={a.applicant} />
+              <InfoRow label="Email" value={a.email} />
+              <InfoRow label="Phone" value={a.phone} mono />
+              <InfoRow label="Company contact" value={a.contactInfo} mono />
+              <InfoRow label="ID / passport no." value={a.idNumber} mono />
+              <InfoRow label="Modes operated" value={a.modes?.join(", ")} />
+            </div>
+
+            {/* documents */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".05em", margin: "6px 0 12px" }}>Verification documents</div>
+            {(a.documents?.length ?? 0) === 0 ? (
+              <div style={{ background: "#fff", border: "1px dashed #d8d1c4", borderRadius: 16, padding: 20, fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>No documents were submitted with this application.</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16 }}>
+                {a.documents!.map((doc) => <DocPreview key={doc.id} doc={doc} height={320} />)}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* sticky decision bar */}
+      {a && (
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 20, background: "rgba(244,241,234,.9)", backdropFilter: "blur(12px)", borderTop: "1px solid #e9e3d8" }}>
+          <div style={{ maxWidth: 1080, margin: "0 auto", padding: "14px 32px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, color: "#6b6258", fontWeight: 600 }}>Verify the ID and business certificate before approving — this unlocks the operator console.</div>
+            <div style={{ display: "flex", gap: 11 }}>
+              <button disabled={busy} onClick={() => act(false)} style={{ background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Reject</button>
+              <button disabled={busy} onClick={() => act(true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 12, padding: "13px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 12px 26px -12px rgba(31,157,107,.7)" }}>{busy ? "Saving…" : "Approve & verify"}</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -266,26 +428,57 @@ function OperatorsTab() {
   );
 }
 
-function ApprovalsTab({ onChanged }: { onChanged: () => void }) {
-  const [data, reload] = useData<AdminApproval[]>(() => api.adminApprovals());
+// Queue of pending operators as review cards — each opens the full-page review.
+function ApprovalsTab({ onReview }: { onReview: (id: string) => void }) {
+  const [data] = useData<AdminApproval[]>(() => api.adminApprovals());
+
   if (!data) return <Loading />;
-  const act = async (id: string, approve: boolean) => {
-    await (approve ? api.adminApprove(id) : api.adminReject(id));
-    reload();
-    onChanged();
-  };
-  return (
-    <Card style={{ maxWidth: 760 }}>
-      <CardTitle right={<span style={{ fontSize: 12, fontWeight: 700, color: "#ff6a1a" }}>{data.length} pending</span>}>Pending verification</CardTitle>
-      <div style={{ fontSize: 12.5, color: "#8c8378", marginBottom: 8 }}>Review documents and fleet before a company can onboard drivers and accept bookings.</div>
-      {data.length === 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "22px 0 6px", borderTop: "1px solid #f1ece2", color: "#1f9d6b" }}>
-          <span style={{ width: 28, height: 28, borderRadius: "50%", background: "#e7f6ee", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>✓</span>
+
+  if (data.length === 0) {
+    return (
+      <Card style={{ maxWidth: 620 }}>
+        <CardTitle>Operator verification</CardTitle>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "22px 0 6px", borderTop: "1px solid #f1ece2", color: "#1f9d6b" }}>
+          <span style={{ width: 30, height: 30, borderRadius: "50%", background: "#e7f6ee", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>✓</span>
           <span style={{ fontSize: 14, fontWeight: 700 }}>Queue cleared — every operator is verified.</span>
         </div>
-      )}
-      {data.map((a) => <ApprovalRow key={a.id} a={a} onAct={act} />)}
-    </Card>
+      </Card>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 700, letterSpacing: "-.4px" }}>Verification queue</div>
+          <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>Companies awaiting review before they can onboard drivers.</div>
+        </div>
+        <span style={{ fontSize: 12, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 8, padding: "7px 12px" }}>{data.length} pending</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 14 }}>
+        {data.map((a) => (
+          <button
+            key={a.id}
+            onClick={() => onReview(a.id)}
+            style={{ display: "block", textAlign: "left", width: "100%", background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: 18, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 14px 36px -30px rgba(27,23,20,.5)" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+              <div style={{ width: 46, height: 46, borderRadius: 13, background: a.bg, color: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 800, flex: "none" }}>{a.initial}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.company}</div>
+                <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}><span style={{ color: a.color, fontWeight: 700 }}>{a.type}</span> · applied {a.date}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingTop: 14, borderTop: "1px solid #f4f0e8" }}>
+              <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {a.applicant ?? "—"} · {(a.documents?.length ?? 0)} docs
+              </div>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a" }}>Review →</span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
