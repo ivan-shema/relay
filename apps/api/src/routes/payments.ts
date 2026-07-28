@@ -9,6 +9,15 @@ import { requireAuth } from "../middleware/auth";
 
 export const paymentsRouter = Router();
 
+// Unambiguous alphabet (no 0/O/1/I/L) — this is read aloud/typed by a
+// conductor off a phone screen, so it needs to survive a manual transcription.
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+function makeTicketCode(): string {
+  let code = "";
+  for (let i = 0; i < 8; i++) code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  return code;
+}
+
 const createSchema = z.object({
   bookingId: z.string(),
   method: z.enum(["MOBILE_MONEY", "WALLET", "QR"]),
@@ -82,8 +91,20 @@ paymentsRouter.post(
 
       await tx.booking.update({
         where: { id: bookingId },
-        data: { status: status === "PAID" ? "CONFIRMED" : "PENDING", seatNumber: "12A" },
+        data: { status: status === "PAID" ? "CONFIRMED" : "PENDING" },
       });
+
+      // One independently-boardable ticket per purchased seat — a group
+      // booking gets a distinct QR/seat per rider, not one shared pass.
+      if (status === "PAID") {
+        await tx.ticket.createMany({
+          data: Array.from({ length: booking.seats }, (_, i) => ({
+            bookingId,
+            seatNumber: "12" + String.fromCharCode(65 + i),
+            code: makeTicketCode(),
+          })),
+        });
+      }
 
       await tx.notification.create({
         data: {

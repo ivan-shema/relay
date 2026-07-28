@@ -14,12 +14,17 @@ trackingRouter.get(
   asyncHandler(async (req, res) => {
     const booking = await prisma.booking.findUnique({
       where: { id: req.params.bookingId },
-      include: { trip: { include: trackingInclude } },
+      include: { trip: { include: trackingInclude }, tickets: true },
     });
     if (!booking || booking.passengerId !== req.auth!.sub) {
       throw new HttpError(404, "Booking not found");
     }
     const snapshot = buildTrackingSnapshot(booking.trip);
-    res.json({ ...snapshot, seatNumber: booking.seatNumber ?? snapshot.seatNumber });
+    const seatNumber = booking.tickets.length > 0 ? booking.tickets.map((t) => t.seatNumber).join(", ") : snapshot.seatNumber;
+    // Boarding is confirmed by the driver/operator scanning the ticket, not by
+    // the passenger — the tracking view reflects that real state instead of a
+    // self-reported button.
+    const anyBoarded = booking.tickets.some((t) => t.boarded);
+    res.json({ ...snapshot, seatNumber, anyBoarded });
   })
 );

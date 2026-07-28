@@ -28,7 +28,7 @@ import {
   type InviteDriverInput,
 } from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
-import { ConsoleShell, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, type NavItem } from "@/components/console";
+import { ConsoleShell, ProfileSettingsPage, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, TicketVerifyForm, type NavItem } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
 
 const MONO = "'JetBrains Mono', monospace";
@@ -62,6 +62,7 @@ export default function OperatorConsole() {
   const [company, setCompany] = useState("Operator");
   const [status, setStatus] = useState<string | null>(null);
   const [selectedDriver, setSelectedDriver] = useState<string | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const checkStatus = useCallback(() => {
     api
@@ -95,24 +96,30 @@ export default function OperatorConsole() {
       <ConsoleShell
         role="Operator"
         nav={NAV}
-        active={tab}
-        onNav={(k) => { setTab(k); setSelectedDriver(null); }}
-        title={TITLES[tab]}
-        subtitle={`${company} · live`}
-        actions={<>
+        active={profileOpen ? "" : tab}
+        onNav={(k) => { setProfileOpen(false); setTab(k); setSelectedDriver(null); }}
+        onOpenProfile={() => setProfileOpen(true)}
+        title={profileOpen ? "Profile & settings" : TITLES[tab]}
+        subtitle={profileOpen ? "Your account" : `${company} · live`}
+        actions={profileOpen ? undefined : <>
           <button style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "10px 15px", fontSize: 13, fontWeight: 700, fontFamily: "'Manrope', sans-serif", cursor: "pointer" }}>Last 24h ▾</button>
           <PrimaryButton>Export report</PrimaryButton>
           <NotificationBell />
         </>}
       >
-        {tab === "overview" && <OverviewTab />}
-        {tab === "live" && <LiveTab />}
-        {tab === "fleet" && <FleetTab />}
-        {tab === "routes" && <RoutesTab />}
-        {tab === "schedule" && <ScheduleTab />}
-        {tab === "drivers" && <DriversTab selected={selectedDriver} onSelect={setSelectedDriver} />}
-        {tab === "bookings" && <BookingsTab />}
-        {tab === "payments" && <PaymentsTab />}
+        {profileOpen && <ProfileSettingsPage role="Operator" onBack={() => setProfileOpen(false)} />}
+        {!profileOpen && (
+          <>
+            {tab === "overview" && <OverviewTab />}
+            {tab === "live" && <LiveTab />}
+            {tab === "fleet" && <FleetTab />}
+            {tab === "routes" && <RoutesTab />}
+            {tab === "schedule" && <ScheduleTab />}
+            {tab === "drivers" && <DriversTab selected={selectedDriver} onSelect={setSelectedDriver} />}
+            {tab === "bookings" && <BookingsTab />}
+            {tab === "payments" && <PaymentsTab />}
+          </>
+        )}
       </ConsoleShell>
     </div>
   );
@@ -605,14 +612,21 @@ function BookingsTab() {
       <CardTitle right={<button style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 10, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Export</button>}>All bookings · {data.total}</CardTitle>
       <TableHead cols={["ID", "Passenger", "Route", "Mode", "Fare", "Status"]} template=".9fr 1.1fr 1.4fr .8fr .6fr 1fr" />
       {data.items.map((b) => (
-        <Row key={b.id} template=".9fr 1.1fr 1.4fr .8fr .6fr 1fr">
-          <span style={{ fontFamily: MONO, color: "#8c8378", fontSize: 12 }}>{b.id}</span>
-          <span style={{ fontWeight: 700 }}>{b.passenger}</span>
-          <span style={{ color: "#6b6258" }}>{b.route}</span>
-          <span style={{ color: "#6b6258" }}>{b.mode}</span>
-          <span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(b.fare)}</span>
-          <span style={{ textAlign: "right" }}><StatusPill status={b.status} /></span>
-        </Row>
+        <div key={b.id}>
+          <Row template=".9fr 1.1fr 1.4fr .8fr .6fr 1fr">
+            <span style={{ fontFamily: MONO, color: "#8c8378", fontSize: 12 }}>{b.id}</span>
+            <span style={{ fontWeight: 700 }}>{b.passenger}</span>
+            <span style={{ color: "#6b6258" }}>{b.route}</span>
+            <span style={{ color: "#6b6258" }}>{b.mode}</span>
+            <span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(b.fare)}</span>
+            <span style={{ textAlign: "right" }}><StatusPill status={b.status} /></span>
+          </Row>
+          {b.status === "CONFIRMED" && b.ticketsTotal > 0 && (
+            <div style={{ padding: "2px 0 12px", marginTop: -1 }}>
+              <TicketVerifyForm onVerify={api.verifyTicket} boarded={b.ticketsBoarded} total={b.ticketsTotal} />
+            </div>
+          )}
+        </div>
       ))}
       <Pagination page={page} totalPages={data.totalPages} total={data.total} onPage={setPage} />
     </Card>

@@ -99,6 +99,7 @@ model User {
   role          UserRole @default(PASSENGER)
   phoneVerified Boolean  @default(false)
   walletBalance Decimal  @default(0) @db.Decimal(10, 2)
+  autoTopupEnabled Boolean @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -233,12 +234,32 @@ model Booking {
   seats        Int           @default(1)
   fare         Decimal       @db.Decimal(10, 2)
   status       BookingStatus @default(PENDING)
-  seatNumber   String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
   payment Payment?
   rating  Rating?
+  tickets Ticket[]
+}
+
+// One row per purchased seat, boarded independently so a multi-seat booking
+// can't be checked in as a single unit and a ticket can't be reused once
+// boarded. `code` — not `id` — is the value printed/QR-encoded on the
+// passenger's ticket and is the only thing that can look a ticket up for
+// boarding: staff must read it off the presented ticket, never off a booking
+// list they already have, or boarding would be confirmable without ever
+// seeing the passenger.
+model Ticket {
+  id         String    @id @default(cuid())
+  code       String    @unique
+  bookingId  String
+  booking    Booking   @relation(fields: [bookingId], references: [id])
+  seatNumber String
+  boarded    Boolean   @default(false)
+  boardedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([bookingId, seatNumber])
 }
 
 model Payment {
@@ -261,6 +282,7 @@ model Rating {
   score     Int
   comment   String?
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Notification {

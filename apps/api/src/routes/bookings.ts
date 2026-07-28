@@ -14,9 +14,9 @@ function dec(v: Prisma.Decimal): number {
   return Number(v.toString());
 }
 
-function toBookingDetail(
-  b: Prisma.BookingGetPayload<{ include: { trip: { include: typeof tripInclude }; payment: true } }>
-): BookingDetail {
+const bookingInclude = { trip: { include: tripInclude }, payment: true, tickets: true } satisfies Prisma.BookingInclude;
+
+function toBookingDetail(b: Prisma.BookingGetPayload<{ include: typeof bookingInclude }>): BookingDetail {
   return {
     id: b.id,
     trip: toTripSummary(b.trip),
@@ -34,6 +34,7 @@ function toBookingDetail(
           createdAt: b.payment.createdAt.toISOString(),
         }
       : undefined,
+    tickets: b.tickets.map((t) => ({ id: t.id, code: t.code, seatNumber: t.seatNumber, boarded: t.boarded })),
   };
 }
 
@@ -69,7 +70,7 @@ bookingsRouter.post(
           fare: new Prisma.Decimal(trip.fare).mul(seats),
           status: "PENDING",
         },
-        include: { trip: { include: tripInclude }, payment: true },
+        include: bookingInclude,
       });
     });
 
@@ -87,7 +88,7 @@ bookingsRouter.get(
     const [bookings, total] = await prisma.$transaction([
       prisma.booking.findMany({
         where,
-        include: { trip: { include: tripInclude }, payment: true },
+        include: bookingInclude,
         orderBy: { createdAt: "desc" },
         skip: p.skip,
         take: p.take,
@@ -104,7 +105,7 @@ bookingsRouter.get(
   asyncHandler(async (req, res) => {
     const booking = await prisma.booking.findUnique({
       where: { id: req.params.id },
-      include: { trip: { include: tripInclude }, payment: true },
+      include: bookingInclude,
     });
     if (!booking || booking.passengerId !== req.auth!.sub) {
       throw new HttpError(404, "Booking not found");
@@ -132,7 +133,7 @@ bookingsRouter.post(
       return tx.booking.update({
         where: { id: booking.id },
         data: { status: "CANCELLED" },
-        include: { trip: { include: tripInclude }, payment: true },
+        include: bookingInclude,
       });
     });
     res.json(toBookingDetail(updated));

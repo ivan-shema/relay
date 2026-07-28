@@ -92,7 +92,7 @@ driverRouter.get(
     const driver = await getDriver(req.auth!.sub);
     const bookings = await prisma.booking.findMany({
       where: { status: "CONFIRMED", trip: { driverId: driver.id } },
-      include: { passenger: true, trip: { include: { route: { include: { origin: true, destination: true } } } } },
+      include: { passenger: true, tickets: true, trip: { include: { route: { include: { origin: true, destination: true } } } } },
       orderBy: { createdAt: "asc" },
       take: 20,
     });
@@ -105,7 +105,11 @@ driverRouter.get(
         to: b.trip.route.destination.name,
         fare: dec(b.fare),
         distanceKm: dec(b.trip.route.distanceKm ?? 3.1),
-        seatNumber: b.seatNumber,
+        seatNumber: b.tickets.length > 0 ? b.tickets.map((t) => t.seatNumber).join(", ") : null,
+        // Never expose per-ticket codes/ids here — boarding must come from the
+        // code on the ticket the passenger presents, not from this list.
+        ticketsBoarded: b.tickets.filter((t) => t.boarded).length,
+        ticketsTotal: b.tickets.length,
       }))
     );
   })

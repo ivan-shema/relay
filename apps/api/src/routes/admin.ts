@@ -216,6 +216,78 @@ adminRouter.get(
   })
 );
 
+type OperatorDetailPayload = Prisma.OperatorGetPayload<{
+  include: { documents: true; ownerUser: true; vehicles: true; drivers: true };
+}>;
+
+// Full detail for one operator, any status — the "View" action from the
+// Operators list. Same shape as an approval, plus real fleet/revenue numbers
+// instead of "fleet pending".
+function mapOperatorDetail(o: OperatorDetailPayload, revenue: number) {
+  const t = operatorTypeLabel(o.modes);
+  return {
+    id: o.id,
+    company: o.companyName,
+    type: t.type,
+    color: t.color,
+    bg: t.bg,
+    initial: o.companyName[0]?.toUpperCase() ?? "?",
+    status: o.status,
+    date: fmtDate(o.createdAt),
+    submittedAt: o.createdAt.toISOString(),
+    applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
+    email: o.ownerUser?.email ?? null,
+    phone: o.ownerUser?.phone ?? null,
+    contactInfo: o.contactInfo,
+    idNumber: o.idNumber,
+    modes: o.modes.map((m) => TYPE_META[m]?.label ?? m),
+    vehicles: o.vehicles.length,
+    drivers: o.drivers.length,
+    revenue,
+    documents: o.documents.map((doc) => ({ id: doc.id, kind: doc.kind, fileName: doc.fileName, mimeType: doc.mimeType })),
+  };
+}
+
+// GET /admin/operators/:id — full detail for the Operators list "View" action
+adminRouter.get(
+  "/operators/:id",
+  asyncHandler(async (req, res) => {
+    const o = await prisma.operator.findUnique({
+      where: { id: req.params.id },
+      include: { documents: true, ownerUser: true, vehicles: true, drivers: true },
+    });
+    if (!o) throw new HttpError(404, "Operator not found");
+    const paid = await prisma.payment.aggregate({
+      _sum: { amount: true },
+      where: { status: "PAID", booking: { trip: { operatorId: o.id } } },
+    });
+    res.json(mapOperatorDetail(o, dec(paid._sum.amount ?? new Prisma.Decimal(0))));
+  })
+);
+
+// POST /admin/operators/:id/suspend — pull a verified operator's access
+// (e.g. a compliance issue found after approval).
+adminRouter.post(
+  "/operators/:id/suspend",
+  asyncHandler(async (req, res) => {
+    const o = await prisma.operator.findUnique({ where: { id: req.params.id } });
+    if (!o) throw new HttpError(404, "Operator not found");
+    await prisma.operator.update({ where: { id: o.id }, data: { status: "SUSPENDED" } });
+    res.json({ status: "SUSPENDED" });
+  })
+);
+
+// POST /admin/operators/:id/reinstate — restore a suspended operator to VERIFIED
+adminRouter.post(
+  "/operators/:id/reinstate",
+  asyncHandler(async (req, res) => {
+    const o = await prisma.operator.findUnique({ where: { id: req.params.id } });
+    if (!o) throw new HttpError(404, "Operator not found");
+    await prisma.operator.update({ where: { id: o.id }, data: { status: "VERIFIED" } });
+    res.json({ status: "VERIFIED" });
+  })
+);
+
 // POST /admin/operators/:id/approve — verify the company AND promote its owner
 // to the OPERATOR role. Applicants stay PASSENGERs while pending, so approval is
 // what actually unlocks the operator console for them.
@@ -310,28 +382,75 @@ adminRouter.get(
   })
 );
 
-// GET /admin/reports — aggregate stats
+type ReportPeriod = "week" | "month" | "year" | "all";
+
+// Real revenue buckets for the selected window — granularity adapts to the
+// span so the chart stays readable (days for a week, weeks for a month,
+// months for a year/all-time).
+function reportBuckets(period: ReportPeriod, now: Date): { start: Date; end: Date; label: string }[] {
+  const buckets: { start: Date; end: Date; label: string }[] = [];
+  if (period === "week") {
+    for (let i = 6; i >= 0; i--) {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+      buckets.push({ start, end, label: start.toLocaleDateString("en-US", { weekday: "short" }) });
+    }
+  } else if (period === "month") {
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    for (let i = 0; i < 5; i++) {
+      const start = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1 + i * 7);
+      if (start > now) break;
+      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
+      buckets.push({ start, end, label: `Wk ${i + 1}` });
+    }
+  } else {
+    const monthsBack = period === "year" ? now.getMonth() + 1 : 12;
+    for (let i = monthsBack - 1; i >= 0; i--) {
+      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+      buckets.push({ start, end, label: start.toLocaleDateString("en-US", { month: "short" }) });
+    }
+  }
+  return buckets;
+}
+
+// GET /admin/reports?period=week|month|year|all — aggregate stats scoped to
+// a real time window (defaults to this month).
 adminRouter.get(
   "/reports",
-  asyncHandler(async (_req, res) => {
-    const [trips, paidAll, multimodalTrips] = await Promise.all([
-      prisma.booking.count(),
-      prisma.payment.findMany({ where: { status: "PAID" } }),
-      prisma.trip.findMany({ select: { legs: true } }),
+  asyncHandler(async (req, res) => {
+    const period: ReportPeriod = (["week", "month", "year", "all"] as const).includes(req.query.period as ReportPeriod)
+      ? (req.query.period as ReportPeriod)
+      : "month";
+    const now = new Date();
+    const rangeStart =
+      period === "week" ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6) :
+      period === "year" ? new Date(now.getFullYear(), 0, 1) :
+      period === "all" ? new Date(0) :
+      new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [trips, paid, multimodalTrips] = await Promise.all([
+      prisma.booking.count({ where: { createdAt: { gte: rangeStart } } }),
+      prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: rangeStart } } }),
+      prisma.trip.findMany({ where: { createdAt: { gte: rangeStart } }, select: { legs: true } }),
     ]);
-    const revenue = paidAll.reduce((s, p) => s + dec(p.amount), 0);
-    const avgFare = paidAll.length ? revenue / paidAll.length : 0;
+    const revenue = paid.reduce((s, p) => s + dec(p.amount), 0);
+    const avgFare = paid.length ? revenue / paid.length : 0;
     const multimodal = multimodalTrips.filter((t) => Array.isArray(t.legs) && (t.legs as unknown[]).length > 1).length;
     const multimodalPct = multimodalTrips.length ? Math.round((multimodal / multimodalTrips.length) * 100) : 0;
 
-    const base = [0.42, 0.55, 0.6, 0.78, 0.9, 1].map((f) => Math.round(revenue * f * 100) / 100);
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+    const buckets = reportBuckets(period, now);
+    const revenueBars = buckets.map((b) => ({
+      m: b.label,
+      value: paid.filter((p) => p.createdAt >= b.start && p.createdAt < b.end).reduce((s, p) => s + dec(p.amount), 0),
+    }));
 
     res.json({
+      period,
       tripsThisMonth: trips,
       avgFare: Number(avgFare.toFixed(2)),
       multimodalPct,
-      revenueBars: months.map((m, i) => ({ m, value: base[i] })),
+      revenueBars,
     });
   })
 );

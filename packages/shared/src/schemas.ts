@@ -150,6 +150,25 @@ export const assignTripSchema = z.object({
   tripId: z.string().min(1, "Pick a departure"),
 });
 
+/* ---------------- Self-service profile (any role) ---------------- */
+export const updateProfileSchema = z.object({
+  firstName: z.string().min(2, "Enter your first name"),
+  lastName: z.string().min(2, "Enter your last name"),
+  email: z.string().email("Enter a valid email"),
+  phone: z.string().min(6, "Enter a valid phone number"),
+});
+
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, "Enter your current password"),
+    newPassword: z.string().min(8, "At least 8 characters"),
+    confirmPassword: z.string().min(1, "Confirm your new password"),
+  })
+  .refine((d) => d.newPassword === d.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords don't match",
+  });
+
 /* ---------------- Passenger ---------------- */
 export const topUpSchema = z.object({
   amount: z.coerce.number({ invalid_type_error: "Enter an amount" }).positive("Enter an amount").max(1_000_000, "That's too much"),
@@ -172,3 +191,5 @@ export type CreateRouteInput = z.infer<typeof createRouteSchema>;
 export type CreateDepartureInput = z.infer<typeof createDepartureSchema>;
 export type TopUpInput = z.infer<typeof topUpSchema>;
 export type SavedPlaceInput = z.infer<typeof savedPlaceSchema>;
+export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;

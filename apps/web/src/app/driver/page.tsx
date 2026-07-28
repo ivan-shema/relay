@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { formatRWF } from "@relay/shared";
 import { api, type DriverMe, type DriverRequest, type DriverTrip } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { StatusPill } from "@/components/console";
+import { StatusPill, TicketVerifyForm, ProfileSettingsPage } from "@/components/console";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
@@ -18,6 +18,7 @@ export default function DriverConsole() {
   const [requests, setRequests] = useState<DriverRequest[]>([]);
   const [trips, setTrips] = useState<DriverTrip[]>([]);
   const [busy, setBusy] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const reload = useCallback(async () => {
     const [m, r, t] = await Promise.all([api.driverMe(), api.driverRequests(), api.driverTrips()]);
@@ -70,7 +71,7 @@ export default function DriverConsole() {
       <div style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 20, overflow: "hidden", boxShadow: "0 30px 70px -34px rgba(27,23,20,.4)" }}>
         {/* header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 28px", borderBottom: "1px solid #ece6db", background: "#faf8f4", flexWrap: "wrap", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <button onClick={() => setProfileOpen(true)} title="Profile & settings" style={{ display: "flex", alignItems: "center", gap: 13, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}>
             <div style={{ width: 44, height: 44, borderRadius: 13, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
             <div>
               <div style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: "-.4px" }}>{me.name}</div>
@@ -78,7 +79,7 @@ export default function DriverConsole() {
                 {me.vehicle ? `${me.vehicle.label} · ${me.vehicle.plate}` : "No vehicle"} · ★ {me.rating.toFixed(1)}
               </div>
             </div>
-          </div>
+          </button>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <button onClick={toggleOnline} style={{ display: "flex", alignItems: "center", gap: 8, background: me.online ? "#e7f6ee" : "#f4f1ea", color: me.online ? "#1f9d6b" : "#8c8378", border: `1px solid ${me.online ? "#bfe6d2" : "#e9e3d8"}`, borderRadius: 12, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: me.online ? "#1f9d6b" : "#a39a8d" }} />
@@ -88,6 +89,11 @@ export default function DriverConsole() {
           </div>
         </div>
 
+        {profileOpen ? (
+          <div style={{ padding: "24px 28px" }}>
+            <ProfileSettingsPage role="Driver" onBack={() => { setProfileOpen(false); reload().catch(() => undefined); }} />
+          </div>
+        ) : (
         <div className="rel-track-grid" style={{ padding: "24px 28px", gap: 20 }}>
           {/* left column */}
           <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -119,6 +125,12 @@ export default function DriverConsole() {
                     </div>
                     <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: "#ff6a1a" }}>{formatRWF(r.fare)}</div>
                   </div>
+                  {r.ticketsTotal > 0 && (
+                    <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 8 }}>Confirm boarding</div>
+                      <TicketVerifyForm onVerify={api.verifyTicket} boarded={r.ticketsBoarded} total={r.ticketsTotal} />
+                    </div>
+                  )}
                   <div style={{ display: "flex", gap: 12, marginTop: 18 }}>
                     <button disabled={busy} onClick={() => act(() => api.driverDecline(r.id))} style={{ flex: 1, background: "#f4f1ea", color: "#8c8378", border: "1px solid #e9e3d8", borderRadius: 13, padding: 14, fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Decline</button>
                     <button disabled={busy} onClick={() => act(() => api.driverAccept(r.id))} style={{ flex: 2, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 13, padding: 14, fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 10px 22px -10px rgba(255,106,26,.7)" }}>Accept ride</button>
@@ -182,6 +194,7 @@ export default function DriverConsole() {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

@@ -32,6 +32,12 @@ function hoursAgo(h: number) {
 function makeRef(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+function makeTicketCode(): string {
+  let code = "";
+  for (let i = 0; i < 8; i++) code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  return code;
+}
 
 async function main() {
   console.log("Seeding Relay database…");
@@ -43,6 +49,7 @@ async function main() {
   await prisma.savedPlace.deleteMany();
   await prisma.payment.deleteMany();
   await prisma.rating.deleteMany();
+  await prisma.ticket.deleteMany();
   await prisma.booking.deleteMany();
   await prisma.trip.deleteMany();
   await prisma.route.deleteMany();
@@ -220,8 +227,9 @@ async function main() {
   const reqTrip = jeanTrips[0];
   for (const p of [passengers[1], passengers[2]]) {
     const b = await prisma.booking.create({
-      data: { reference: makeRef("RLY"), passengerId: p.id, tripId: reqTrip.id, seats: 1, fare: reqTrip.fare, status: "CONFIRMED", seatNumber: "12A" },
+      data: { reference: makeRef("RLY"), passengerId: p.id, tripId: reqTrip.id, seats: 1, fare: reqTrip.fare, status: "CONFIRMED" },
     });
+    await prisma.ticket.create({ data: { bookingId: b.id, seatNumber: "12A", code: makeTicketCode() } });
     await prisma.payment.create({
       data: { bookingId: b.id, amount: reqTrip.fare, method: "MOBILE_MONEY", status: "PAID", reference: makeRef("PAY") },
     });
@@ -237,8 +245,9 @@ async function main() {
     const fare = Number(trip.fare);
     const when = hoursAgo(1 + d * 3);
     const b = await prisma.booking.create({
-      data: { reference: makeRef("RLY"), passengerId: passenger.id, tripId: trip.id, seats: 1, fare, status: "COMPLETED", seatNumber: "10B", createdAt: when, updatedAt: when },
+      data: { reference: makeRef("RLY"), passengerId: passenger.id, tripId: trip.id, seats: 1, fare, status: "COMPLETED", createdAt: when, updatedAt: when },
     });
+    await prisma.ticket.create({ data: { bookingId: b.id, seatNumber: "10B", code: makeTicketCode(), boarded: true, boardedAt: when, createdAt: when } });
     await prisma.payment.create({
       data: { bookingId: b.id, amount: fare, method: methods[d % methods.length], status: "PAID", reference: makeRef("PAY"), createdAt: when },
     });

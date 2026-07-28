@@ -15,6 +15,7 @@ import { operatorRouter } from "./routes/operator";
 import { adminRouter } from "./routes/admin";
 import { meRouter } from "./routes/me";
 import { documentsRouter } from "./routes/documents";
+import { ticketsRouter } from "./routes/tickets";
 
 export function createApp() {
   const app = express();
@@ -37,6 +38,7 @@ export function createApp() {
   app.use("/admin", adminRouter);
   app.use("/me", meRouter);
   app.use("/documents", documentsRouter);
+  app.use("/tickets", ticketsRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
   app.use(errorHandler);

@@ -92,6 +92,13 @@ export interface CreateBookingInput {
   seats?: number;
 }
 
+export interface TicketSummary {
+  id: string;
+  code: string;
+  seatNumber: string;
+  boarded: boolean;
+}
+
 export interface BookingDetail {
   id: string;
   trip: TripSummary;
@@ -100,6 +107,7 @@ export interface BookingDetail {
   fare: number;
   createdAt: string;
   payment?: PaymentDetail;
+  tickets: TicketSummary[];
 }
 
 // ---------- Payment ----------
@@ -126,6 +134,7 @@ export interface TrackingSnapshot {
   progressPct: number; // 0..100 along the route
   driver: { name: string; vehicle: string; plate: string; phone: string } | null;
   seatNumber?: string;
+  anyBoarded?: boolean;
 }
 
 // ---------- Ratings ----------

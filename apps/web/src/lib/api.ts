@@ -7,10 +7,11 @@ import type {
   Place,
   TripSummary,
   TrackingSnapshot,
+  TicketSummary,
   Paginated,
 } from "@relay/shared";
 
-export type { Paginated } from "@relay/shared";
+export type { Paginated, TicketSummary } from "@relay/shared";
 
 function pageQuery(page?: number, pageSize?: number): string {
   const params = new URLSearchParams();
@@ -145,9 +146,17 @@ export const api = {
   tracking: (bookingId: string) =>
     request<TrackingSnapshot>(`/tracking/${bookingId}`, { auth: true }),
 
-  // ratings
+  // tickets — one per purchased seat, boarded independently. Staff confirm
+  // boarding by the code on the ticket the passenger presents, never by an id
+  // already visible to them from a booking list.
+  verifyTicket: (code: string) =>
+    request<{ seatNumber: string; boarded: boolean }>("/tickets/verify", { method: "POST", body: { code }, auth: true }),
+
+  // ratings — editableUntil marks how long a typo/misclick can still be fixed
   rate: (body: { bookingId: string; score: number; comment?: string }) =>
-    request<unknown>("/ratings", { method: "POST", body, auth: true }),
+    request<RatingResult>("/ratings", { method: "POST", body, auth: true }),
+  updateRating: (bookingId: string, body: { score: number; comment?: string }) =>
+    request<RatingResult>(`/ratings/${bookingId}`, { method: "PATCH", body, auth: true }),
 
   // planned (Plan ahead watches)
   planned: () =>
@@ -194,11 +203,17 @@ export const api = {
 
   // ---- me (passenger self-service) ----
   meStats: () => request<MeStats>("/me/stats", { auth: true }),
+  updateProfile: (body: { firstName: string; lastName: string; email: string; phone: string }) =>
+    request<AuthUser>("/me/profile", { method: "PATCH", body, auth: true }),
+  changePassword: (body: { currentPassword: string; newPassword: string; confirmPassword: string }) =>
+    request<{ ok: boolean }>("/me/password", { method: "POST", body, auth: true }),
   notifications: (page?: number) => request<NotificationList>(`/me/notifications${pageQuery(page)}`, { auth: true }),
   markNotificationRead: (id: string) => request<unknown>(`/me/notifications/${id}/read`, { method: "POST", auth: true }),
   markAllNotificationsRead: () => request<unknown>("/me/notifications/read-all", { method: "POST", auth: true }),
   wallet: () => request<WalletData>("/me/wallet", { auth: true }),
   walletTopup: (amount: number) => request<{ balance: number }>("/me/wallet/topup", { method: "POST", body: { amount }, auth: true }),
+  setAutoTopup: (enabled: boolean) => request<{ autoTopupEnabled: boolean }>("/me/wallet/auto-topup", { method: "POST", body: { enabled }, auth: true }),
+  insights: () => request<Insights>("/me/insights", { auth: true }),
   savedPlaces: () => request<SavedPlace[]>("/me/places", { auth: true }),
   addSavedPlace: (body: { label: string; area: string; icon?: string }) => request<SavedPlace>("/me/places", { method: "POST", body, auth: true }),
   deleteSavedPlace: (id: string) => request<unknown>(`/me/places/${id}`, { method: "DELETE", auth: true }),
@@ -252,13 +267,25 @@ export const api = {
     return request<Paginated<AdminUser>>(`/admin/users${qs ? `?${qs}` : ""}`, { auth: true });
   },
   adminOperators: (page?: number) => request<Paginated<AdminOperator>>(`/admin/operators${pageQuery(page)}`, { auth: true }),
+  adminOperatorDetail: (id: string) => request<AdminOperatorDetail>(`/admin/operators/${id}`, { auth: true }),
+  adminSuspendOperator: (id: string) => request<{ status: string }>(`/admin/operators/${id}/suspend`, { method: "POST", auth: true }),
+  adminReinstateOperator: (id: string) => request<{ status: string }>(`/admin/operators/${id}/reinstate`, { method: "POST", auth: true }),
   adminApprovals: () => request<AdminApproval[]>("/admin/approvals", { auth: true }),
   adminApprove: (id: string) => request<unknown>(`/admin/operators/${id}/approve`, { method: "POST", auth: true }),
   adminReject: (id: string) => request<unknown>(`/admin/operators/${id}/reject`, { method: "POST", auth: true }),
   adminPayments: (page?: number) => request<AdminPayments>(`/admin/payments${pageQuery(page)}`, { auth: true }),
-  adminReports: () => request<AdminReports>("/admin/reports", { auth: true }),
+  adminReports: (period?: AdminReports["period"]) => request<AdminReports>(`/admin/reports${period ? `?period=${period}` : ""}`, { auth: true }),
   adminResolveComplaint: (id: string) => request<unknown>(`/admin/complaints/${id}/resolve`, { method: "POST", auth: true }),
 };
+
+export interface RatingResult {
+  id: string;
+  bookingId: string;
+  score: number;
+  comment: string | null;
+  createdAt: string;
+  editableUntil: string;
+}
 
 // ---------- me / self-service types ----------
 export interface MeStats {
@@ -266,6 +293,11 @@ export interface MeStats {
   co2SavedKg: number;
   memberYears: number;
   rating: number;
+  tier: string;
+  points: number;
+  nextTier: string | null;
+  tripsToNextTier: number | null;
+  tierProgressPct: number;
 }
 export interface NotificationItem {
   id: string;
@@ -286,6 +318,7 @@ export interface WalletTxn {
 }
 export interface WalletData {
   balance: number;
+  autoTopupEnabled: boolean;
   transactions: WalletTxn[];
 }
 export interface SavedPlace {
@@ -293,6 +326,30 @@ export interface SavedPlace {
   label: string;
   area: string;
   icon: string;
+}
+export interface ModeMeta {
+  code: string;
+  label: string;
+  color: string;
+  bg: string;
+}
+export interface FrequentRoute extends ModeMeta {
+  route: string;
+  tripCount: number;
+}
+export interface PendingRating {
+  bookingId: string;
+  route: string;
+  fare: number;
+}
+export interface SpendByMode extends ModeMeta {
+  amount: number;
+  pct: number;
+}
+export interface Insights {
+  frequentRoutes: FrequentRoute[];
+  pendingRating: PendingRating | null;
+  spendThisMonth: { total: number; byMode: SpendByMode[] };
 }
 
 // ---------- role console response types ----------
@@ -316,6 +373,8 @@ export interface DriverRequest {
   fare: number;
   distanceKm: number;
   seatNumber: string | null;
+  ticketsBoarded: number;
+  ticketsTotal: number;
 }
 export interface DriverTrip {
   id: string;
@@ -403,11 +462,14 @@ export interface OperatorDriverTrip {
 }
 export interface OperatorBookingRow {
   id: string;
+  bookingId: string;
   passenger: string;
   route: string;
   mode: string;
   fare: number;
   status: string;
+  ticketsBoarded: number;
+  ticketsTotal: number;
 }
 export interface OperatorPayments {
   transactions: Paginated<{ id: string; booking: string; method: string; amount: number; status: string }>;
@@ -457,11 +519,33 @@ export interface AdminOperator {
   revenue: number;
   status: string;
 }
+export interface AdminOperatorDetail {
+  id: string;
+  company: string;
+  type: string;
+  color: string;
+  bg: string;
+  initial: string;
+  status: string;
+  date: string;
+  submittedAt?: string;
+  applicant?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  contactInfo?: string | null;
+  idNumber?: string | null;
+  modes?: string[];
+  vehicles: number;
+  drivers: number;
+  revenue: number;
+  documents?: KycDocument[];
+}
 export interface AdminPayments {
   transactions: Paginated<{ id: string; user: string; operator: string; method: string; amount: number; status: string }>;
   summary: { total: number; mobileMoney: number; wallet: number; qrCard: number };
 }
 export interface AdminReports {
+  period: "week" | "month" | "year" | "all";
   tripsThisMonth: number;
   avgFare: number;
   multimodalPct: number;

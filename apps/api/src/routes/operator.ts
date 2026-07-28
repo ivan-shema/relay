@@ -584,7 +584,7 @@ operatorRouter.get(
     const [bookings, total] = await prisma.$transaction([
       prisma.booking.findMany({
         where,
-        include: { passenger: true, trip: { include: { route: true } } },
+        include: { passenger: true, tickets: true, trip: { include: { route: true } } },
         orderBy: { createdAt: "desc" },
         skip: p.skip,
         take: p.take,
@@ -595,11 +595,16 @@ operatorRouter.get(
       paged(
         bookings.map((b) => ({
           id: b.reference,
+          bookingId: b.id,
           passenger: fullNameOf(b.passenger),
           route: b.trip.route.name,
           mode: (b.trip.legs as { mode: string }[]).map((l) => l.mode).join(" + "),
           fare: dec(b.fare),
           status: b.status,
+          // Never expose per-ticket codes/ids here — boarding must come from
+          // the code on the ticket the passenger presents, not from this list.
+          ticketsBoarded: b.tickets.filter((t) => t.boarded).length,
+          ticketsTotal: b.tickets.length,
         })),
         total,
         p

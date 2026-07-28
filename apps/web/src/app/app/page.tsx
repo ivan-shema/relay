@@ -13,8 +13,8 @@ import { QRCodeSVG } from "qrcode.react";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
-import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, type TopUpInput, type SavedPlaceInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats } from "@/lib/api";
+import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
@@ -23,7 +23,7 @@ const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
 type PlanScreen = "home" | "search" | "available" | "planAhead" | "pay" | "track" | "done";
-type Tab = "plan" | "trips" | "wallet" | "you";
+type Tab = "plan" | "trips" | "orders" | "wallet" | "you";
 
 // Operator application status for the current passenger: undefined = still
 // loading, null = never applied, object = has an application on file.
@@ -68,6 +68,45 @@ export default function PassengerApp() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // First page of the passenger's own bookings — shared by the Home banner,
+  // the Trips boarding pass / recent history, and Orders' initial view.
+  // Orders paginates further on its own; this covers the common case.
+  const [primaryBookings, setPrimaryBookings] = useState<BookingDetail[]>([]);
+  const [insights, setInsights] = useState<Insights | null>(null);
+
+  const loadPrimaryBookings = useCallback(() => {
+    api.bookings(1).then((p) => setPrimaryBookings(p.items)).catch(() => undefined);
+  }, []);
+  const loadInsights = useCallback(() => {
+    api.insights().then(setInsights).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (user) {
+      loadPrimaryBookings();
+      loadInsights();
+    }
+  }, [user, loadPrimaryBookings, loadInsights]);
+
+  const activeBooking = primaryBookings.find((b) => b.status === "CONFIRMED") ?? null;
+  const recentHistory = primaryBookings.filter((b) => b.status === "COMPLETED").slice(0, 3);
+
+  // Jump into the existing pay/track screens for an already-created booking —
+  // used by Orders ("Pay now" / "View ticket") and the Home active-trip banner,
+  // as opposed to startBooking() which creates a brand new one.
+  const payExistingBooking = useCallback((b: BookingDetail) => {
+    setSelected(b.trip);
+    setBooking(b);
+    setPayMethod("MOBILE_MONEY");
+    setTab("plan");
+    setScreen("pay");
+  }, []);
+  const trackExistingBooking = useCallback((b: BookingDetail) => {
+    setSelected(b.trip);
+    setBooking(b);
+    setTrackPhase("approaching");
+    setTab("plan");
+    setScreen("track");
+  }, []);
   const requireAuth = useCallback(() => {
     if (!user) {
       router.push("/auth?mode=login");
@@ -76,11 +115,13 @@ export default function PassengerApp() {
     return true;
   }, [user, router]);
 
-  const loadTrips = useCallback(async () => {
+  // Accepts explicit origin/dest so callers (e.g. rebooking a past route) can
+  // search immediately without waiting on a state update to land first.
+  const loadTrips = useCallback(async (o?: string, d?: string) => {
     setError(null);
     setTripsLoading(true);
     try {
-      setTrips(await api.trips(origin, dest));
+      setTrips(await api.trips(o ?? origin, d ?? dest));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not load trips");
     } finally {
@@ -92,6 +133,17 @@ export default function PassengerApp() {
     setScreen("available");
     await loadTrips();
   }, [loadTrips]);
+
+  const rebookRoute = useCallback(
+    (originLabel: string, destLabel: string) => {
+      setOrigin(originLabel);
+      setDest(destLabel);
+      setTab("plan");
+      setScreen("available");
+      loadTrips(originLabel, destLabel);
+    },
+    [loadTrips]
+  );
 
   const startBooking = useCallback(
     async (trip: TripSummary) => {
@@ -119,6 +171,7 @@ export default function PassengerApp() {
     try {
       await api.pay({ bookingId: booking.id, method: payMethod });
       await refreshUser();
+      loadPrimaryBookings();
       setTrackPhase("approaching");
       setScreen("track");
     } catch (e) {
@@ -126,18 +179,21 @@ export default function PassengerApp() {
     } finally {
       setBusy(false);
     }
-  }, [booking, payMethod, refreshUser]);
+  }, [booking, payMethod, refreshUser, loadPrimaryBookings]);
 
   const submitRating = useCallback(
-    async (score: number) => {
-      if (!booking) return;
+    async (score: number, bookingId?: string, comment?: string) => {
+      const id = bookingId ?? booking?.id;
+      if (!id) return;
       try {
-        await api.rate({ bookingId: booking.id, score });
+        await api.rate({ bookingId: id, score, comment });
+        loadPrimaryBookings();
+        loadInsights();
       } catch {
         /* ignore — already completed is fine */
       }
     },
-    [booking]
+    [booking, loadPrimaryBookings, loadInsights]
   );
 
   const resetToHome = () => {
@@ -194,6 +250,11 @@ export default function PassengerApp() {
               onSeeTrips={goAvailable}
               onPlanAhead={() => setScreen("planAhead")}
               onBook={startBooking}
+              activeBooking={activeBooking}
+              onTrackActive={trackExistingBooking}
+              insights={insights}
+              onPickRoute={(o, d) => { setOrigin(o); setDest(d); goAvailable(); }}
+              onRate={submitRating}
             />
           </div>
         )}
@@ -216,14 +277,27 @@ export default function PassengerApp() {
         {tab === "plan" && screen === "track" && selected && booking && (
           <TrackScreen booking={booking} trip={selected} phase={trackPhase} onBoard={() => setTrackPhase("boarded")} onArrived={() => setScreen("done")} />
         )}
-        {tab === "plan" && screen === "done" && selected && (
+        {tab === "plan" && screen === "done" && selected && booking && (
           <div className="rel-narrow">
-            <DoneScreen trip={selected} onRate={submitRating} onNewTrip={resetToHome} />
+            <DoneScreen trip={selected} bookingId={booking.id} onRated={() => { loadPrimaryBookings(); loadInsights(); }} onNewTrip={resetToHome} />
           </div>
         )}
 
-        {tab === "trips" && <div className="rel-mid"><TripsTab /></div>}
-        {tab === "wallet" && <div className="rel-mid"><WalletTab /></div>}
+        {tab === "trips" && (
+          <TripsTab
+            activeBooking={activeBooking}
+            recentHistory={recentHistory}
+            onTrack={trackExistingBooking}
+          />
+        )}
+        {tab === "orders" && (
+          <OrdersTab
+            onPay={payExistingBooking}
+            onTrack={trackExistingBooking}
+            onRebook={rebookRoute}
+          />
+        )}
+        {tab === "wallet" && <div className="rel-mid"><WalletTab insights={insights} /></div>}
         {tab === "you" && <div className="rel-mid"><YouTab operatorStatus={operatorStatus} onApplyOperator={() => setOnboardOpen(true)} /></div>}
       </main>
     </div>
@@ -248,6 +322,11 @@ function HomeScreen({
   onSeeTrips,
   onPlanAhead,
   onBook,
+  activeBooking,
+  onTrackActive,
+  insights,
+  onPickRoute,
+  onRate,
 }: {
   origin: string;
   dest: string;
@@ -259,12 +338,18 @@ function HomeScreen({
   onSeeTrips: () => void;
   onPlanAhead: () => void;
   onBook: (t: TripSummary) => void;
+  activeBooking: BookingDetail | null;
+  onTrackActive: (b: BookingDetail) => void;
+  insights: Insights | null;
+  onPickRoute: (origin: string, dest: string) => void;
+  onRate: (score: number, bookingId?: string) => void;
 }) {
   const { user } = useAuth();
   const [planned, setPlanned] = useState<{ id: string; from: string; to: string; when: string }[]>([]);
   const [places, setPlaces] = useState<SavedPlace[]>([]);
   const [live, setLive] = useState<TripSummary[]>([]);
   const [liveLoading, setLiveLoading] = useState(true);
+  const [rating, setRating] = useState(0);
 
   useEffect(() => {
     setLiveLoading(true);
@@ -293,6 +378,8 @@ function HomeScreen({
           </div>
         )}
       </div>
+
+      {activeBooking && <ActiveTripBanner booking={activeBooking} onTrack={() => onTrackActive(activeBooking)} />}
 
       <div className="rel-home-grid">
         {/* LEFT — search + planned + saved */}
@@ -323,6 +410,26 @@ function HomeScreen({
             <button onClick={onSeeTrips} style={{ flex: 1, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: 16, fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 14px 30px -14px rgba(255,106,26,.75)" }}>See trips now</button>
             <button onClick={onPlanAhead} style={{ flex: 1, background: "#fff", color: "#1b1714", border: "1px solid #e3ddd1", borderRadius: 15, padding: 16, fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}>Plan ahead</button>
           </div>
+
+          {insights && insights.frequentRoutes.length > 0 && (
+            <>
+              <div style={{ margin: "20px 0 10px", fontSize: 12, fontWeight: 700, color: "#8c8378", letterSpacing: ".05em", textTransform: "uppercase" }}>Frequent routes</div>
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${insights.frequentRoutes.length},1fr)`, gap: 11 }}>
+                {insights.frequentRoutes.map((r) => {
+                  const [from, to] = r.route.split(" → ");
+                  return (
+                    <button key={r.route} onClick={() => onPickRoute(from ?? r.route, to ?? r.route)} style={{ textAlign: "left", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 14, padding: "12px 13px", cursor: "pointer", display: "flex", alignItems: "center", gap: 10, fontFamily: "'Manrope', sans-serif" }}>
+                      <span style={{ width: 30, height: 30, borderRadius: 9, background: r.bg, color: r.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, fontFamily: MONO, flex: "none" }}>{r.code}</span>
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: "block", fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.route}</span>
+                        <span style={{ display: "block", fontSize: 10.5, color: "#8c8378", fontWeight: 600 }}>{r.tripCount} {r.tripCount === 1 ? "trip" : "trips"}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
 
           {/* mode chips */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 11, marginTop: 14 }}>
@@ -365,6 +472,25 @@ function HomeScreen({
                 ))}
               </div>
             </>
+          )}
+
+          {insights?.pendingRating && (
+            <div style={{ display: "flex", alignItems: "center", gap: 14, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "15px 16px", marginTop: 18 }}>
+              <div style={{ width: 42, height: 42, borderRadius: 12, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19, flex: "none" }}>★</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700 }}>Rate your last ride</div>
+                <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{insights.pendingRating.route}</div>
+              </div>
+              <div style={{ display: "flex", gap: 3, flex: "none" }}>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <span
+                    key={n}
+                    onClick={() => { setRating(n); onRate(n, insights.pendingRating!.bookingId); }}
+                    style={{ cursor: "pointer", fontSize: 19, lineHeight: 1, color: n <= rating ? "#ff6a1a" : "#e0dbd0" }}
+                  >★</span>
+                ))}
+              </div>
+            </div>
           )}
 
           <OperatorHomeCard status={operatorStatus} onApply={onApplyOperator} />
@@ -419,6 +545,69 @@ function HomeScreen({
             </div>
           </div>
         </aside>
+      </div>
+    </div>
+  );
+}
+
+// Live-tracking preview for the passenger's current confirmed trip, shown at
+// the top of Home. Polls the same tracking snapshot TrackScreen uses.
+function ActiveTripBanner({ booking, onTrack }: { booking: BookingDetail; onTrack: () => void }) {
+  const [snap, setSnap] = useState<TrackingSnapshot | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const poll = () => api.tracking(booking.id).then((s) => active && setSnap(s)).catch(() => undefined);
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => { active = false; clearInterval(timer); };
+  }, [booking.id]);
+
+  const trip = booking.trip;
+  const eta = snap?.etaMinutes ?? 4;
+  const progress = snap?.progressPct ?? 10;
+
+  return (
+    <div style={{ position: "relative", overflow: "hidden", background: "#1b1714", borderRadius: 22, padding: 6, marginBottom: 20, display: "flex", gap: 6, flexWrap: "wrap" }} className="rel-up">
+      <div style={{ position: "relative", flex: 1, minWidth: 260, padding: "18px 18px 16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#1f9d6b" }} />
+          <span style={{ fontSize: 11, fontWeight: 800, color: "#8fe3bd", textTransform: "uppercase", letterSpacing: ".06em" }}>On the way · tracking live</span>
+        </div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, color: "#fff", marginTop: 11, letterSpacing: "-.3px" }}>{trip.origin} → {trip.destination}</div>
+        <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 4 }}>{trip.operatorName}</div>
+
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, fontWeight: 700, color: "#9a9186", marginBottom: 6 }}>
+            <span>{trip.origin}</span>
+            <span style={{ color: "#fff" }}>ETA {eta} min</span>
+            <span>{trip.destination}</span>
+          </div>
+          <div style={{ height: 6, borderRadius: 4, background: "#2a2520", overflow: "hidden" }}>
+            <div style={{ width: `${Math.max(4, progress)}%`, height: "100%", borderRadius: 4, background: "linear-gradient(90deg,#ff8a3d,#ff6a1a)" }} />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 11, marginTop: 16 }}>
+          <div style={{ width: 38, height: 38, borderRadius: "50%", background: "#2a2520", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "#fff", flex: "none" }}>
+            {(snap?.driver?.name ?? "Driver").split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{snap?.driver?.name ?? "Your driver"}</div>
+            <div style={{ fontSize: 11.5, color: "#9a9186", fontWeight: 600 }}>Seat {snap?.seatNumber ?? "—"} · {snap?.driver?.plate ?? trip.operatorName}</div>
+          </div>
+          <button style={{ background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.14)", color: "#fff", borderRadius: 10, padding: "9px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Call</button>
+          <button onClick={onTrack} style={{ background: "#ff6a1a", border: "none", color: "#fff", borderRadius: 10, padding: "9px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Track</button>
+        </div>
+      </div>
+
+      <div style={{ position: "relative", flex: 1, minWidth: 220, minHeight: 200, borderRadius: 18, overflow: "hidden", background: "#e9efe8" }}>
+        <div style={{ position: "absolute", inset: 0, backgroundImage: "linear-gradient(rgba(27,23,20,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(27,23,20,.05) 1px,transparent 1px)", backgroundSize: "26px 26px" }} />
+        <svg viewBox="0 0 280 220" preserveAspectRatio="xMidYMid slice" style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}>
+          <path d="M40 30 C 120 60, 80 130, 175 140 S 235 190, 245 205" fill="none" stroke="#ff6a1a" strokeWidth="5" strokeLinecap="round" strokeDasharray="2 11" />
+          <circle cx="40" cy="30" r="8" fill="#1b1714" stroke="#fff" strokeWidth="3" />
+          <rect x="237" y="197" width="16" height="16" rx="4" fill="#ff6a1a" stroke="#fff" strokeWidth="3" />
+        </svg>
       </div>
     </div>
   );
@@ -791,6 +980,13 @@ function TrackScreen({ booking, trip, phase, onBoard, onArrived }: { booking: Bo
     };
   }, [booking.id]);
 
+  // Boarding is confirmed by the driver/operator scanning the ticket, not by
+  // the passenger — flip to the "on board" view as soon as that's reflected
+  // in the live snapshot, instead of a self-reported button.
+  useEffect(() => {
+    if (phase === "approaching" && snap?.anyBoarded) onBoard();
+  }, [phase, snap?.anyBoarded, onBoard]);
+
   const eta = snap?.etaMinutes ?? 3;
   const banner = phase === "approaching" ? `${trip.operatorName} · arriving in ${eta} min` : `On board · arriving in ${eta} min`;
 
@@ -815,7 +1011,9 @@ function TrackScreen({ booking, trip, phase, onBoard, onArrived }: { booking: Bo
                 <div style={{ flex: 1 }}><div style={{ fontSize: 15, fontWeight: 700 }}>{snap?.driver?.name ?? "Driver"}</div><div style={{ fontSize: 12.5, color: "#8c8378" }}>{trip.operatorName} · <span style={{ fontFamily: MONO }}>{snap?.driver?.plate ?? "—"}</span> · ★ 4.9</div></div>
                 <button style={{ width: 42, height: 42, borderRadius: 12, border: "1px solid #e9e3d8", background: "#f4f1ea", fontSize: 16, cursor: "pointer" }}>✆</button>
               </div>
-              <button onClick={onBoard} style={{ width: "100%", marginTop: 15, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: 15, fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>I&apos;ve boarded · scan to confirm</button>
+              <div style={{ marginTop: 15, background: "#faf8f4", border: "1px dashed #d8d1c4", borderRadius: 12, padding: "11px 13px", fontSize: 12.5, color: "#6b6258", fontWeight: 600, textAlign: "center" }}>
+                Show your ticket to the driver or conductor to board — this updates automatically once they confirm.
+              </div>
             </div>
             <div style={{ marginTop: 16, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "6px 16px" }}>
               <Step done label="Seat booked & paid" right={formatRWF(trip.fare)} />
@@ -845,8 +1043,53 @@ function TrackScreen({ booking, trip, phase, onBoard, onArrived }: { booking: Bo
 }
 
 /* ============ DONE ============ */
-function DoneScreen({ trip, onRate, onNewTrip }: { trip: TripSummary; onRate: (score: number) => void; onNewTrip: () => void }) {
+const REVIEW_TAGS = ["Clean ride", "On time", "Safe driver"];
+
+function fmtCountdown(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function DoneScreen({ trip, bookingId, onRated, onNewTrip }: { trip: TripSummary; bookingId: string; onRated: () => void; onNewTrip: () => void }) {
   const [stars, setStars] = useState(0);
+  const [tags, setTags] = useState<string[]>([]);
+  const [review, setReview] = useState("");
+  const [phase, setPhase] = useState<"form" | "submitted">("form");
+  const [editableUntil, setEditableUntil] = useState<Date | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (phase !== "submitted" || !editableUntil) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [phase, editableUntil]);
+
+  const toggleTag = (t: string) => setTags((ts) => (ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]));
+
+  const msLeft = editableUntil ? editableUntil.getTime() - now : 0;
+  const canEdit = phase === "submitted" && msLeft > 0;
+
+  const submit = async () => {
+    if (stars === 0) return;
+    setBusy(true);
+    setError(null);
+    const comment = [tags.join(", "), review.trim()].filter(Boolean).join(" — ") || undefined;
+    try {
+      const r = editableUntil ? await api.updateRating(bookingId, { score: stars, comment }) : await api.rate({ bookingId, score: stars, comment });
+      setEditableUntil(new Date(r.editableUntil));
+      setPhase("submitted");
+      onRated();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not save your review");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startEdit = () => setPhase("form");
+
   return (
     <div style={{ padding: "8px 22px 28px" }} className="rel-up">
       <div style={{ textAlign: "center", padding: "26px 0 10px" }}>
@@ -863,79 +1106,430 @@ function DoneScreen({ trip, onRate, onNewTrip }: { trip: TripSummary; onRate: (s
         <div style={{ fontSize: 12.5, color: "#8c8378", marginBottom: 14 }}>How was your {trip.operatorName} ride?</div>
         <div style={{ display: "flex", justifyContent: "center", gap: 9, marginBottom: 16 }}>
           {[1, 2, 3, 4, 5].map((s) => (
-            <button key={s} onClick={() => { setStars(s); onRate(s); }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 32, lineHeight: 1, color: s <= stars ? "#ff6a1a" : "#e0dbd0", padding: 0 }}>★</button>
+            <button key={s} disabled={phase === "submitted"} onClick={() => setStars(s)} style={{ background: "none", border: "none", cursor: phase === "submitted" ? "default" : "pointer", fontSize: 32, lineHeight: 1, color: s <= stars ? "#ff6a1a" : "#e0dbd0", padding: 0 }}>★</button>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-          {["Clean ride", "On time", "Safe driver"].map((t) => (
-            <span key={t} style={{ fontSize: 12, fontWeight: 600, border: "1px solid #e9e3d8", borderRadius: 9, padding: "7px 12px" }}>{t}</span>
-          ))}
-        </div>
+
+        {phase === "submitted" ? (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: "#1f9d6b", fontWeight: 700, fontSize: 13.5, padding: "6px 0" }}>
+              <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#e7f6ee", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12 }}>✓</span>
+              Thanks for your feedback!
+            </div>
+            {canEdit && (
+              <div style={{ marginTop: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: "#8c8378", fontWeight: 600 }}>Spot a typo? You can edit for {fmtCountdown(msLeft)}</span>
+                <button onClick={startEdit} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Edit review</button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", marginBottom: 14 }}>
+              {REVIEW_TAGS.map((t) => {
+                const active = tags.includes(t);
+                return (
+                  <button key={t} onClick={() => toggleTag(t)} style={{ fontSize: 12, fontWeight: 700, border: `1px solid ${active ? "#ff6a1a" : "#e9e3d8"}`, background: active ? "#fff6f0" : "#fff", color: active ? "#ff6a1a" : "#1b1714", borderRadius: 9, padding: "7px 12px", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{t}</button>
+                );
+              })}
+            </div>
+            <textarea
+              value={review}
+              onChange={(e) => setReview(e.target.value)}
+              placeholder="Add a written review (optional)"
+              rows={3}
+              style={{ width: "100%", border: "1px solid #e9e3d8", borderRadius: 12, padding: "11px 13px", fontSize: 13, fontFamily: "'Manrope', sans-serif", resize: "vertical", marginBottom: 10, outline: "none" }}
+            />
+            {editableUntil && <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginBottom: 10 }}>Editing — {fmtCountdown(msLeft)} left to save changes</div>}
+            {error && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginBottom: 10 }}>{error}</div>}
+            <button
+              onClick={submit}
+              disabled={stars === 0 || busy}
+              style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: 16, fontSize: 15, fontWeight: 700, cursor: stars === 0 || busy ? "default" : "pointer", opacity: stars === 0 || busy ? 0.5 : 1, boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)", fontFamily: "'Manrope', sans-serif" }}
+            >
+              {busy ? "Saving…" : editableUntil ? "Save changes" : "Submit review"}
+            </button>
+          </>
+        )}
       </div>
-      <PrimaryBtn onClick={onNewTrip}>Done · plan another trip</PrimaryBtn>
+      <div style={{ marginTop: 12 }}>
+        <PrimaryBtn onClick={onNewTrip}>Done · plan another trip</PrimaryBtn>
+      </div>
     </div>
   );
 }
 
 /* ============ TRIPS TAB ============ */
-function TripsTab() {
+// Downloads a simple text receipt built from real booking data — no PDF
+// service in this stack, so a plain-text receipt is the honest "real" option.
+async function downloadReceipt(b: BookingDetail) {
+  const { jsPDF } = await import("jspdf");
+  const doc = new jsPDF({ unit: "pt", format: [320, 480] });
+  const ink: [number, number, number] = [27, 23, 20];
+  const dim: [number, number, number] = [140, 131, 120];
+  const accent: [number, number, number] = [255, 106, 26];
+  const pageW = 320;
+  const marginX = 26;
+
+  // header band
+  doc.setFillColor(...ink);
+  doc.rect(0, 0, pageW, 84, "F");
+  doc.setFillColor(...accent);
+  doc.circle(pageW - 40, 30, 5, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text("Relay", marginX, 38);
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(200, 195, 188);
+  doc.text("Ride receipt", marginX, 54);
+  doc.setFontSize(8);
+  doc.text(b.id, marginX, 68);
+
+  let y = 112;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(14);
+  doc.setTextColor(...ink);
+  doc.text(`${b.trip.origin}  ->  ${b.trip.destination}`, marginX, y);
+
+  y += 20;
+  doc.setDrawColor(230, 224, 213);
+  doc.line(marginX, y, pageW - marginX, y);
+
+  const rows: [string, string][] = [
+    ["Operator", b.trip.operatorName],
+    ["Date", new Date(b.createdAt).toLocaleString()],
+    ["Seats", String(b.seats)],
+    ["Status", b.status],
+  ];
+  y += 24;
+  doc.setFontSize(10);
+  for (const [label, value] of rows) {
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(...dim);
+    doc.text(label, marginX, y);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(...ink);
+    doc.text(value, pageW - marginX, y, { align: "right" });
+    y += 22;
+  }
+
+  y += 6;
+  doc.setDrawColor(230, 224, 213);
+  doc.line(marginX, y, pageW - marginX, y);
+
+  y += 28;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.setTextColor(...dim);
+  doc.text("Total paid", marginX, y);
+  doc.setFontSize(18);
+  doc.setTextColor(...accent);
+  doc.text(formatRWF(b.fare), pageW - marginX, y, { align: "right" });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(...dim);
+  doc.text("Thanks for riding with Relay.", marginX, 456);
+
+  doc.save(`relay-receipt-${b.id}.pdf`);
+}
+
+const ORDER_STATUS: Record<string, { c: string; b: string; label: string }> = {
+  CONFIRMED: { c: "#1f9d6b", b: "#e7f6ee", label: "Confirmed" },
+  COMPLETED: { c: "#6b6258", b: "#f1ece2", label: "Completed" },
+  PENDING: { c: "#ff6a1a", b: "#fff0e6", label: "Awaiting payment" },
+  IN_PROGRESS: { c: "#2f6bff", b: "#e9f0ff", label: "In progress" },
+  CANCELLED: { c: "#c2553f", b: "#fbeae6", label: "Cancelled" },
+};
+
+/* ============ ORDERS TAB ============ */
+function OrdersTab({
+  onPay,
+  onTrack,
+  onRebook,
+}: {
+  onPay: (b: BookingDetail) => void;
+  onTrack: (b: BookingDetail) => void;
+  onRebook: (origin: string, dest: string) => void;
+}) {
   const { user } = useAuth();
   const router = useRouter();
   const [data, setData] = useState<Awaited<ReturnType<typeof api.bookings>> | null>(null);
   const [page, setPage] = useState(1);
+  const [ticketBooking, setTicketBooking] = useState<BookingDetail | null>(null);
   useEffect(() => {
     if (!user) { router.push("/auth?mode=login"); return; }
     api.bookings(page).then(setData).catch(() => undefined);
   }, [user, router, page]);
 
-  const statusStyle: Record<string, { c: string; b: string }> = {
-    CONFIRMED: { c: "#1f9d6b", b: "#e7f6ee" },
-    COMPLETED: { c: "#6b6258", b: "#f1ece2" },
-    PENDING: { c: "#ff6a1a", b: "#fff0e6" },
-    IN_PROGRESS: { c: "#2f6bff", b: "#e9f0ff" },
-    CANCELLED: { c: "#c2553f", b: "#fbeae6" },
-  };
   const bookings = data?.items ?? [];
+  const stats = [
+    { big: String(data?.total ?? bookings.length), label: "Total orders" },
+    { big: String(bookings.filter((b) => b.status === "CONFIRMED").length), label: "Active" },
+    { big: formatRWF(bookings.reduce((sum, b) => sum + (b.status !== "CANCELLED" ? b.fare : 0), 0)), label: "This page" },
+  ];
 
   return (
-    <div style={{ padding: "14px 22px 28px" }} className="rel-up">
-      <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, letterSpacing: "-.5px", margin: "6px 0 16px" }}>Your trips</div>
+    <div className="rel-mid rel-up">
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>Orders</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 32, fontWeight: 700, letterSpacing: "-.8px", lineHeight: 1.05 }}>Bookings &amp; receipts</div>
+      </div>
+
+      <div style={{ display: "flex", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, marginBottom: 18 }}>
+        {stats.map((s, i) => (
+          <div key={s.label} style={{ flex: 1, padding: "16px 18px", borderLeft: i > 0 ? "1px solid #f0ebe1" : "none" }}>
+            <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, letterSpacing: "-.4px" }}>{s.big}</div>
+            <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {data && bookings.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No trips yet — book your first ride from the Plan tab.</div>}
+        {data && bookings.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No orders yet — book your first ride from the Plan tab.</div>}
         {bookings.map((b) => {
-          const s = statusStyle[b.status] ?? statusStyle.PENDING;
+          const s = ORDER_STATUS[b.status] ?? ORDER_STATUS.PENDING;
+          const leg = b.trip.legs[0];
+          const action =
+            b.status === "PENDING" ? { label: "Pay now", onClick: () => onPay(b) } :
+            b.status === "CONFIRMED" ? { label: "View ticket", onClick: () => setTicketBooking(b) } :
+            b.status === "COMPLETED" ? { label: "Get receipt", onClick: () => downloadReceipt(b) } :
+            { label: "Rebook", onClick: () => onRebook(b.trip.origin, b.trip.destination) };
           return (
-            <div key={b.id} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: 15 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 11 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 14.5, fontWeight: 700 }}>
-                  <span style={{ width: 9, height: 9, border: "2px solid #ff6a1a", borderRadius: "50%" }} />{b.trip.origin}<span style={{ color: "#cbc3b6" }}>→</span>{b.trip.destination}
+            <div key={b.id} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "16px 18px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+                <span style={{ width: 30, height: 30, borderRadius: 9, background: leg?.color ?? "#8c8378", color: "#fff", fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: MONO, flex: "none" }}>{leg?.code ?? "?"}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.trip.origin} → {b.trip.destination}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: "#a39a8d", fontWeight: 600, marginTop: 2 }}>{b.id}</div>
                 </div>
-                <span style={{ fontSize: 10.5, fontWeight: 800, color: s.c, background: s.b, borderRadius: 7, padding: "3px 8px" }}>{b.status}</span>
+                <span style={{ fontSize: 10.5, fontWeight: 800, color: s.c, background: s.b, borderRadius: 20, padding: "4px 10px", whiteSpace: "nowrap" }}>{s.label}</span>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #f1ece2", paddingTop: 11 }}>
-                <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>{fmtDate(b.createdAt)} · {b.trip.legs.map((l) => l.label).join(", ")}</div>
-                <div style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: "#ff6a1a" }}>{formatRWF(b.fare)}</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingTop: 14, borderTop: "1px solid #f0ebe1", flexWrap: "wrap", gap: 10 }}>
+                <div style={{ display: "flex", gap: 20 }}>
+                  <div>
+                    <div style={{ fontSize: 10.5, color: "#a39a8d", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".03em" }}>When</div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2 }}>{fmtDate(b.createdAt)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10.5, color: "#a39a8d", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".03em" }}>Seats</div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2 }}>{b.seats}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10.5, color: "#a39a8d", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".03em" }}>Total</div>
+                    <div style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 700, marginTop: 2, color: "#ff6a1a" }}>{formatRWF(b.fare)}</div>
+                  </div>
+                </div>
+                <button onClick={action.onClick} style={{ background: "#f4f1ea", border: "1px solid #e9e3d8", borderRadius: 11, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", whiteSpace: "nowrap" }}>{action.label}</button>
               </div>
             </div>
           );
         })}
       </div>
       {data && <Pagination page={page} totalPages={data.totalPages} total={data.total} onPage={setPage} />}
+
+      {ticketBooking && (
+        <div
+          onClick={() => setTicketBooking(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(27,23,20,.55)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} className="rel-up" style={{ width: "100%", maxWidth: 460, maxHeight: "88vh", overflowY: "auto", position: "relative" }}>
+            <button
+              onClick={() => setTicketBooking(null)}
+              aria-label="Close"
+              style={{ position: "absolute", top: -14, right: -14, width: 34, height: 34, borderRadius: "50%", background: "#fff", border: "1px solid #e9e3d8", color: "#1b1714", fontSize: 17, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 10px 24px -10px rgba(27,23,20,.5)", zIndex: 1 }}
+            >×</button>
+            <BoardingTicket
+              booking={ticketBooking}
+              onTrack={() => { onTrack(ticketBooking); setTicketBooking(null); }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============ TRIPS TAB ============ */
+function TripsTab({
+  activeBooking,
+  recentHistory,
+  onTrack,
+}: {
+  activeBooking: BookingDetail | null;
+  recentHistory: BookingDetail[];
+  onTrack: (b: BookingDetail) => void;
+}) {
+  const [planned, setPlanned] = useState<{ id: string; from: string; to: string; when: string }[]>([]);
+  useEffect(() => { api.planned().then(setPlanned).catch(() => undefined); }, []);
+
+  return (
+    <div className="rel-mid rel-up">
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>Your trips</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 32, fontWeight: 700, letterSpacing: "-.8px", lineHeight: 1.05 }}>Ready to ride</div>
+      </div>
+
+      {activeBooking ? (
+        <>
+          <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 11 }}>Board now</div>
+          <BoardingTicket booking={activeBooking} onTrack={() => onTrack(activeBooking)} />
+        </>
+      ) : (
+        <div style={{ background: "#fff", border: "1px dashed #d8d1c4", borderRadius: 18, padding: 22, textAlign: "center", marginBottom: 22 }}>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>No trip to board right now</div>
+          <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>Book a seat from the Plan tab and your ticket will show up here.</div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "26px 0 11px" }}>
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em" }}>Planned · watching</span>
+        {planned.length > 0 && <span style={{ fontSize: 11.5, color: "#ff6a1a", fontWeight: 700 }}>{planned.length} active</span>}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {planned.length === 0 && (
+          <div style={{ background: "#fff", border: "1px dashed #d8d1c4", borderRadius: 16, padding: 16, fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>
+            No watches yet — use "Plan ahead" on the Plan tab to get notified when a matching trip is scheduled.
+          </div>
+        )}
+        {planned.map((p) => (
+          <div key={p.id} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: 15 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".05em", color: "#8c8378", background: "#f4f1ea", borderRadius: 20, padding: "4px 9px" }}>WATCHING</span>
+              <span style={{ fontSize: 11, color: "#8c8378", fontWeight: 700 }}>{p.when}</span>
+            </div>
+            <div style={{ fontSize: 14.5, fontWeight: 700, marginTop: 10 }}>{p.from} → {p.to}</div>
+            <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>No trip scheduled yet</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ margin: "30px 0 12px", fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em" }}>Recent</div>
+      <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, overflow: "hidden" }}>
+        {recentHistory.length === 0 && <div style={{ padding: 16, fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No completed trips yet.</div>}
+        {recentHistory.map((h, i) => {
+          const leg = h.trip.legs[0];
+          return (
+            <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", borderTop: i > 0 ? "1px solid #f0ebe1" : "none" }}>
+              <span style={{ width: 26, height: 26, borderRadius: 8, background: leg?.color ?? "#8c8378", color: "#fff", fontSize: 12, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: MONO, flex: "none" }}>{leg?.code ?? "?"}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700 }}>{h.trip.origin} → {h.trip.destination}</div>
+                <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600 }}>{fmtDate(h.createdAt)}</div>
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700 }}>{formatRWF(h.fare)}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Boarding-pass style ticket for the active confirmed booking — QR + perforation.
+// One independently-boardable ticket per purchased seat — a 3-seat booking
+// renders 3 cards, each with its own QR (encoding that ticket's own id, not
+// the booking id) and its own "confirm boarding" state, so scanning/confirming
+// one seat never marks the whole party as boarded.
+function BoardingTicket({ booking, onTrack }: { booking: BookingDetail; onTrack: () => void }) {
+  const trip = booking.trip;
+  const leg = trip.legs[0];
+  const tickets = booking.tickets;
+  const boardedCount = tickets.filter((t) => t.boarded).length;
+
+  return (
+    <div>
+      <div style={{ position: "relative", background: "#1b1714", borderRadius: 24, overflow: "hidden", boxShadow: "0 26px 60px -34px rgba(27,23,20,.7)", marginBottom: 14 }}>
+        <div style={{ position: "absolute", right: -90, top: -90, width: 260, height: 260, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.22),transparent 68%)" }} />
+        <div style={{ position: "relative", zIndex: 1, padding: "22px 24px 18px", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <span style={{ width: 24, height: 24, borderRadius: 7, background: leg?.color ?? "#8c8378", color: "#fff", fontSize: 12, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: MONO }}>{leg?.code ?? "?"}</span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: "#ff9c58", textTransform: "uppercase", letterSpacing: ".08em" }}>{trip.status === "BOARDING" ? "Boarding" : "Confirmed"}</span>
+            </div>
+            <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, color: "#fff", marginTop: 12, letterSpacing: "-.3px" }}>{trip.origin} → {trip.destination}</div>
+            <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 3 }}>{trip.operatorName}</div>
+          </div>
+        </div>
+
+        <div style={{ position: "relative", zIndex: 1, display: "flex", padding: "0 24px 20px" }}>
+          {[
+            { label: "Seats", value: tickets.length > 0 ? `${boardedCount}/${tickets.length} boarded` : `${booking.seats}` },
+            { label: "Departs", value: fmtTime(trip.departAt) },
+            { label: "Fare paid", value: formatRWF(booking.fare) },
+          ].map((m, i) => (
+            <div key={m.label} style={{ flex: 1, borderLeft: i > 0 ? "1px solid rgba(255,255,255,.1)" : "none", paddingLeft: i > 0 ? 16 : 0 }}>
+              <div style={{ fontSize: 10.5, color: "#9a9186", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em" }}>{m.label}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#fff", marginTop: 3, fontFamily: m.label === "Departs" ? "'JetBrains Mono',monospace" : "'Space Grotesk',sans-serif" }}>{m.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {tickets.length === 0 ? (
+        <div style={{ background: "#fff", border: "1px dashed #d8d1c4", borderRadius: 16, padding: 16, fontSize: 12.5, color: "#8c8378", fontWeight: 600, textAlign: "center" }}>
+          Tickets are generated once payment settles.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {tickets.map((t) => (
+            <div key={t.id} style={{ position: "relative", background: "#fff", border: `1px solid ${t.boarded ? "#bfe6d2" : "#e9e3d8"}`, borderRadius: 18, overflow: "hidden" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "16px 18px" }}>
+                <div style={{ flex: "none" }}><QRCodeSVG value={t.code} size={62} bgColor="#fff" fgColor="#1b1714" /></div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 11, color: "#a39a8d", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em" }}>Seat</span>
+                    <span style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700 }}>{t.seatNumber}</span>
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, letterSpacing: ".08em", marginTop: 4 }}>{t.code}</div>
+                  <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 4 }}>{t.boarded ? "Checked in — the driver confirmed this seat." : "Show this code (or QR) to the driver or conductor to board."}</div>
+                </div>
+                <span style={{ flex: "none", fontSize: 10.5, fontWeight: 800, color: t.boarded ? "#1f9d6b" : "#ff6a1a", background: t.boarded ? "#e7f6ee" : "#fff0e6", borderRadius: 20, padding: "5px 11px", whiteSpace: "nowrap" }}>
+                  {t.boarded ? "✓ Boarded" : "Awaiting scan"}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 11, marginTop: 13 }}>
+        <button onClick={onTrack} style={{ flex: 1, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 14, padding: 14, fontSize: 13.5, fontWeight: 700, cursor: "pointer", color: "#1b1714", fontFamily: "'Manrope', sans-serif" }}>Live tracking</button>
+        <button onClick={() => downloadReceipt(booking)} style={{ flex: 1, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 14, padding: 14, fontSize: 13.5, fontWeight: 700, cursor: "pointer", color: "#1b1714", fontFamily: "'Manrope', sans-serif" }}>Download receipt</button>
+      </div>
     </div>
   );
 }
 
 /* ============ WALLET TAB ============ */
-function WalletTab() {
+function WalletTab({ insights }: { insights?: Insights | null }) {
   const { refreshUser } = useAuth();
   const [data, setData] = useState<WalletData | null>(null);
   const [showTopup, setShowTopup] = useState(false);
+  const [txFilter, setTxFilter] = useState<"all" | "pay" | "topup">("all");
 
   const load = useCallback(() => { api.wallet().then(setData).catch(() => undefined); }, []);
   useEffect(() => { load(); }, [load]);
 
+  const toggleAutoTopup = async () => {
+    if (!data) return;
+    const next = !data.autoTopupEnabled;
+    setData({ ...data, autoTopupEnabled: next });
+    try {
+      await api.setAutoTopup(next);
+    } catch {
+      setData((d) => (d ? { ...d, autoTopupEnabled: !next } : d));
+    }
+  };
+
+  const txs = (data?.transactions ?? []).filter(
+    (t) => txFilter === "all" || (txFilter === "pay" && t.kind === "DEBIT") || (txFilter === "topup" && t.kind === "CREDIT")
+  );
+  const spend = insights?.spendThisMonth;
+
   return (
-    <div style={{ padding: "14px 22px 28px" }} className="rel-up">
+    <div className="rel-mid rel-up">
       {showTopup && (
         <FormModal
           title="Top up wallet"
@@ -946,36 +1540,97 @@ function WalletTab() {
           onClose={() => setShowTopup(false)}
         />
       )}
-      <div style={{ background: "#1b1714", borderRadius: 22, padding: 22, color: "#fff", marginBottom: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 12.5, color: "#cfc7bb", fontWeight: 600 }}>Relay Wallet</span>
-          <span style={{ fontSize: 12, color: "#9a9186", fontFamily: MONO }}>•••• 4821</span>
-        </div>
-        <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 700, letterSpacing: "-1px", margin: "8px 0 18px" }}>{data ? formatRWF(data.balance) : "…"}</div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={() => setShowTopup(true)} style={{ flex: 1, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Top up</button>
-          <button onClick={() => window.alert("Send money — coming soon")} style={{ flex: 1, background: "#2a2520", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Send</button>
-        </div>
+
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>Payments &amp; wallet</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 32, fontWeight: 700, letterSpacing: "-.8px", lineHeight: 1.05 }}>Money &amp; transactions</div>
       </div>
-      <SectionLabel>Payment methods</SectionLabel>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
-        <PayMethodRow glyph="M" bg="#ffd400" ink="#1b1714" name="MTN MoMo" sub="•••• 4821" badge="Default" />
-        <PayMethodRow glyph="◈" bg="#1b1714" ink="#ff6a1a" name="Relay Wallet" sub="Airtel Money linked" />
-      </div>
-      <SectionLabel>Recent activity</SectionLabel>
-      <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, overflow: "hidden" }}>
-        {data && data.transactions.length === 0 && (
-          <div style={{ padding: "16px", fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No wallet activity yet.</div>
-        )}
-        {data?.transactions.map((w) => {
-          const credit = w.kind === "CREDIT";
-          return (
-            <div key={w.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 16px", borderBottom: "1px solid #f1ece2" }}>
-              <div><div style={{ fontSize: 13.5, fontWeight: 600 }}>{w.label}</div><div style={{ fontSize: 11.5, color: "#8c8378", fontFamily: MONO }}>{fmtDateTime(w.date)}</div></div>
-              <div style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: credit ? "#1f9d6b" : "#1b1714" }}>{credit ? "+" : "-"}{formatRWF(w.amount)}</div>
+
+      <div style={{ position: "relative", overflow: "hidden", background: "#1b1714", borderRadius: 24, padding: "26px 28px", marginBottom: 18 }}>
+        <div style={{ position: "absolute", right: -90, top: -90, width: 280, height: 280, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.24),transparent 68%)" }} />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 12, color: "#9a9186", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" }}>Relay Wallet</div>
+              <div style={{ fontFamily: MONO, fontSize: 34, fontWeight: 700, color: "#fff", marginTop: 6, letterSpacing: "-1px" }}>{data ? formatRWF(data.balance) : "…"}</div>
+              <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 4 }}>MTN MoMo •••• 4821 linked</div>
             </div>
-          );
-        })}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setShowTopup(true)} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 14px 28px -14px rgba(255,106,26,.8)" }}>Top up</button>
+              <button onClick={() => window.alert("Send money — coming soon")} style={{ background: "rgba(255,255,255,.08)", color: "#fff", border: "1px solid rgba(255,255,255,.14)", borderRadius: 12, padding: "12px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Send</button>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 20, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,.1)" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>Auto top-up</div>
+              <div style={{ fontSize: 11.5, color: "#9a9186", fontWeight: 600 }}>Add RWF 5,000 when balance falls below RWF 2,000</div>
+            </div>
+            <button onClick={toggleAutoTopup} disabled={!data} style={{ width: 42, height: 24, borderRadius: 14, background: data?.autoTopupEnabled ? "#ff6a1a" : "#3a332c", position: "relative", flex: "none", border: "none", cursor: "pointer", transition: "background .15s" }}>
+              <div style={{ position: "absolute", top: 3, left: data?.autoTopupEnabled ? 21 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="rel-cardgrid-2" style={{ alignItems: "start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: "18px 20px 14px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, flexWrap: "wrap", gap: 10 }}>
+              <span style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em" }}>Transactions</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {([["all", "All"], ["pay", "Payments"], ["topup", "Top-ups"]] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setTxFilter(k)} style={{ fontSize: 11, fontWeight: txFilter === k ? 800 : 700, color: txFilter === k ? "#fff" : "#8c8378", background: txFilter === k ? "#1b1714" : "#f4f1ea", borderRadius: 20, padding: "5px 11px", cursor: "pointer", border: "none", fontFamily: "'Manrope', sans-serif" }}>{label}</button>
+                ))}
+              </div>
+            </div>
+            {data && txs.length === 0 && <div style={{ padding: "10px 4px", fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No wallet activity yet.</div>}
+            {txs.map((w, i) => {
+              const credit = w.kind === "CREDIT";
+              return (
+                <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 13, padding: "14px 4px", borderTop: i > 0 ? "1px solid #f0ebe1" : "none" }}>
+                  <span style={{ width: 36, height: 36, borderRadius: 10, background: credit ? "#e7f6ee" : "#f7ece8", color: credit ? "#1f9d6b" : "#c2553f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flex: "none" }}>{credit ? "↓" : "↑"}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.label}</div>
+                    <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>{fmtDateTime(w.date)}</div>
+                  </div>
+                  <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: credit ? "#1f9d6b" : "#1b1714", flex: "none" }}>{credit ? "+" : "−"}{formatRWF(w.amount)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 20 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 15 }}>Payment methods</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <PayMethodRow glyph="M" bg="#ffd400" ink="#1b1714" name="MTN MoMo" sub="•••• 4821" badge="Default" />
+              <PayMethodRow glyph="◈" bg="#1b1714" ink="#ff6a1a" name="Relay Wallet" sub={data ? formatRWF(data.balance) : "—"} />
+            </div>
+          </div>
+
+          {spend && spend.byMode.length > 0 && (
+            <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 20 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>Spent this month</div>
+              <div style={{ fontFamily: DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: "-.6px", marginBottom: 16 }}>{formatRWF(spend.total)}</div>
+              <div style={{ display: "flex", height: 10, borderRadius: 6, overflow: "hidden", marginBottom: 16 }}>
+                {spend.byMode.map((m) => (
+                  <div key={m.label} style={{ width: `${m.pct}%`, height: "100%", background: m.color }} />
+                ))}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+                {spend.byMode.map((m) => (
+                  <div key={m.label} style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                    <span style={{ width: 9, height: 9, borderRadius: 3, background: m.color, flex: "none" }} />
+                    <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700 }}>{m.label}</span>
+                    <span style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 700 }}>{m.pct}%</span>
+                    <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, width: 78, textAlign: "right" }}>{formatRWF(m.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -994,17 +1649,19 @@ function PayMethodRow({ glyph, bg, ink, name, sub, badge }: { glyph: string; bg:
 /* ============ YOU TAB ============ */
 type YouView = "menu" | "saved" | "wallet";
 
-const PROFILE_MENU: { label: string; sub: string; icon: string; color: string; bg: string; view?: YouView }[] = [
+const PROFILE_MENU: { label: string; sub: string; icon: string; color: string; bg: string; view?: YouView; action?: "password" }[] = [
   { label: "Saved places", sub: "Home, work & favourites", icon: "⌂", color: "#2f6bff", bg: "#e9f0ff", view: "saved" },
   { label: "Payment & wallet", sub: "Top up & payment methods", icon: "◈", color: "#1f9d6b", bg: "#e7f6ee", view: "wallet" },
-  { label: "Settings", sub: "Preferences & privacy", icon: "⚙", color: "#7c5cff", bg: "#efeaff" },
+  { label: "Security", sub: "Change your password", icon: "⚙", color: "#7c5cff", bg: "#efeaff", action: "password" },
 ];
 
 function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorStatus; onApplyOperator: () => void }) {
-  const { user, signOut } = useAuth();
+  const { user, signOut, refreshUser } = useAuth();
   const router = useRouter();
   const [view, setView] = useState<YouView>("menu");
   const [stats, setStats] = useState<MeStats | null>(null);
+  const [editProfile, setEditProfile] = useState(false);
+  const [changePass, setChangePass] = useState(false);
 
   useEffect(() => {
     api.meStats().then(setStats).catch(() => undefined);
@@ -1022,15 +1679,44 @@ function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorS
       <div className="pax-profile-grid">
         {/* LEFT — summary rail */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: "24px 20px", textAlign: "center" }}>
-            <div style={{ width: 76, height: 76, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, color: "#fff", margin: "0 auto 14px", boxShadow: "0 12px 26px -12px rgba(224,86,12,.8)" }}>{initials}</div>
-            <div style={{ fontFamily: DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: "-.3px" }}>{user ? `${user.firstName} ${user.lastName}` : "Guest"}</div>
-            <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.email ?? "Not signed in"}</div>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#fff0e6", borderRadius: 20, padding: "5px 12px", marginTop: 12 }}>
-              <span style={{ color: "#ff6a1a", fontSize: 12 }}>★</span>
-              <span style={{ fontSize: 12.5, fontWeight: 800, color: "#ff6a1a" }}>{stats?.rating.toFixed(1) ?? "4.8"} rider</span>
-            </span>
+          <div style={{ position: "relative", overflow: "hidden", background: "#1b1714", borderRadius: 18, padding: "24px 20px", textAlign: "center" }}>
+            <div style={{ position: "absolute", right: -70, top: -70, width: 200, height: 200, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.24),transparent 68%)" }} />
+            <div style={{ position: "relative", zIndex: 1 }}>
+              <div style={{ width: 76, height: 76, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, color: "#fff", margin: "0 auto 14px", boxShadow: "0 0 0 4px rgba(255,255,255,.08),0 12px 26px -12px rgba(224,86,12,.8)" }}>{initials}</div>
+              <div style={{ fontFamily: DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: "-.3px", color: "#fff" }}>{user ? `${user.firstName} ${user.lastName}` : "Guest"}</div>
+              <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.email ?? "Not signed in"}</div>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "rgba(255,106,26,.16)", borderRadius: 20, padding: "5px 12px", marginTop: 12 }}>
+                <span style={{ color: "#ff6a1a", fontSize: 12 }}>★</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: "#ff9c58" }}>{stats?.rating.toFixed(1) ?? "4.8"} rider</span>
+              </span>
+            </div>
           </div>
+
+          {stats && (
+            <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "16px 18px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 12, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, color: "#fff", flex: "none" }}>◆</div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: "#a39a8d", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em" }}>Relay tier</div>
+                  <div style={{ fontFamily: DISPLAY, fontSize: 16, fontWeight: 700, letterSpacing: "-.2px" }}>{stats.tier} rider</div>
+                </div>
+              </div>
+              <div style={{ marginTop: 13 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontWeight: 700, marginBottom: 6 }}>
+                  <span style={{ color: "#8c8378" }}>{stats.points.toLocaleString()} pts</span>
+                  {stats.nextTier ? (
+                    <span style={{ color: "#8c8378" }}>{stats.tripsToNextTier} trip{stats.tripsToNextTier === 1 ? "" : "s"} to <span style={{ color: "#1b1714" }}>{stats.nextTier}</span></span>
+                  ) : (
+                    <span style={{ color: "#1f9d6b" }}>Top tier</span>
+                  )}
+                </div>
+                <div style={{ height: 8, borderRadius: 5, background: "#f0ebe1", overflow: "hidden" }}>
+                  <div style={{ width: `${stats.tierProgressPct}%`, height: "100%", borderRadius: 5, background: "linear-gradient(90deg,#ff8a3d,#ff6a1a)" }} />
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 10 }}>
             <ActivityStat big={stats ? String(stats.trips) : "—"} label="Trips" />
             <ActivityStat big={stats ? `${stats.co2SavedKg}kg` : "—"} label="CO₂ saved" />
@@ -1040,7 +1726,40 @@ function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorS
 
         {/* RIGHT — account + preferences */}
         <div>
-          <SectionHeading first>Account information</SectionHeading>
+          {editProfile && user && (
+            <FormModal
+              title="Edit profile"
+              submitLabel="Save changes"
+              schema={updateProfileSchema}
+              defaultValues={{ firstName: user.firstName, lastName: user.lastName, email: user.email, phone: user.phone }}
+              fields={[
+                { name: "firstName", label: "First name" },
+                { name: "lastName", label: "Last name" },
+                { name: "email", label: "Email" },
+                { name: "phone", label: "Phone" },
+              ]}
+              onSubmit={async (v) => { await api.updateProfile(v as UpdateProfileInput); await refreshUser(); }}
+              onClose={() => setEditProfile(false)}
+            />
+          )}
+          {changePass && (
+            <FormModal
+              title="Change password"
+              submitLabel="Change password"
+              schema={changePasswordSchema}
+              fields={[
+                { name: "currentPassword", label: "Current password", type: "password" },
+                { name: "newPassword", label: "New password", type: "password" },
+                { name: "confirmPassword", label: "Confirm new password", type: "password" },
+              ]}
+              onSubmit={async (v) => { await api.changePassword(v as ChangePasswordInput); }}
+              onClose={() => setChangePass(false)}
+            />
+          )}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "0 2px 10px" }}>
+            <SectionHeading first>Account information</SectionHeading>
+            <button onClick={() => setEditProfile(true)} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", padding: 0 }}>Edit</button>
+          </div>
           <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, overflow: "hidden" }}>
             <InfoField label="Full name" value={user ? `${user.firstName} ${user.lastName}` : "—"} />
             <InfoField label="Email" value={user?.email ?? "—"} />
@@ -1051,7 +1770,7 @@ function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorS
           <SectionHeading>Preferences</SectionHeading>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {PROFILE_MENU.map((it) => (
-              <button key={it.label} onClick={() => it.view && setView(it.view)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, cursor: "pointer", textAlign: "left" }}>
+              <button key={it.label} onClick={() => { if (it.view) setView(it.view); else if (it.action === "password") setChangePass(true); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, cursor: "pointer", textAlign: "left" }}>
                 <span style={{ width: 40, height: 40, borderRadius: 12, background: it.bg, color: it.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flex: "none" }}>{it.icon}</span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: "block", fontSize: 14.5, fontWeight: 700 }}>{it.label}</span>
@@ -1388,6 +2107,7 @@ function PassengerSidebar({ tab, walletBalance, onChange }: { tab: Tab; walletBa
   const items: { key: Tab; icon: string; label: string }[] = [
     { key: "plan", icon: "◎", label: "Plan a trip" },
     { key: "trips", icon: "≡", label: "Your trips" },
+    { key: "orders", icon: "▤", label: "Orders" },
     { key: "wallet", icon: "◈", label: "Wallet" },
     { key: "you", icon: "☻", label: "Profile" },
   ];

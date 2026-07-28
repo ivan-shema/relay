@@ -5,7 +5,14 @@ import { useRouter } from "next/navigation";
 import { useForm, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
-import type { Paginated } from "@relay/shared";
+import {
+  updateProfileSchema,
+  changePasswordSchema,
+  type Paginated,
+  type UpdateProfileInput,
+  type ChangePasswordInput,
+} from "@relay/shared";
+import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
@@ -28,6 +35,7 @@ export function ConsoleShell({
   subtitle,
   actions,
   footer,
+  onOpenProfile,
   children,
 }: {
   role: string;
@@ -38,6 +46,7 @@ export function ConsoleShell({
   subtitle?: string;
   actions?: React.ReactNode;
   footer?: React.ReactNode;
+  onOpenProfile?: () => void;
   children: React.ReactNode;
 }) {
   const router = useRouter();
@@ -90,11 +99,18 @@ export function ConsoleShell({
         </nav>
         <div className="rel-console-only-desktop" style={{ marginTop: "auto" }}>{footer}</div>
         <div className="rel-console-account" style={{ background: "#2a2520", borderRadius: 12, padding: 13, display: "flex", alignItems: "center", gap: 10, marginTop: 12, flex: "none" }}>
-          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
-          <div className="rel-console-only-desktop" style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap" }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
-            <div style={{ fontSize: 10.5, color: "#9a9186", whiteSpace: "nowrap" }}>{role} account</div>
-          </div>
+          <button
+            onClick={onOpenProfile}
+            disabled={!onOpenProfile}
+            title="Profile & settings"
+            style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: onOpenProfile ? "pointer" : "default", textAlign: "left" }}
+          >
+            <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
+            <div className="rel-console-only-desktop" style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap", color: "#fff" }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
+              <div style={{ fontSize: 10.5, color: "#9a9186", whiteSpace: "nowrap" }}>{role} account</div>
+            </div>
+          </button>
           <button onClick={() => { signOut(); router.push("/"); }} title="Sign out" style={{ background: "none", border: "none", color: "#9a9186", cursor: "pointer", fontSize: 15, flex: "none" }}>⎋</button>
         </div>
       </aside>
@@ -108,6 +124,142 @@ export function ConsoleShell({
           {actions && <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>{actions}</div>}
         </div>
         {children}
+      </div>
+    </div>
+  );
+}
+
+// Account settings for console users (admin/operator) — update personal info
+// and change the password. Rendered inside ConsoleShell as a page, shared by
+// both consoles so the account card in the sidebar always leads somewhere.
+export function ProfileSettingsPage({ role, onBack }: { role: string; onBack: () => void }) {
+  const router = useRouter();
+  const { user, refreshUser, signOut } = useAuth();
+
+  const profileForm = useForm<UpdateProfileInput>({
+    resolver: zodResolver(updateProfileSchema) as Resolver<UpdateProfileInput>,
+    defaultValues: { firstName: user?.firstName ?? "", lastName: user?.lastName ?? "", email: user?.email ?? "", phone: user?.phone ?? "" },
+  });
+  const passwordForm = useForm<ChangePasswordInput>({
+    resolver: zodResolver(changePasswordSchema) as Resolver<ChangePasswordInput>,
+    defaultValues: { currentPassword: "", newPassword: "", confirmPassword: "" },
+  });
+
+  const [profileMsg, setProfileMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [passwordMsg, setPasswordMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const inputStyle: React.CSSProperties = { width: "100%", border: "1px solid #e3ddd1", borderRadius: 11, padding: "11px 13px", fontSize: 14, fontWeight: 600, outline: "none", fontFamily: "'Manrope', sans-serif", background: "#fff" };
+  const labelStyle: React.CSSProperties = { fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 };
+  const errStyle: React.CSSProperties = { fontSize: 11.5, color: "#c2553f", fontWeight: 600, marginTop: 5 };
+
+  const saveProfile = profileForm.handleSubmit(async (values) => {
+    setProfileMsg(null);
+    try {
+      await api.updateProfile(values);
+      await refreshUser();
+      setProfileMsg({ ok: true, text: "Profile updated." });
+    } catch (e) {
+      setProfileMsg({ ok: false, text: e instanceof Error ? e.message : "Could not save your profile" });
+    }
+  });
+
+  const savePassword = passwordForm.handleSubmit(async (values) => {
+    setPasswordMsg(null);
+    try {
+      await api.changePassword(values);
+      passwordForm.reset();
+      setPasswordMsg({ ok: true, text: "Password changed." });
+    } catch (e) {
+      setPasswordMsg({ ok: false, text: e instanceof Error ? e.message : "Could not change your password" });
+    }
+  });
+
+  const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "?";
+
+  return (
+    <div className="rel-up">
+      <div style={{ marginBottom: 20 }}>
+        <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 9, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "9px 15px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>← Back</button>
+      </div>
+
+      {/* identity hero */}
+      <div style={{ background: "#1b1714", borderRadius: 24, padding: "28px 30px", color: "#fff", position: "relative", overflow: "hidden", marginBottom: 20 }}>
+        <div style={{ position: "absolute", right: -80, top: -80, width: 240, height: 240, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.24),transparent 68%)" }} />
+        <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ width: 58, height: 58, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, flex: "none", boxShadow: "0 0 0 4px rgba(255,255,255,.08)" }}>{initials}</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, letterSpacing: "-.4px" }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
+            <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 3 }}>{role} account · {user?.email}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }} className="op-two">
+        {/* personal info */}
+        <form onSubmit={saveProfile} noValidate style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "20px 22px" }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>Personal information</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+            <div>
+              <div style={labelStyle}>First name</div>
+              <input {...profileForm.register("firstName")} style={inputStyle} />
+              {profileForm.formState.errors.firstName && <div style={errStyle}>{profileForm.formState.errors.firstName.message}</div>}
+            </div>
+            <div>
+              <div style={labelStyle}>Last name</div>
+              <input {...profileForm.register("lastName")} style={inputStyle} />
+              {profileForm.formState.errors.lastName && <div style={errStyle}>{profileForm.formState.errors.lastName.message}</div>}
+            </div>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <div style={labelStyle}>Email</div>
+            <input {...profileForm.register("email")} type="email" style={inputStyle} />
+            {profileForm.formState.errors.email && <div style={errStyle}>{profileForm.formState.errors.email.message}</div>}
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={labelStyle}>Phone</div>
+            <input {...profileForm.register("phone")} style={{ ...inputStyle, fontFamily: MONO }} />
+            {profileForm.formState.errors.phone && <div style={errStyle}>{profileForm.formState.errors.phone.message}</div>}
+          </div>
+          {profileMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: profileMsg.ok ? "#1f9d6b" : "#c2553f", marginBottom: 12 }}>{profileMsg.text}</div>}
+          <button type="submit" disabled={profileForm.formState.isSubmitting} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+            {profileForm.formState.isSubmitting ? "Saving…" : "Save changes"}
+          </button>
+        </form>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* password */}
+          <form onSubmit={savePassword} noValidate style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "20px 22px" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>Change password</div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={labelStyle}>Current password</div>
+              <input {...passwordForm.register("currentPassword")} type="password" style={inputStyle} />
+              {passwordForm.formState.errors.currentPassword && <div style={errStyle}>{passwordForm.formState.errors.currentPassword.message}</div>}
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={labelStyle}>New password</div>
+              <input {...passwordForm.register("newPassword")} type="password" style={inputStyle} />
+              {passwordForm.formState.errors.newPassword && <div style={errStyle}>{passwordForm.formState.errors.newPassword.message}</div>}
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={labelStyle}>Confirm new password</div>
+              <input {...passwordForm.register("confirmPassword")} type="password" style={inputStyle} />
+              {passwordForm.formState.errors.confirmPassword && <div style={errStyle}>{passwordForm.formState.errors.confirmPassword.message}</div>}
+            </div>
+            {passwordMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: passwordMsg.ok ? "#1f9d6b" : "#c2553f", marginBottom: 12 }}>{passwordMsg.text}</div>}
+            <button type="submit" disabled={passwordForm.formState.isSubmitting} style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+              {passwordForm.formState.isSubmitting ? "Saving…" : "Change password"}
+            </button>
+          </form>
+
+          {/* session */}
+          <div style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "20px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>Session</div>
+              <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>Sign out of this device.</div>
+            </div>
+            <button onClick={() => { signOut(); router.push("/"); }} style={{ background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Sign out</button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -156,6 +308,62 @@ const STATUS_COLORS: Record<string, { c: string; b: string }> = {
 export function StatusPill({ status }: { status: string }) {
   const s = STATUS_COLORS[status] ?? STATUS_COLORS.PENDING;
   return <span style={{ fontSize: 11, fontWeight: 800, color: s.c, background: s.b, borderRadius: 7, padding: "4px 9px" }}>{status.replace("_", " ")}</span>;
+}
+
+// Ticket verification for operator/driver staff. The passenger presents their
+// ticket (QR or the printed code); staff read the code off it and submit it
+// here. Deliberately does NOT take a list of this booking's ticket ids/codes —
+// boarding must come from what the passenger actually shows, never from a
+// value staff already had from a booking list, or "verification" would be
+// meaningless. `onVerify` is injected by the caller (api.verifyTicket) so this
+// stays API-client-agnostic.
+export function TicketVerifyForm({ onVerify, boarded, total }: { onVerify: (code: string) => Promise<{ seatNumber: string; boarded: boolean }>; boarded?: number; total?: number }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!code.trim()) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const r = await onVerify(code.trim());
+      setResult({ kind: "ok", msg: `Seat ${r.seatNumber} boarded ✓` });
+      setCode("");
+    } catch (e) {
+      setResult({ kind: "err", msg: e instanceof Error ? e.message : "Could not verify that ticket" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <form onSubmit={submit} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input
+          value={code}
+          onChange={(e) => { setCode(e.target.value.toUpperCase()); setResult(null); }}
+          placeholder="Enter ticket code"
+          maxLength={8}
+          style={{ flex: "1 1 160px", border: "1px solid #e3ddd1", borderRadius: 9, padding: "8px 11px", fontSize: 12.5, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", letterSpacing: ".05em", textTransform: "uppercase", outline: "none" }}
+        />
+        <button
+          type="submit"
+          disabled={busy || !code.trim()}
+          style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 9, padding: "8px 15px", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "'Manrope', sans-serif", whiteSpace: "nowrap" }}
+        >
+          {busy ? "Checking…" : "Verify & board"}
+        </button>
+        {typeof boarded === "number" && typeof total === "number" && total > 0 && (
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", alignSelf: "center" }}>{boarded}/{total} boarded</span>
+        )}
+      </form>
+      {result && (
+        <div style={{ marginTop: 7, fontSize: 12, fontWeight: 700, color: result.kind === "ok" ? "#1f9d6b" : "#c2553f" }}>{result.msg}</div>
+      )}
+    </div>
+  );
 }
 
 export function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
@@ -254,7 +462,7 @@ export function AccentButton({ children, onClick }: { children: React.ReactNode;
 export interface FormField {
   name: string;
   label: string;
-  type?: "text" | "number" | "select" | "file";
+  type?: "text" | "number" | "select" | "file" | "password";
   options?: { value: string; label: string }[];
   placeholder?: string;
   defaultValue?: string;
@@ -361,7 +569,7 @@ export function FormModal({
                 ) : (
                   <input
                     {...register(f.name)}
-                    type={f.type === "number" ? "number" : "text"}
+                    type={f.type === "number" ? "number" : f.type === "password" ? "password" : "text"}
                     placeholder={f.placeholder}
                     style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}
                   />
