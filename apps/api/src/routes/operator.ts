@@ -273,13 +273,15 @@ operatorRouter.post(
   })
 );
 
-// POST /operator/departures — publish a bookable trip
+// POST /operator/departures — publish a bookable trip. Resolves any passenger
+// "Plan ahead" watches on this route: the watch links to the new trip and its
+// owner gets a "match found" notification.
 operatorRouter.post(
   "/departures",
   asyncHandler(async (req, res) => {
     const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const body = createDepartureSchema.parse(req.body);
-    const route = await prisma.route.findUnique({ where: { id: body.routeId } });
+    const route = await prisma.route.findUnique({ where: { id: body.routeId }, include: { origin: true, destination: true } });
     if (!route) throw new HttpError(400, "Invalid route");
     const departAt = new Date(Date.now() + body.departInMinutes * 60_000);
     const trip = await prisma.trip.create({
@@ -297,7 +299,34 @@ operatorRouter.post(
         status: "SCHEDULED",
       },
     });
-    res.status(201).json({ id: trip.id });
+
+    // Watches store free-text labels ("Remera") while places have fuller names
+    // ("Remera Hub"), so match by containment either way, case-insensitively.
+    // Watch volume is tiny, so filtering in JS beats contorting the query.
+    const placeMatch = (label: string, place: string) => {
+      const l = label.trim().toLowerCase();
+      const p = place.trim().toLowerCase();
+      return l.length > 0 && (p.includes(l) || l.includes(p));
+    };
+    const candidates = await prisma.plannedTrip.findMany({ where: { matchedTripId: null }, take: 500 });
+    const watches = candidates.filter(
+      (w) => placeMatch(w.originLabel, route.origin.name) && placeMatch(w.destLabel, route.destination.name)
+    );
+    const timeLabel = departAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    for (const w of watches) {
+      await prisma.plannedTrip.update({ where: { id: w.id }, data: { matchedTripId: trip.id } });
+      if (w.notify) {
+        await prisma.notification.create({
+          data: {
+            userId: w.passengerId,
+            title: "Trip match found",
+            message: `${route.name} departs at ${timeLabel} — a trip you planned ahead for is now bookable.`,
+          },
+        });
+      }
+    }
+
+    res.status(201).json({ id: trip.id, matchedWatches: watches.length });
   })
 );
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
+import { toTripSummary, tripInclude } from "../lib/mappers";
 
 export const plannedRouter = Router();
 
@@ -21,6 +22,7 @@ plannedRouter.get(
       where: { passengerId: req.auth!.sub },
       orderBy: { createdAt: "desc" },
       take: 50,
+      include: { matchedTrip: { include: tripInclude } },
     });
     res.json(
       items.map((p) => ({
@@ -29,6 +31,11 @@ plannedRouter.get(
         to: p.destLabel,
         when: p.whenLabel,
         notify: p.notify,
+        // a matched trip that's already departed is stale — show as watching again
+        matchedTrip:
+          p.matchedTrip && p.matchedTrip.departAt > new Date() && p.matchedTrip.seatsLeft > 0
+            ? toTripSummary(p.matchedTrip)
+            : null,
       }))
     );
   })

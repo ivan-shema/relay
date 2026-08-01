@@ -159,13 +159,12 @@ export const api = {
     request<RatingResult>(`/ratings/${bookingId}`, { method: "PATCH", body, auth: true }),
 
   // planned (Plan ahead watches)
-  planned: () =>
-    request<{ id: string; from: string; to: string; when: string; notify: boolean }[]>("/planned", {
-      auth: true,
-    }),
+  planned: () => request<PlannedWatch[]>("/planned", { auth: true }),
 
   createPlanned: (body: { originLabel: string; destLabel: string; whenLabel: string; notify: boolean }) =>
     request<{ id: string }>("/planned", { method: "POST", body, auth: true }),
+
+  deletePlanned: (id: string) => request<unknown>(`/planned/${id}`, { method: "DELETE", auth: true }),
 
   // ---- driver ----
   driverMe: () => request<DriverMe>("/driver/me", { auth: true }),
@@ -285,6 +284,15 @@ export interface RatingResult {
   comment: string | null;
   createdAt: string;
   editableUntil: string;
+}
+
+export interface PlannedWatch {
+  id: string;
+  from: string;
+  to: string;
+  when: string;
+  notify: boolean;
+  matchedTrip: TripSummary | null;
 }
 
 // ---------- me / self-service types ----------

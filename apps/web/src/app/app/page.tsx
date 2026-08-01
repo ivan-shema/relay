@@ -14,7 +14,7 @@ import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights } from "@/lib/api";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
@@ -288,6 +288,7 @@ export default function PassengerApp() {
             activeBooking={activeBooking}
             recentHistory={recentHistory}
             onTrack={trackExistingBooking}
+            onBook={startBooking}
           />
         )}
         {tab === "orders" && (
@@ -345,20 +346,24 @@ function HomeScreen({
   onRate: (score: number, bookingId?: string) => void;
 }) {
   const { user } = useAuth();
-  const [planned, setPlanned] = useState<{ id: string; from: string; to: string; when: string }[]>([]);
+  const [planned, setPlanned] = useState<PlannedWatch[]>([]);
   const [places, setPlaces] = useState<SavedPlace[]>([]);
   const [live, setLive] = useState<TripSummary[]>([]);
   const [liveLoading, setLiveLoading] = useState(true);
   const [rating, setRating] = useState(0);
 
+  const reloadPlanned = useCallback(() => {
+    api.planned().then(setPlanned).catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     setLiveLoading(true);
     api.trips(origin, dest).then(setLive).catch(() => undefined).finally(() => setLiveLoading(false));
     if (user) {
-      api.planned().then(setPlanned).catch(() => undefined);
+      reloadPlanned();
       api.savedPlaces().then(setPlaces).catch(() => undefined);
     }
-  }, [user, origin, dest]);
+  }, [user, origin, dest, reloadPlanned]);
 
   const firstName = user ? user.firstName : "there";
 
@@ -453,13 +458,7 @@ function HomeScreen({
               </div>
             )}
             {planned.map((p) => (
-              <div key={p.id} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: 15 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700 }}>{p.from} → {p.to}</div>
-                  <span style={{ fontSize: 10.5, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 7, padding: "3px 8px", textTransform: "uppercase" }}>Watching</span>
-                </div>
-                <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>{p.when}</div>
-              </div>
+              <WatchCard key={p.id} w={p} onBook={onBook} onRemoved={reloadPlanned} />
             ))}
           </div>
 
@@ -787,12 +786,16 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
 function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin: string; dest: string; requireAuth: () => boolean; onBack: () => void; onDone: () => void }) {
   const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [day, setDay] = useState<"Today" | "Tomorrow">("Tomorrow");
+  const [time, setTime] = useState("08:00");
+  const [repeat, setRepeat] = useState(false);
 
   const save = async () => {
     if (!requireAuth()) return;
     setBusy(true);
     try {
-      await api.createPlanned({ originLabel: origin, destLabel: dest, whenLabel: "Tomorrow 08:00 · weekdays", notify });
+      const whenLabel = `${day} ${time}${repeat ? " · weekdays" : ""}`;
+      await api.createPlanned({ originLabel: origin, destLabel: dest, whenLabel, notify });
       onDone();
     } finally {
       setBusy(false);
@@ -818,10 +821,19 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
         </div>
       </div>
       <SectionLabel>When</SectionLabel>
-      <div style={{ display: "flex", gap: 9, marginBottom: 14, flexWrap: "wrap" }}>
-        <Chip active>Tomorrow</Chip>
-        <Chip>08:00</Chip>
-        <Chip>Repeat weekdays</Chip>
+      <div style={{ display: "flex", gap: 9, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        {(["Today", "Tomorrow"] as const).map((d) => (
+          <button key={d} onClick={() => setDay(d)} style={{ fontSize: 13, fontWeight: 700, background: day === d ? "#1b1714" : "#fff", color: day === d ? "#fff" : "#1b1714", border: day === d ? "1px solid #1b1714" : "1px solid #e3ddd1", borderRadius: 11, padding: "11px 15px", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{d}</button>
+        ))}
+        <input
+          type="time"
+          value={time}
+          onChange={(e) => setTime(e.target.value)}
+          style={{ fontSize: 13, fontWeight: 700, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "9px 13px", fontFamily: "'JetBrains Mono', monospace", outline: "none", color: "#1b1714" }}
+        />
+        <button onClick={() => setRepeat((r) => !r)} style={{ fontSize: 13, fontWeight: 700, background: repeat ? "#fff6f0" : "#fff", color: repeat ? "#ff6a1a" : "#1b1714", border: repeat ? "1px solid #ff6a1a" : "1px solid #e3ddd1", borderRadius: 11, padding: "11px 15px", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+          {repeat ? "✓ " : ""}Repeat weekdays
+        </button>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 14, padding: "14px 16px", marginBottom: 20 }}>
         <div><div style={{ fontSize: 14, fontWeight: 700 }}>Notify me of matches</div><div style={{ fontSize: 12, color: "#8c8378" }}>Push + in-app alert</div></div>
@@ -1352,18 +1364,69 @@ function OrdersTab({
   );
 }
 
+// A "Plan ahead" watch. While unmatched it just shows what Relay is watching
+// for; once an operator publishes a matching departure it flips to a bookable
+// "match found" state with the real fare/time. Removable either way.
+function WatchCard({ w, onBook, onRemoved }: { w: PlannedWatch; onBook: (t: TripSummary) => void; onRemoved: () => void }) {
+  const [removing, setRemoving] = useState(false);
+  const matched = w.matchedTrip;
+
+  const remove = async () => {
+    setRemoving(true);
+    try {
+      await api.deletePlanned(w.id);
+      onRemoved();
+    } catch {
+      setRemoving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${matched ? "#bfe6d2" : "#e9e3d8"}`, borderRadius: 16, padding: 15 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".05em", color: matched ? "#1f9d6b" : "#8c8378", background: matched ? "#e7f6ee" : "#f4f1ea", borderRadius: 20, padding: "4px 9px" }}>
+          {matched ? "MATCH FOUND" : "WATCHING"}
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 11, color: "#8c8378", fontWeight: 700 }}>{w.when}</span>
+          <button onClick={remove} disabled={removing} title="Remove this watch" style={{ background: "none", border: "none", color: "#c2553f", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", padding: 0 }}>
+            {removing ? "…" : "Remove"}
+          </button>
+        </div>
+      </div>
+      <div style={{ fontSize: 14.5, fontWeight: 700, marginTop: 10 }}>{w.from} → {w.to}</div>
+      <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>
+        {matched
+          ? `${matched.operatorName} · departs ${fmtTime(matched.departAt)} · ${matched.seatsLeft} seat${matched.seatsLeft === 1 ? "" : "s"} left`
+          : "No trip scheduled yet — we'll notify you"}
+      </div>
+      {matched && (
+        <button
+          onClick={() => onBook(matched)}
+          style={{ width: "100%", marginTop: 13, border: "none", borderRadius: 11, padding: 11, fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope', sans-serif", background: "#ff6a1a", color: "#fff", boxShadow: "0 12px 24px -14px rgba(255,106,26,.8)" }}
+        >
+          Book now — {formatRWF(matched.fare)}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ============ TRIPS TAB ============ */
 function TripsTab({
   activeBooking,
   recentHistory,
   onTrack,
+  onBook,
 }: {
   activeBooking: BookingDetail | null;
   recentHistory: BookingDetail[];
   onTrack: (b: BookingDetail) => void;
+  onBook: (t: TripSummary) => void;
 }) {
-  const [planned, setPlanned] = useState<{ id: string; from: string; to: string; when: string }[]>([]);
-  useEffect(() => { api.planned().then(setPlanned).catch(() => undefined); }, []);
+  const [planned, setPlanned] = useState<PlannedWatch[]>([]);
+  const reloadPlanned = useCallback(() => { api.planned().then(setPlanned).catch(() => undefined); }, []);
+  useEffect(() => { reloadPlanned(); }, [reloadPlanned]);
 
   return (
     <div className="rel-mid rel-up">
@@ -1395,14 +1458,7 @@ function TripsTab({
           </div>
         )}
         {planned.map((p) => (
-          <div key={p.id} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: 15 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".05em", color: "#8c8378", background: "#f4f1ea", borderRadius: 20, padding: "4px 9px" }}>WATCHING</span>
-              <span style={{ fontSize: 11, color: "#8c8378", fontWeight: 700 }}>{p.when}</span>
-            </div>
-            <div style={{ fontSize: 14.5, fontWeight: 700, marginTop: 10 }}>{p.from} → {p.to}</div>
-            <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>No trip scheduled yet</div>
-          </div>
+          <WatchCard key={p.id} w={p} onBook={onBook} onRemoved={reloadPlanned} />
         ))}
       </div>
 
@@ -2216,10 +2272,6 @@ function PrimaryBtn({ children, onClick, busy }: { children: React.ReactNode; on
       {busy ? "Please wait…" : children}
     </button>
   );
-}
-
-function Chip({ children, active }: { children: React.ReactNode; active?: boolean }) {
-  return <span style={{ fontSize: 13, fontWeight: 700, background: active ? "#1b1714" : "#fff", color: active ? "#fff" : "#1b1714", border: active ? "none" : "1px solid #e3ddd1", borderRadius: 11, padding: "11px 15px" }}>{children}</span>;
 }
 
 function Row({ label, value, total, valueColor }: { label: string; value: string; total?: boolean; valueColor?: string }) {

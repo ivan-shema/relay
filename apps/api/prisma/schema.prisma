@@ -221,7 +221,8 @@ model Trip {
   tag          String? // "Fastest" | "Cheapest" | "Direct"
   createdAt    DateTime      @default(now())
 
-  bookings Booking[]
+  bookings       Booking[]
+  plannedMatches PlannedTrip[]
 }
 
 model Booking {
@@ -304,6 +305,10 @@ model PlannedTrip {
   destLabel     String
   whenLabel     String
   notify        Boolean  @default(true)
+  // set when an operator publishes a departure on this route — the watch
+  // resolves to a bookable trip and the passenger is notified
+  matchedTripId String?
+  matchedTrip   Trip?    @relation(fields: [matchedTripId], references: [id])
   createdAt     DateTime @default(now())
 }
 
