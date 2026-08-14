@@ -120,14 +120,16 @@ export const createUserSchema = z
     }
   });
 
+// Free-text place names: pick an existing stop from the suggestions or type a
+// new one — the server finds-or-creates the Place either way.
 export const createRouteSchema = z
   .object({
-    originId: z.string().min(1, "Pick an origin"),
-    destinationId: z.string().min(1, "Pick a destination"),
+    origin: z.string().trim().min(2, "Enter an origin"),
+    destination: z.string().trim().min(2, "Enter a destination"),
     distanceKm: z.coerce.number({ invalid_type_error: "Enter a number" }).positive("Must be greater than 0").default(5),
   })
-  .refine((d) => d.originId !== d.destinationId, {
-    path: ["destinationId"],
+  .refine((d) => d.origin.trim().toLowerCase() !== d.destination.trim().toLowerCase(), {
+    path: ["destination"],
     message: "Pick a different destination",
   });
 

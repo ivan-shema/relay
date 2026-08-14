@@ -38,8 +38,12 @@ export default function DriverConsole() {
 
   const toggleOnline = async () => {
     if (!me) return;
-    const { online } = await api.driverSetOnline(!me.online);
-    setMe({ ...me, online });
+    try {
+      const { online } = await api.driverSetOnline(!me.online);
+      setMe({ ...me, online });
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not update your status");
+    }
   };
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -47,6 +51,8 @@ export default function DriverConsole() {
     try {
       await fn();
       await reload();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "That didn't go through — please try again");
     } finally {
       setBusy(false);
     }

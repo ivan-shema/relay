@@ -273,7 +273,7 @@ function LiveTab() {
 }
 
 function FleetTab() {
-  const { data, page, setPage, reload } = usePaged<OperatorVehicle>(useCallback((pg) => api.operatorVehicles(pg), []));
+  const { data, page, setPage, reloadFirst } = usePaged<OperatorVehicle>(useCallback((pg) => api.operatorVehicles(pg), []));
   const [modal, setModal] = useState(false);
   if (!data) return <Loading />;
   return (
@@ -289,7 +289,7 @@ function FleetTab() {
             { name: "capacity", label: "Capacity", type: "number", defaultValue: "33" },
             { name: "model", label: "Model", placeholder: "Coaster HD" },
           ]}
-          onSubmit={async (v) => { const d = v as CreateVehicleInput; await api.operatorAddVehicle({ plateNumber: d.plateNumber, type: d.type, capacity: d.capacity, model: d.model }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateVehicleInput; await api.operatorAddVehicle({ plateNumber: d.plateNumber, type: d.type, capacity: d.capacity, model: d.model }); reloadFirst(); }}
           onClose={() => setModal(false)}
         />
       )}
@@ -312,29 +312,29 @@ function FleetTab() {
 }
 
 function RoutesTab() {
-  const [data, load] = useData<OperatorRoute[]>(() => api.operatorRoutes());
+  const { data, page, setPage, reloadFirst } = usePaged<OperatorRoute>(useCallback((pg) => api.operatorRoutes(pg), []));
   const [modal, setModal] = useState(false);
-  const [places, setPlaces] = useState<{ value: string; label: string }[]>([]);
-  useEffect(() => { api.places().then((ps) => setPlaces(ps.map((p) => ({ value: p.id, label: `${p.name} · ${p.area}` })))).catch(() => undefined); }, []);
+  const [placeNames, setPlaceNames] = useState<string[]>([]);
+  useEffect(() => { api.places().then((ps) => setPlaceNames(ps.map((p) => p.name))).catch(() => undefined); }, []);
   if (!data) return <Loading />;
   return (
     <Card>
-      {modal && places.length > 0 && (
+      {modal && (
         <FormModal
           title="New route"
           submitLabel="Create route"
           schema={createRouteSchema}
           fields={[
-            { name: "originId", label: "Origin", type: "select", options: places },
-            { name: "destinationId", label: "Destination", type: "select", options: places },
+            { name: "origin", label: "Origin", placeholder: "Pick a stop or type a new one", suggestions: placeNames },
+            { name: "destination", label: "Destination", placeholder: "Pick a stop or type a new one", suggestions: placeNames },
             { name: "distanceKm", label: "Distance (km)", type: "number", defaultValue: "5" },
           ]}
-          onSubmit={async (v) => { const d = v as CreateRouteInput; await api.operatorAddRoute({ originId: d.originId, destinationId: d.destinationId, distanceKm: d.distanceKm }); load(); }}
+          onSubmit={async (v) => { const d = v as CreateRouteInput; await api.operatorAddRoute({ origin: d.origin, destination: d.destination, distanceKm: d.distanceKm }); reloadFirst(); }}
           onClose={() => setModal(false)}
         />
       )}
-      <CardTitle right={<AccentButton onClick={() => setModal(true)}>+ New route</AccentButton>}>Active routes</CardTitle>
-      {data.map((r) => (
+      <CardTitle right={<AccentButton onClick={() => setModal(true)}>+ New route</AccentButton>}>Routes · {data.total}</CardTitle>
+      {data.items.map((r) => (
         <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 18, padding: "15px 0", borderTop: "1px solid #f1ece2" }}>
           <div style={{ width: 150, flex: "none" }}>
             <div style={{ fontSize: 14, fontWeight: 700 }}>{r.name}</div>
@@ -350,15 +350,16 @@ function RoutesTab() {
           <div style={{ width: 64, textAlign: "right", flex: "none", fontFamily: MONO, fontSize: 15, fontWeight: 700, color: "#ff6a1a" }}>{formatRWF(r.fare)}</div>
         </div>
       ))}
+      <Pagination page={page} totalPages={data.totalPages} total={data.total} onPage={setPage} />
     </Card>
   );
 }
 
 function ScheduleTab() {
-  const { data, page, setPage, reload } = usePaged<OperatorScheduleRow>(useCallback((pg) => api.operatorSchedule(pg), []));
+  const { data, page, setPage, reloadFirst } = usePaged<OperatorScheduleRow>(useCallback((pg) => api.operatorSchedule(pg), []));
   const [modal, setModal] = useState(false);
   const [routes, setRoutes] = useState<{ value: string; label: string }[]>([]);
-  useEffect(() => { api.operatorRoutes().then((rs) => setRoutes(rs.map((r) => ({ value: r.id, label: r.name })))).catch(() => undefined); }, []);
+  useEffect(() => { api.operatorRouteLookup().then(setRoutes).catch(() => undefined); }, []);
   if (!data) return <Loading />;
   return (
     <Card>
@@ -375,11 +376,29 @@ function ScheduleTab() {
             { name: "durationMinutes", label: "Duration (min)", type: "number", defaultValue: "30" },
             { name: "capacity", label: "Capacity", type: "number", defaultValue: "33" },
           ]}
-          onSubmit={async (v) => { const d = v as CreateDepartureInput; await api.operatorAddDeparture({ routeId: d.routeId, mode: d.mode, fare: d.fare, departInMinutes: d.departInMinutes, durationMinutes: d.durationMinutes, capacity: d.capacity }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateDepartureInput; await api.operatorAddDeparture({ routeId: d.routeId, mode: d.mode, fare: d.fare, departInMinutes: d.departInMinutes, durationMinutes: d.durationMinutes, capacity: d.capacity }); reloadFirst(); }}
           onClose={() => setModal(false)}
         />
       )}
-      <CardTitle right={<AccentButton onClick={() => setModal(true)}>+ Add departure</AccentButton>}>Schedule · {data.total} departures</CardTitle>
+      <CardTitle
+        right={
+          <AccentButton
+            onClick={() => {
+              // without a route there's nothing to publish on — say so instead
+              // of a click that silently does nothing
+              if (routes.length === 0) {
+                window.alert("Create a route first (Routes tab) — departures are published on a route.");
+                return;
+              }
+              setModal(true);
+            }}
+          >
+            + Add departure
+          </AccentButton>
+        }
+      >
+        Schedule · {data.total} departures
+      </CardTitle>
       <TableHead cols={["Time", "Route", "Vehicle", "Driver", "Seats booked", "Status"]} template=".6fr 1.7fr .8fr .9fr 1fr .9fr" />
       {data.items.map((t) => (
         <Row key={t.id} template=".6fr 1.7fr .8fr .9fr 1fr .9fr">
@@ -400,7 +419,7 @@ function ScheduleTab() {
 }
 
 function DriversTab({ selected, onSelect }: { selected: string | null; onSelect: (id: string | null) => void }) {
-  const { data: list, page, setPage, reload } = usePaged<OperatorDriverRow>(useCallback((pg) => api.operatorDrivers(pg), []));
+  const { data: list, page, setPage, reload, reloadFirst } = usePaged<OperatorDriverRow>(useCallback((pg) => api.operatorDrivers(pg), []));
   const [detail, setDetail] = useState<OperatorDriverDetail | null>(null);
   const [history, setHistory] = useState<OperatorDriverTrip[]>([]);
   const [lookups, setLookups] = useState<{ vehicles: { value: string; label: string }[]; trips: { value: string; label: string }[] }>({ vehicles: [], trips: [] });
@@ -420,15 +439,23 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
 
   const suspend = async () => {
     if (!detail) return;
-    await api.operatorSuspend(detail.id);
-    loadDetail(detail.id);
+    try {
+      await api.operatorSuspend(detail.id);
+      loadDetail(detail.id);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not update this driver");
+    }
   };
   const remove = async () => {
     if (!detail) return;
     if (!window.confirm(`Remove ${detail.name} from your fleet? Their account stays, but they'll no longer be under your company.`)) return;
-    await api.operatorRemoveDriver(detail.id);
-    onSelect(null);
-    reload();
+    try {
+      await api.operatorRemoveDriver(detail.id);
+      onSelect(null);
+      reload();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not remove this driver");
+    }
   };
 
   if (selected && detail) {
@@ -450,7 +477,14 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
             submitLabel="Assign driver"
             schema={assignTripSchema}
             fields={[{ name: "tripId", label: "Upcoming departure", type: "select", options: lookups.trips.length ? lookups.trips : [{ value: "", label: "No upcoming departures" }] }]}
-            onSubmit={async (v) => { if (v.tripId) { await api.operatorAssignTrip(detail.id, v.tripId as string); loadDetail(detail.id); } }}
+            onSubmit={async (v) => {
+              if (!v.tripId) return;
+              await api.operatorAssignTrip(detail.id, v.tripId as string);
+              loadDetail(detail.id);
+              // the assignment lives on the Schedule tab, not this screen —
+              // without an explicit confirmation the action looks like a no-op
+              window.alert(`${detail.name} assigned to the departure — you can see it on the Schedule tab.`);
+            }}
             onClose={() => setAction(null)}
           />
         )}
@@ -570,7 +604,7 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
             fd.append("idDocument", d.idDocument);
             fd.append("licenseDocument", d.licenseDocument);
             await api.operatorInviteDriver(fd);
-            reload();
+            reloadFirst();
           }}
           onClose={() => setInviteModal(false)}
         />

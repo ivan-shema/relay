@@ -414,7 +414,14 @@ export function usePaged<T>(fetcher: (page: number) => Promise<Paginated<T>>) {
   }, [fetcher]);
   useEffect(() => { load(page); }, [page, load]);
   const reload = useCallback(() => load(page), [load, page]);
-  return { data, page, setPage, reload };
+  // After creating an item, jump back to page 1 — lists are newest-first, so
+  // that's where the new row is. reload() alone would refetch whatever page
+  // the user had paged to, making the freshly created item look missing.
+  const reloadFirst = useCallback(() => {
+    setPage(1);
+    load(1);
+  }, [load]);
+  return { data, page, setPage, reload, reloadFirst };
 }
 
 // Prev / "Page X of Y" / Next footer for a paginated table.
@@ -465,6 +472,9 @@ export interface FormField {
   type?: "text" | "number" | "select" | "file" | "password";
   options?: { value: string; label: string }[];
   placeholder?: string;
+  // For free-text fields with known likely values (e.g. place names): renders
+  // a datalist so users can pick a suggestion or type something new.
+  suggestions?: string[];
   defaultValue?: string;
   // Conditionally show this field based on the live form values
   // (e.g. company name only when role === "OPERATOR").
@@ -567,12 +577,20 @@ export function FormModal({
                     />
                   </label>
                 ) : (
-                  <input
-                    {...register(f.name)}
-                    type={f.type === "number" ? "number" : f.type === "password" ? "password" : "text"}
-                    placeholder={f.placeholder}
-                    style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}
-                  />
+                  <>
+                    <input
+                      {...register(f.name)}
+                      type={f.type === "number" ? "number" : f.type === "password" ? "password" : "text"}
+                      placeholder={f.placeholder}
+                      list={f.suggestions ? `dl-${f.name}` : undefined}
+                      style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}
+                    />
+                    {f.suggestions && (
+                      <datalist id={`dl-${f.name}`}>
+                        {f.suggestions.map((s) => <option key={s} value={s} />)}
+                      </datalist>
+                    )}
+                  </>
                 )}
                 {err && <div style={{ fontSize: 11.5, color: "#c2553f", fontWeight: 600, marginTop: 5 }}>{err}</div>}
               </div>

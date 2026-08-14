@@ -51,20 +51,68 @@ export class ApiError extends Error {
   }
 }
 
+// Single-flight token refresh: when the access token expires mid-session,
+// swap it for a fresh pair using the refresh token. Parallel 401s share one
+// refresh call. Returns false when the refresh token is missing/expired too.
+let refreshInFlight: Promise<boolean> | null = null;
+function refreshTokens(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const refreshToken = tokenStore.refresh;
+      if (!refreshToken) return false;
+      try {
+        const res = await fetch(`${BASE}/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken }),
+        });
+        if (!res.ok) return false;
+        const data = (await res.json()) as { accessToken: string; refreshToken: string };
+        tokenStore.set(data.accessToken, data.refreshToken);
+        return true;
+      } catch {
+        return false;
+      }
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+// The session is genuinely dead (refresh failed) — clear it and send the user
+// to login instead of leaving them staring at "Invalid or expired token"
+// errors inside whatever form they happened to be in.
+function forceLogout(): never {
+  tokenStore.clear();
+  if (typeof window !== "undefined") window.location.href = "/auth?mode=login";
+  throw new ApiError(401, "Your session expired — please sign in again");
+}
+
 async function request<T>(
   path: string,
   options: { method?: string; body?: unknown; auth?: boolean } = {}
 ): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (options.auth && tokenStore.access) {
-    headers.Authorization = `Bearer ${tokenStore.access}`;
-  }
+  const doFetch = () => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (options.auth && tokenStore.access) {
+      headers.Authorization = `Bearer ${tokenStore.access}`;
+    }
+    return fetch(`${BASE}${path}`, {
+      method: options.method ?? "GET",
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+  };
 
-  const res = await fetch(`${BASE}${path}`, {
-    method: options.method ?? "GET",
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  let res = await doFetch();
+  // Expired access token on an authenticated call → refresh once and retry;
+  // if the session can't be revived, log out. Business 401s (login, refresh
+  // itself) don't pass auth: true so they surface normally.
+  if (res.status === 401 && options.auth) {
+    if (await refreshTokens()) res = await doFetch();
+    if (res.status === 401) forceLogout();
+  }
 
   if (res.status === 204) return undefined as T;
 
@@ -78,9 +126,16 @@ async function request<T>(
 // Multipart request (KYC document uploads). Browser sets the multipart
 // boundary itself — never set Content-Type manually here.
 async function requestMultipart<T>(path: string, formData: FormData, auth = false): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (auth && tokenStore.access) headers.Authorization = `Bearer ${tokenStore.access}`;
-  const res = await fetch(`${BASE}${path}`, { method: "POST", headers, body: formData });
+  const doFetch = () => {
+    const headers: Record<string, string> = {};
+    if (auth && tokenStore.access) headers.Authorization = `Bearer ${tokenStore.access}`;
+    return fetch(`${BASE}${path}`, { method: "POST", headers, body: formData });
+  };
+  let res = await doFetch();
+  if (res.status === 401 && auth) {
+    if (await refreshTokens()) res = await doFetch();
+    if (res.status === 401) forceLogout();
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new ApiError(res.status, (data as { error?: string }).error ?? "Request failed");
@@ -184,7 +239,8 @@ export const api = {
   operatorMe: () => request<{ id: string; companyName: string; modes: string[]; status: string; contactInfo: string }>("/operator/me", { auth: true }),
   operatorOverview: () => request<OperatorOverview>("/operator/overview", { auth: true }),
   operatorVehicles: (page?: number) => request<Paginated<OperatorVehicle>>(`/operator/vehicles${pageQuery(page)}`, { auth: true }),
-  operatorRoutes: () => request<OperatorRoute[]>("/operator/routes", { auth: true }),
+  operatorRoutes: (page?: number) => request<Paginated<OperatorRoute>>(`/operator/routes${pageQuery(page)}`, { auth: true }),
+  operatorRouteLookup: () => request<{ value: string; label: string }[]>("/operator/routes/lookup", { auth: true }),
   operatorSchedule: (page?: number) => request<Paginated<OperatorScheduleRow>>(`/operator/schedule${pageQuery(page)}`, { auth: true }),
   operatorDrivers: (page?: number) => request<Paginated<OperatorDriverRow>>(`/operator/drivers${pageQuery(page)}`, { auth: true }),
   operatorDriver: (id: string) => request<OperatorDriverDetail>(`/operator/drivers/${id}`, { auth: true }),
@@ -222,7 +278,7 @@ export const api = {
 
   // ---- operator writes ----
   operatorAddVehicle: (body: { plateNumber: string; type: string; capacity: number; model?: string }) => request<{ id: string }>("/operator/vehicles", { method: "POST", body, auth: true }),
-  operatorAddRoute: (body: { originId: string; destinationId: string; distanceKm?: number }) => request<{ id: string; name: string }>("/operator/routes", { method: "POST", body, auth: true }),
+  operatorAddRoute: (body: { origin: string; destination: string; distanceKm?: number }) => request<{ id: string; name: string }>("/operator/routes", { method: "POST", body, auth: true }),
   operatorAddDeparture: (body: { routeId: string; fare: number; departInMinutes?: number; durationMinutes?: number; capacity?: number; mode?: string; vehicleId?: string; driverId?: string }) => request<{ id: string }>("/operator/departures", { method: "POST", body, auth: true }),
   // multipart: KYC fields + ID document + driving licence document
   operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string }>("/operator/drivers/invite", formData, true),

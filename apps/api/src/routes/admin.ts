@@ -179,7 +179,7 @@ adminRouter.get(
   asyncHandler(async (req, res) => {
     const p = parsePage(req, 10);
     const [operators, total] = await prisma.$transaction([
-      prisma.operator.findMany({ include: { vehicles: true, drivers: true }, orderBy: { createdAt: "asc" }, skip: p.skip, take: p.take }),
+      prisma.operator.findMany({ include: { vehicles: true, drivers: true }, orderBy: { createdAt: "desc" }, skip: p.skip, take: p.take }),
       prisma.operator.count(),
     ]);
     const result = await Promise.all(

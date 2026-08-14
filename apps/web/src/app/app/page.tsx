@@ -786,6 +786,7 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
 function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin: string; dest: string; requireAuth: () => boolean; onBack: () => void; onDone: () => void }) {
   const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [day, setDay] = useState<"Today" | "Tomorrow">("Tomorrow");
   const [time, setTime] = useState("08:00");
   const [repeat, setRepeat] = useState(false);
@@ -793,10 +794,13 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
   const save = async () => {
     if (!requireAuth()) return;
     setBusy(true);
+    setError(null);
     try {
       const whenLabel = `${day} ${time}${repeat ? " · weekdays" : ""}`;
       await api.createPlanned({ originLabel: origin, destLabel: dest, whenLabel, notify });
       onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not save your watch — please try again");
     } finally {
       setBusy(false);
     }
@@ -841,6 +845,7 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
           <div style={{ position: "absolute", top: 3, left: notify ? 21 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
         </button>
       </div>
+      {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{error}</div>}
       <PrimaryBtn onClick={save} busy={busy}>Start watching for trips</PrimaryBtn>
     </div>
   );

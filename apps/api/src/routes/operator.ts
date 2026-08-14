@@ -189,7 +189,7 @@ operatorRouter.get(
     const p = parsePage(req, 8);
     const where = { operatorId: opId };
     const [vehicles, total] = await prisma.$transaction([
-      prisma.vehicle.findMany({ where, include: { driver: { include: { user: true } } }, orderBy: { plateNumber: "asc" }, skip: p.skip, take: p.take }),
+      prisma.vehicle.findMany({ where, include: { driver: { include: { user: true } } }, orderBy: { createdAt: "desc" }, skip: p.skip, take: p.take }),
       prisma.vehicle.count({ where }),
     ]);
     res.json(
@@ -224,48 +224,97 @@ operatorRouter.post(
   })
 );
 
-// GET /operator/routes
+// GET /operator/routes — paginated. Routes with no departures MUST still be
+// listed — a freshly created route starts empty, and hiding it looks like a
+// silent failure. cuid ids sort chronologically, so id desc = newest first
+// (Route has no createdAt column) and a just-created route lands on page 1.
 operatorRouter.get(
   "/routes",
   asyncHandler(async (req, res) => {
     const opId = await resolveVerifiedOperatorId(req.auth!.sub);
-    const routes = await prisma.route.findMany({
-      include: { origin: true, destination: true, trips: { where: { operatorId: opId }, include: { bookings: true } } },
-    });
+    const p = parsePage(req, 8);
+    const [routes, total] = await prisma.$transaction([
+      prisma.route.findMany({
+        include: { origin: true, destination: true, trips: { where: { operatorId: opId }, include: { bookings: true } } },
+        orderBy: { id: "desc" },
+        skip: p.skip,
+        take: p.take,
+      }),
+      prisma.route.count(),
+    ]);
     res.json(
-      routes
-        .filter((r) => r.trips.length > 0)
-        .map((r) => {
+      paged(
+        routes.map((r) => {
           const totalCap = r.trips.reduce((s, t) => s + t.capacity, 0);
           const booked = r.trips.reduce((s, t) => s + t.bookings.length, 0);
           const fare = r.trips[0] ? dec(r.trips[0].fare) : 0;
+          const hasTrips = r.trips.length > 0;
           return {
             id: r.id,
             name: r.name,
             from: r.origin.name,
             to: r.destination.name,
             stops: `${Math.round(r.distanceKm)} km`,
-            buses: `${r.trips.length} trips`,
-            freq: "every 15 min",
+            buses: hasTrips ? `${r.trips.length} trips` : "No departures yet",
+            freq: hasTrips ? "every 15 min" : "not visible to passengers",
             util: totalCap ? Math.min(100, Math.round((booked / totalCap) * 100)) : 0,
             fare,
           };
-        })
+        }),
+        total,
+        p
+      )
     );
   })
 );
 
-// POST /operator/routes — create a route between two saved places
+// GET /operator/routes/lookup — all routes as select options for the
+// "Add departure" form (the paginated list above only carries one page).
+operatorRouter.get(
+  "/routes/lookup",
+  asyncHandler(async (req, res) => {
+    await resolveVerifiedOperatorId(req.auth!.sub); // authz
+    const routes = await prisma.route.findMany({ orderBy: { name: "asc" }, take: 200 });
+    res.json(routes.map((r) => ({ value: r.id, label: r.name })));
+  })
+);
+
+// Resolve a typed place name to a Place row — reuse an existing stop when the
+// name matches (case-insensitive), otherwise register it as a new one so
+// operators aren't limited to the pre-seeded list.
+async function findOrCreatePlace(rawName: string) {
+  const name = rawName.trim();
+  const existing = await prisma.place.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
+  if (existing) return existing;
+  // New stops get placeholder coordinates near Kigali's centre until real
+  // geocoding lands (maps/GPS are mocked platform-wide).
+  return prisma.place.create({
+    data: {
+      name,
+      area: "Kigali",
+      lat: -1.9499 + (Math.random() - 0.5) * 0.05,
+      lng: 30.0589 + (Math.random() - 0.5) * 0.05,
+    },
+  });
+}
+
+// POST /operator/routes — create a route between two places, typed or picked
 operatorRouter.post(
   "/routes",
   asyncHandler(async (req, res) => {
     await resolveVerifiedOperatorId(req.auth!.sub); // authz
     const body = createRouteSchema.parse(req.body);
-    const [origin, destination] = await Promise.all([
-      prisma.place.findUnique({ where: { id: body.originId } }),
-      prisma.place.findUnique({ where: { id: body.destinationId } }),
-    ]);
-    if (!origin || !destination) throw new HttpError(400, "Invalid places");
+    const origin = await findOrCreatePlace(body.origin);
+    const destination = await findOrCreatePlace(body.destination);
+    if (origin.id === destination.id) throw new HttpError(400, "Origin and destination must differ");
+
+    // same pair already exists → reuse instead of duplicating
+    const existingRoute = await prisma.route.findFirst({ where: { originId: origin.id, destinationId: destination.id } });
+    if (existingRoute) {
+      res.json({ id: existingRoute.id, name: existingRoute.name });
+      return;
+    }
+
     const route = await prisma.route.create({
       data: { name: `${origin.name} → ${destination.name}`, originId: origin.id, destinationId: destination.id, distanceKm: body.distanceKm },
     });
@@ -391,7 +440,10 @@ operatorRouter.get(
   asyncHandler(async (req, res) => {
     const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const p = parsePage(req, 8);
-    const where = { operatorId: opId };
+    // Upcoming/active departures only — finished trips would otherwise pile up
+    // at the top of the ascending list forever and push every newly published
+    // departure onto a later page, making "Add departure" look like a no-op.
+    const where = { operatorId: opId, arriveAt: { gt: new Date() } };
     const [trips, total] = await prisma.$transaction([
       prisma.trip.findMany({
         where,
@@ -432,7 +484,7 @@ operatorRouter.get(
     const p = parsePage(req, 8);
     const where = { operatorId: opId };
     const [drivers, total] = await prisma.$transaction([
-      prisma.driver.findMany({ where, include: { user: true, vehicle: true }, orderBy: { createdAt: "asc" }, skip: p.skip, take: p.take }),
+      prisma.driver.findMany({ where, include: { user: true, vehicle: true }, orderBy: { createdAt: "desc" }, skip: p.skip, take: p.take }),
       prisma.driver.count({ where }),
     ]);
     const result = await Promise.all(

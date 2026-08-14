@@ -47,8 +47,10 @@ meRouter.post(
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new HttpError(404, "User not found");
+    // 400, not 401 — the session is valid, the submitted password is just
+    // wrong. A 401 here would trip the client's expired-session auto-logout.
     const ok = await verifyPassword(currentPassword, user.passwordHash);
-    if (!ok) throw new HttpError(401, "Current password is incorrect");
+    if (!ok) throw new HttpError(400, "Current password is incorrect");
 
     const passwordHash = await hashPassword(newPassword);
     await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
@@ -256,7 +258,7 @@ meRouter.post(
 meRouter.get(
   "/places",
   asyncHandler(async (req, res) => {
-    const places = await prisma.savedPlace.findMany({ where: { userId: req.auth!.sub }, orderBy: { createdAt: "asc" }, take: 50 });
+    const places = await prisma.savedPlace.findMany({ where: { userId: req.auth!.sub }, orderBy: { createdAt: "desc" }, take: 50 });
     res.json(places.map((p) => ({ id: p.id, label: p.label, area: p.area, icon: p.icon })));
   })
 );

@@ -364,7 +364,7 @@ function ApprovalReviewPage({ id, onClose, onNavigate, onToast }: { id: string; 
 }
 
 function UsersTab() {
-  const { data, page, setPage, reload } = usePaged<AdminUser>(useCallback((pg) => api.adminUsers(pg), []));
+  const { data, page, setPage, reloadFirst } = usePaged<AdminUser>(useCallback((pg) => api.adminUsers(pg), []));
   const [modal, setModal] = useState(false);
   if (!data) return <Loading />;
   return (
@@ -383,7 +383,7 @@ function UsersTab() {
             { name: "companyName", label: "Company name", placeholder: "Kigali Bus Co.", showIf: (v) => v.role === "OPERATOR" },
             { name: "modes", label: "Primary mode", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }], showIf: (v) => v.role === "OPERATOR" },
           ]}
-          onSubmit={async (v) => { const d = v as CreateUserInput; await api.adminAddUser({ firstName: d.firstName, lastName: d.lastName, phone: d.phone, email: d.email, role: d.role, companyName: d.companyName, modes: d.modes }); reload(); }}
+          onSubmit={async (v) => { const d = v as CreateUserInput; await api.adminAddUser({ firstName: d.firstName, lastName: d.lastName, phone: d.phone, email: d.email, role: d.role, companyName: d.companyName, modes: d.modes }); reloadFirst(); }}
           onClose={() => setModal(false)}
         />
       )}
@@ -676,7 +676,14 @@ function ReportsTab() {
 function ComplaintsTab() {
   const [data, reload] = useData<AdminOverview>(() => api.adminOverview());
   if (!data) return <Loading />;
-  const resolve = async (id: string) => { await api.adminResolveComplaint(id); reload(); };
+  const resolve = async (id: string) => {
+    try {
+      await api.adminResolveComplaint(id);
+      reload();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Could not resolve this complaint");
+    }
+  };
   return (
     <Card style={{ maxWidth: 760 }}>
       <CardTitle right={<span style={{ fontSize: 12, color: "#ff6a1a", fontWeight: 700 }}>Avg resolve 4h</span>}>Open complaints · {data.complaints.length}</CardTitle>
