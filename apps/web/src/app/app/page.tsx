@@ -21,6 +21,21 @@ import { NotificationBell } from "@/components/notification-bell";
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
+// One stable idempotency key per payment target (booking or ride): a retried
+// "Pay" click resends the same key, so the server replays the stored result
+// instead of charging the wallet twice. A different target gets a fresh key.
+function useIdempotencyKeys() {
+  const ref = useRef<Map<string, string>>(new Map());
+  return useCallback((targetId: string) => {
+    let k = ref.current.get(targetId);
+    if (!k) {
+      k = crypto.randomUUID();
+      ref.current.set(targetId, k);
+    }
+    return k;
+  }, []);
+}
+
 type PlanScreen = "home" | "search" | "available" | "planAhead" | "pay" | "track" | "done" | "moto";
 type Tab = "plan" | "trips" | "orders" | "wallet" | "you";
 
@@ -60,6 +75,7 @@ export default function PassengerApp() {
   const [trackPhase, setTrackPhase] = useState<"approaching" | "boarded">("approaching");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const payKeyFor = useIdempotencyKeys();
 
   // First page of the passenger's own bookings — shared by the Home banner,
   // the Trips boarding pass / recent history, and Orders' initial view.
@@ -161,7 +177,7 @@ export default function PassengerApp() {
     setBusy(true);
     setError(null);
     try {
-      await api.pay({ bookingId: booking.id });
+      await api.pay({ bookingId: booking.id, idempotencyKey: payKeyFor(booking.id) });
       await refreshUser();
       loadPrimaryBookings();
       setTrackPhase("approaching");
@@ -171,7 +187,7 @@ export default function PassengerApp() {
     } finally {
       setBusy(false);
     }
-  }, [booking, refreshUser, loadPrimaryBookings]);
+  }, [booking, payKeyFor, refreshUser, loadPrimaryBookings]);
 
   const submitRating = useCallback(
     async (score: number, bookingId?: string, comment?: string) => {
@@ -872,6 +888,7 @@ function fmtClock(iso: string): string {
 //   confirms → driver is paid out minus the platform commission.
 function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string; onBack: () => void }) {
   const { refreshUser } = useAuth();
+  const payKeyFor = useIdempotencyKeys();
   const [ride, setRide] = useState<RideView | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [nearby, setNearby] = useState<NearbyMoto[]>([]);
@@ -998,7 +1015,7 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
               <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginBottom: 12 }}>
                 Pay from your Relay Wallet to confirm — Relay holds the money and only pays the driver after you confirm the ride is done. Top up via MoMo from the Wallet tab if your balance is short.
               </div>
-              <button onClick={() => run(async () => { await api.payRide(active.id); await refreshUser(); })} disabled={busy} style={{ ...btn("#ff6a1a"), boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>
+              <button onClick={() => run(async () => { await api.payRide(active.id, payKeyFor(active.id)); await refreshUser(); })} disabled={busy} style={{ ...btn("#ff6a1a"), boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>
                 {busy ? "Paying…" : `Pay ${active.agreedFare !== null ? formatRWF(active.agreedFare) : ""} & confirm`}
               </button>
             </div>

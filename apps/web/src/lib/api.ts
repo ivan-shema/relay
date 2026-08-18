@@ -193,8 +193,9 @@ export const api = {
 
   booking: (id: string) => request<BookingDetail>(`/bookings/${id}`, { auth: true }),
 
-  // payments
-  pay: (body: { bookingId: string; method?: PaymentMethod }) =>
+  // payments — idempotencyKey is stable per attempt so a retried request
+  // replays the stored result instead of charging the wallet again
+  pay: (body: { bookingId: string; method?: PaymentMethod; idempotencyKey?: string }) =>
     request<PaymentDetail>("/payments", { method: "POST", body, auth: true }),
 
   // tracking
@@ -208,7 +209,7 @@ export const api = {
   myRide: () => request<RideView | null>("/rides/mine", { auth: true }),
   acceptRideOffer: (rideId: string, offerId: string) =>
     request<RideView>(`/rides/${rideId}/offers/${offerId}/accept`, { method: "POST", auth: true }),
-  payRide: (id: string) => request<RideView>(`/rides/${id}/pay`, { method: "POST", body: { method: "WALLET" }, auth: true }),
+  payRide: (id: string, idempotencyKey?: string) => request<RideView>(`/rides/${id}/pay`, { method: "POST", body: { method: "WALLET", idempotencyKey }, auth: true }),
   rebroadcastRide: (id: string) => request<RideView>(`/rides/${id}/rebroadcast`, { method: "POST", auth: true }),
   confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
   cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),

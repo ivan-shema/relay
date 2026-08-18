@@ -230,6 +230,9 @@ model RideRequest {
   commissionPct    Float?
   commissionAmount Decimal?          @db.Decimal(10, 2)
   refundedAt       DateTime?
+  // Client-generated key for the escrow payment: a retry of the same attempt
+  // replays the funded state instead of deducting the wallet again.
+  payIdempotencyKey String?          @unique
   createdAt        DateTime          @default(now())
 
   offers RideOffer[]
@@ -374,6 +377,9 @@ model Payment {
   method    PaymentMethod
   status    PaymentStatus @default(PENDING)
   reference String        @unique
+  // Client-generated key: a network-level retry of the same payment attempt
+  // replays the stored result instead of charging again.
+  idempotencyKey String?  @unique
   createdAt DateTime      @default(now())
 }
 

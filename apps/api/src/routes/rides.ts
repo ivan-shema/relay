@@ -220,12 +220,29 @@ ridesRouter.post(
 // deposits). The money leaves the passenger immediately but is HELD BY THE
 // PLATFORM (escrow) — the driver is only paid out, minus commission, after the
 // passenger confirms completion.
-const payRideSchema = z.object({ method: z.literal("WALLET").default("WALLET") });
+const payRideSchema = z.object({
+  method: z.literal("WALLET").default("WALLET"),
+  // Client-generated per-attempt key — retries replay instead of re-charging
+  idempotencyKey: z.string().min(8).max(64).optional(),
+});
 ridesRouter.post(
   "/:id/pay",
   asyncHandler(async (req, res) => {
-    payRideSchema.parse(req.body);
+    const { idempotencyKey } = payRideSchema.parse(req.body);
     const passengerId = req.auth!.sub;
+
+    // Replay: this exact attempt already funded the ride but the response was
+    // lost (network retry). Return the funded state — charge nothing.
+    if (idempotencyKey) {
+      const prior = await prisma.rideRequest.findUnique({ where: { payIdempotencyKey: idempotencyKey } });
+      if (prior) {
+        if (prior.passengerId !== passengerId || prior.id !== req.params.id) {
+          throw new HttpError(409, "Idempotency key already used for a different payment");
+        }
+        const view = await loadRideView(prior.id);
+        return res.json(view ? toRideView(view) : null);
+      }
+    }
 
     await prisma.$transaction(async (tx) => {
       const ride = await tx.rideRequest.findUnique({ where: { id: req.params.id } });
@@ -233,6 +250,22 @@ ridesRouter.post(
       if (ride.status !== "ACCEPTED") throw new HttpError(409, "This ride isn't awaiting payment");
       const fare = ride.agreedFare;
       if (!fare) throw new HttpError(409, "No agreed fare on this ride");
+
+      // Atomic claim: only one concurrent request can move the ride out of
+      // ACCEPTED, so a double-click can never fund the escrow twice (the
+      // status check above alone would race under read-committed isolation).
+      const paidAt = new Date();
+      const anchor = ride.departAt && ride.departAt.getTime() > paidAt.getTime() ? ride.departAt : paidAt;
+      const claimed = await tx.rideRequest.updateMany({
+        where: { id: ride.id, status: "ACCEPTED" },
+        data: {
+          status: "CONFIRMED",
+          paidAt,
+          pickupDeadline: new Date(anchor.getTime() + PICKUP_WINDOW_MS),
+          payIdempotencyKey: idempotencyKey,
+        },
+      });
+      if (claimed.count === 0) throw new HttpError(409, "This ride isn't awaiting payment");
 
       const user = await tx.user.findUnique({ where: { id: passengerId } });
       const balance = new Prisma.Decimal(user!.walletBalance);
@@ -242,13 +275,6 @@ ridesRouter.post(
       await tx.user.update({ where: { id: passengerId }, data: { walletBalance: balance.minus(fare) } });
       await tx.walletTransaction.create({
         data: { userId: passengerId, kind: "DEBIT", amount: fare, label: `Moto ride escrow · ${ride.originLabel} → ${ride.destLabel}` },
-      });
-
-      const paidAt = new Date();
-      const anchor = ride.departAt && ride.departAt.getTime() > paidAt.getTime() ? ride.departAt : paidAt;
-      await tx.rideRequest.update({
-        where: { id: ride.id },
-        data: { status: "CONFIRMED", paidAt, pickupDeadline: new Date(anchor.getTime() + PICKUP_WINDOW_MS) },
       });
     });
 

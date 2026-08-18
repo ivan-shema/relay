@@ -23,6 +23,8 @@ function makeTicketCode(): string {
 const createSchema = z.object({
   bookingId: z.string(),
   method: z.literal("WALLET").default("WALLET"),
+  // Client-generated per-attempt key — retries replay instead of re-charging
+  idempotencyKey: z.string().min(8).max(64).optional(),
 });
 
 function toDetail(p: {
@@ -51,7 +53,19 @@ paymentsRouter.post(
   "/",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const { bookingId, method } = createSchema.parse(req.body);
+    const { bookingId, method, idempotencyKey } = createSchema.parse(req.body);
+
+    // Replay: this exact attempt already went through but the response was
+    // lost (network retry). Return the stored result — charge nothing.
+    if (idempotencyKey) {
+      const prior = await prisma.payment.findUnique({ where: { idempotencyKey }, include: { booking: true } });
+      if (prior) {
+        if (prior.booking.passengerId !== req.auth!.sub || prior.bookingId !== bookingId) {
+          throw new HttpError(409, "Idempotency key already used for a different payment");
+        }
+        return res.status(200).json(toDetail(prior));
+      }
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const booking = await tx.booking.findUnique({
@@ -65,6 +79,15 @@ paymentsRouter.post(
         throw new HttpError(409, "Booking already paid");
       }
       if (booking.status === "CANCELLED") throw new HttpError(409, "Booking cancelled");
+
+      // Atomic claim: only one concurrent request can flip the booking out of
+      // PENDING, so a double-click or duplicate request can never deduct twice
+      // (the checks above alone would race under read-committed isolation).
+      const claimed = await tx.booking.updateMany({
+        where: { id: bookingId, status: "PENDING" },
+        data: { status: "CONFIRMED" },
+      });
+      if (claimed.count === 0) throw new HttpError(409, "Booking already paid");
 
       const user = await tx.user.findUnique({ where: { id: req.auth!.sub } });
       const balance = new Prisma.Decimal(user!.walletBalance);
@@ -85,11 +108,10 @@ paymentsRouter.post(
           method,
           status: "PAID",
           reference: "PAY-" + Math.random().toString(36).slice(2, 10).toUpperCase(),
+          idempotencyKey,
         },
-        update: { method, status: "PAID" },
+        update: { method, status: "PAID", idempotencyKey },
       });
-
-      await tx.booking.update({ where: { id: bookingId }, data: { status: "CONFIRMED" } });
 
       // One independently-boardable ticket per purchased seat — a group
       // booking gets a distinct QR/seat per rider, not one shared pass.
