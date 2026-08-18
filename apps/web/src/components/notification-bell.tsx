@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type NotificationList } from "@/lib/api";
 import { Pagination } from "@/components/console";
 
@@ -17,11 +17,44 @@ function fmtDate(iso: string): string {
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
+  // Bumped on every SSE push so an open panel reloads its list live.
+  const [liveVersion, setLiveVersion] = useState(0);
 
   const refresh = useCallback(() => {
     api.notifications().then((n) => setUnread(n.unread)).catch(() => undefined);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Real-time: the API pushes a "notification" event over SSE whenever one is
+  // created (payment settled, driver assigned, …). The count/list refresh on
+  // push; the refresh-on-open/close behaviour below stays as the fallback.
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    let stream: EventSource | null = null;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      stream = new EventSource(api.streamUrl());
+      stream.addEventListener("notification", () => {
+        refresh();
+        setLiveVersion((v) => v + 1);
+      });
+      // On error (network change, expired token) the browser gives up for
+      // non-200s — close and retry with the current token after a pause.
+      stream.onerror = () => {
+        stream?.close();
+        if (!closed) retryRef.current = setTimeout(connect, 15_000);
+      };
+    };
+    connect();
+
+    return () => {
+      closed = true;
+      stream?.close();
+      if (retryRef.current) clearTimeout(retryRef.current);
+    };
+  }, [refresh]);
 
   const close = () => { setOpen(false); refresh(); };
 
@@ -50,7 +83,7 @@ export function NotificationBell() {
             className="rel-up"
             style={{ position: "absolute", top: "calc(100% + 10px)", right: 0, zIndex: 60, width: "min(384px, calc(100vw - 32px))", maxHeight: "min(70vh, 540px)", background: "#fff", borderRadius: 18, border: "1px solid #e9e3d8", boxShadow: "0 30px 70px -30px rgba(27,23,20,.5)", display: "flex", flexDirection: "column", overflow: "hidden" }}
           >
-            <NotificationsPanel onClose={close} />
+            <NotificationsPanel onClose={close} liveVersion={liveVersion} />
           </div>
         </>
       )}
@@ -58,10 +91,11 @@ export function NotificationBell() {
   );
 }
 
-function NotificationsPanel({ onClose }: { onClose: () => void }) {
+function NotificationsPanel({ onClose, liveVersion }: { onClose: () => void; liveVersion: number }) {
   const [data, setData] = useState<NotificationList | null>(null);
   const [page, setPage] = useState(1);
-  const load = useCallback(() => { api.notifications(page).then(setData).catch(() => undefined); }, [page]);
+  // liveVersion in the deps reloads the open panel when an SSE push arrives
+  const load = useCallback(() => { api.notifications(page).then(setData).catch(() => undefined); }, [page, liveVersion]);
   useEffect(() => { load(); }, [load]);
 
   const readAll = async () => { await api.markAllNotificationsRead(); load(); };

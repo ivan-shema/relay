@@ -5,6 +5,7 @@ import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { fullNameOf } from "../lib/mappers";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { notify } from "../lib/notify";
 
 export const driverRouter = Router();
 
@@ -181,13 +182,7 @@ driverRouter.post(
 
     const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { passenger: true } });
     if (ride) {
-      await prisma.notification.create({
-        data: {
-          userId: ride.passengerId,
-          title: "Moto on the way",
-          message: `${fullNameOf(driver.user)} accepted your ride ${ride.originLabel} → ${ride.destLabel}.`,
-        },
-      });
+      await notify(ride.passengerId, "Moto on the way", `${fullNameOf(driver.user)} accepted your ride ${ride.originLabel} → ${ride.destLabel}.`);
     }
     res.json({ accepted: true });
   })
@@ -203,13 +198,7 @@ driverRouter.post(
       throw new HttpError(404, "Ride not found");
     }
     await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "COMPLETED" } });
-    await prisma.notification.create({
-      data: {
-        userId: ride.passengerId,
-        title: "Ride completed",
-        message: `Thanks for riding with ${fullNameOf(driver.user)} — ${ride.originLabel} → ${ride.destLabel}.`,
-      },
-    });
+    await notify(ride.passengerId, "Ride completed", `Thanks for riding with ${fullNameOf(driver.user)} — ${ride.originLabel} → ${ride.destLabel}.`);
     res.json({ completed: true });
   })
 );
@@ -224,8 +213,8 @@ driverRouter.post(
     await prisma.$transaction([
       prisma.booking.update({ where: { id: booking.id }, data: { status: "IN_PROGRESS" } }),
       prisma.trip.update({ where: { id: booking.tripId }, data: { status: "RUNNING" } }),
-      prisma.notification.create({ data: { userId: booking.passengerId, title: "Driver on the way", message: `${fullNameOf(driver.user)} accepted your trip.` } }),
     ]);
+    await notify(booking.passengerId, "Driver on the way", `${fullNameOf(driver.user)} accepted your trip.`);
     res.json({ accepted: true });
   })
 );
@@ -271,9 +260,7 @@ driverRouter.post(
     const payout = await prisma.payout.create({
       data: { reference: "PO-" + Math.random().toString(36).slice(2, 9).toUpperCase(), driverId: driver.id, amount, method: "MTN MoMo" },
     });
-    await prisma.notification.create({
-      data: { userId: req.auth!.sub, title: "Payout sent", message: `RWF ${Math.round(amount).toLocaleString("en-US")} sent to your MTN MoMo.` },
-    });
+    await notify(req.auth!.sub, "Payout sent", `RWF ${Math.round(amount).toLocaleString("en-US")} sent to your MTN MoMo.`);
     res.status(201).json({ amount: Number(amount.toFixed(2)), reference: payout.reference });
   })
 );

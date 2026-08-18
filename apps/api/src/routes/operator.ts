@@ -664,9 +664,7 @@ operatorRouter.post(
     const trip = await prisma.trip.findFirst({ where: { id: tripId, operatorId: opId } });
     if (!trip) throw new HttpError(400, "Departure not found");
     await prisma.trip.update({ where: { id: trip.id }, data: { driverId: d.id, vehicleId: d.vehicle?.id ?? trip.vehicleId } });
-    await prisma.notification.create({
-      data: { userId: d.userId, title: "New trip assigned", message: "You've been assigned to an upcoming departure." },
-    });
+    await notify(d.userId, "New trip assigned", "You've been assigned to an upcoming departure.");
     res.json({ ok: true });
   })
 );
@@ -775,4 +773,3 @@ operatorRouter.get(
     });
   })
 );
-                                                                                                                                  

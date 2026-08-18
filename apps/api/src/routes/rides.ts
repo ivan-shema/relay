@@ -5,6 +5,7 @@ import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
 import { fullNameOf } from "../lib/mappers";
+import { notify } from "../lib/notify";
 
 export const ridesRouter = Router();
 
@@ -128,13 +129,7 @@ ridesRouter.post(
     });
 
     if (ride.targetDriver) {
-      await prisma.notification.create({
-        data: {
-          userId: ride.targetDriver.userId,
-          title: "New moto ride request",
-          message: `${ride.originLabel} → ${ride.destLabel} — a passenger requested you directly.`,
-        },
-      });
+      await notify(ride.targetDriver.userId, "New moto ride request", `${ride.originLabel} → ${ride.destLabel} — a passenger requested you directly.`);
     }
 
     res.status(201).json(toRideView(ride));
@@ -166,13 +161,7 @@ ridesRouter.post(
 
     await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "CANCELLED" } });
     if (ride.acceptedDriver) {
-      await prisma.notification.create({
-        data: {
-          userId: ride.acceptedDriver.userId,
-          title: "Ride cancelled",
-          message: `The passenger cancelled ${ride.originLabel} → ${ride.destLabel}.`,
-        },
-      });
+      await notify(ride.acceptedDriver.userId, "Ride cancelled", `The passenger cancelled ${ride.originLabel} → ${ride.destLabel}.`);
     }
     res.json({ cancelled: true });
   })

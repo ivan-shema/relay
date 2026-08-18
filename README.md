@@ -131,6 +131,12 @@ no credentials (toggle in `apps/api/.env`):
 - **Maps / GPS** — the live-tracking map uses the design's SVG with a simulated
   vehicle interpolated along the route polyline (`apps/api/src/lib/tracking.ts`),
   polled every 3s by the client. Swap in Google Maps + real GPS later.
+- **Email** (`SMTP_HOST` empty) — every in-app notification is also sent to the
+  user's email via `apps/api/src/lib/notify.ts`. Without SMTP credentials the
+  emails are logged to the API console; set `SMTP_HOST/PORT/USER/PASS` +
+  `MAIL_FROM` in `apps/api/.env` to send real mail. Notifications are pushed in
+  real time over the `GET /me/stream` SSE channel, so the bell updates without
+  a refresh.
 
 ## What the passenger slice does end-to-end
 

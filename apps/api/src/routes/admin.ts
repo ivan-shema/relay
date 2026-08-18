@@ -7,6 +7,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { hashPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
+import { notify } from "../lib/notify";
 
 export const adminRouter = Router();
 
@@ -298,19 +299,11 @@ adminRouter.post(
     if (!op) throw new HttpError(404, "Operator not found");
     await prisma.$transaction([
       prisma.operator.update({ where: { id: op.id }, data: { status: "VERIFIED" } }),
-      ...(op.ownerUserId
-        ? [
-            prisma.user.update({ where: { id: op.ownerUserId }, data: { role: "OPERATOR" } }),
-            prisma.notification.create({
-              data: {
-                userId: op.ownerUserId,
-                title: "Operator application approved",
-                message: `${op.companyName} is verified — your operator console is now live.`,
-              },
-            }),
-          ]
-        : []),
+      ...(op.ownerUserId ? [prisma.user.update({ where: { id: op.ownerUserId }, data: { role: "OPERATOR" } })] : []),
     ]);
+    if (op.ownerUserId) {
+      await notify(op.ownerUserId, "Operator application approved", `${op.companyName} is verified — your operator console is now live.`);
+    }
     res.json({ approved: true });
   })
 );
@@ -321,20 +314,10 @@ adminRouter.post(
   asyncHandler(async (req, res) => {
     const op = await prisma.operator.findUnique({ where: { id: req.params.id } });
     if (!op) throw new HttpError(404, "Operator not found");
-    await prisma.$transaction([
-      prisma.operator.update({ where: { id: op.id }, data: { status: "SUSPENDED" } }),
-      ...(op.ownerUserId
-        ? [
-            prisma.notification.create({
-              data: {
-                userId: op.ownerUserId,
-                title: "Operator application rejected",
-                message: `Your application for ${op.companyName} was not approved. Contact support for details.`,
-              },
-            }),
-          ]
-        : []),
-    ]);
+    await prisma.operator.update({ where: { id: op.id }, data: { status: "SUSPENDED" } });
+    if (op.ownerUserId) {
+      await notify(op.ownerUserId, "Operator application rejected", `Your application for ${op.companyName} was not approved. Contact support for details.`);
+    }
     res.json({ rejected: true });
   })
 );
