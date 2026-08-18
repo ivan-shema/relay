@@ -194,7 +194,7 @@ export const api = {
   booking: (id: string) => request<BookingDetail>(`/bookings/${id}`, { auth: true }),
 
   // payments
-  pay: (body: { bookingId: string; method: PaymentMethod }) =>
+  pay: (body: { bookingId: string; method?: PaymentMethod }) =>
     request<PaymentDetail>("/payments", { method: "POST", body, auth: true }),
 
   // tracking
@@ -203,13 +203,22 @@ export const api = {
 
   // on-demand moto hailing
   nearbyMotos: () => request<NearbyMoto[]>("/rides/nearby", { auth: true }),
-  requestRide: (body: { originLabel: string; destLabel: string; offerFare?: number; targetDriverId?: string }) =>
+  requestRide: (body: { originLabel: string; destLabel: string; offerFare?: number; targetDriverId?: string; departAt?: string }) =>
     request<RideView>("/rides", { method: "POST", body, auth: true }),
   myRide: () => request<RideView | null>("/rides/mine", { auth: true }),
-  cancelRide: (id: string) => request<{ cancelled: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
+  acceptRideOffer: (rideId: string, offerId: string) =>
+    request<RideView>(`/rides/${rideId}/offers/${offerId}/accept`, { method: "POST", auth: true }),
+  payRide: (id: string) => request<RideView>(`/rides/${id}/pay`, { method: "POST", body: { method: "WALLET" }, auth: true }),
+  rebroadcastRide: (id: string) => request<RideView>(`/rides/${id}/rebroadcast`, { method: "POST", auth: true }),
+  confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
+  cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
   driverMotoRequests: () => request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null }>("/driver/moto-requests", { auth: true }),
   driverAcceptMotoRide: (id: string) => request<{ accepted: boolean }>(`/driver/moto-requests/${id}/accept`, { method: "POST", auth: true }),
-  driverCompleteMotoRide: (id: string) => request<{ completed: boolean }>(`/driver/moto-requests/${id}/complete`, { method: "POST", auth: true }),
+  driverOfferMotoRide: (id: string, amount: number) =>
+    request<{ offered: boolean }>(`/driver/moto-requests/${id}/offer`, { method: "POST", body: { amount }, auth: true }),
+  driverWithdrawMotoRide: (id: string) => request<{ withdrawn: boolean }>(`/driver/moto-requests/${id}/withdraw`, { method: "POST", auth: true }),
+  driverPickupMotoRide: (id: string) => request<{ pickedUp: boolean }>(`/driver/moto-requests/${id}/pickup`, { method: "POST", auth: true }),
+  driverCompleteMotoRide: (id: string) => request<{ requested: boolean }>(`/driver/moto-requests/${id}/complete`, { method: "POST", auth: true }),
 
   // tickets — one per purchased seat, boarded independently. Staff confirm
   // boarding by the code on the ticket the passenger presents, never by an id
@@ -288,7 +297,8 @@ export const api = {
   deleteSavedPlace: (id: string) => request<unknown>(`/me/places/${id}`, { method: "DELETE", auth: true }),
 
   // ---- driver actions ----
-  driverCashout: () => request<{ amount: number; reference: string }>("/driver/cashout", { method: "POST", auth: true }),
+  driverCashout: () => request<{ amount: number; reference: string; status: TransferStatus }>("/driver/cashout", { method: "POST", auth: true }),
+  driverCashoutStatus: (reference: string) => request<{ status: TransferStatus; amount: number; reference: string }>(`/driver/cashout/${reference}/status`, { auth: true }),
 
   // ---- operator writes ----
   operatorAddVehicle: (body: { plateNumber: string; type: string; capacity: number; model?: string }) => request<{ id: string }>("/operator/vehicles", { method: "POST", body, auth: true }),
@@ -346,6 +356,9 @@ export const api = {
   adminPayments: (page?: number) => request<AdminPayments>(`/admin/payments${pageQuery(page)}`, { auth: true }),
   adminReports: (period?: AdminReports["period"]) => request<AdminReports>(`/admin/reports${period ? `?period=${period}` : ""}`, { auth: true }),
   adminResolveComplaint: (id: string) => request<unknown>(`/admin/complaints/${id}/resolve`, { method: "POST", auth: true }),
+  adminSettings: () => request<{ motoCommissionPct: number }>("/admin/settings", { auth: true }),
+  adminUpdateSettings: (body: { motoCommissionPct: number }) =>
+    request<{ motoCommissionPct: number }>("/admin/settings", { method: "PATCH", body, auth: true }),
 };
 
 export interface RatingResult {
@@ -367,24 +380,47 @@ export interface NearbyMoto {
   operator: string;
   distanceKm: number;
 }
+export type RideStatus = "OPEN" | "ACCEPTED" | "CONFIRMED" | "IN_PROGRESS" | "AWAITING_CONFIRM" | "COMPLETED" | "CANCELLED";
+export interface RideOfferView {
+  id: string;
+  amount: number;
+  driverName: string;
+  rating: number;
+  plate: string;
+  distanceKm: number;
+}
 export interface RideView {
   id: string;
   from: string;
   to: string;
   offerFare: number | null;
-  status: "OPEN" | "ACCEPTED" | "COMPLETED" | "CANCELLED";
+  agreedFare: number | null;
+  departAt: string | null;
+  status: RideStatus;
   targeted: boolean;
+  prepaid: boolean;
+  paidAt: string | null;
+  pickupDeadline: string | null;
+  pickupOverdue: boolean;
   driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number } | null;
+  offers: RideOfferView[];
   createdAt: string;
   acceptedAt: string | null;
 }
 export interface DriverMotoRequest {
   id: string;
+  status: RideStatus;
   passenger: string;
   passengerPhone: string;
   from: string;
   to: string;
   offerFare: number | null;
+  agreedFare: number | null;
+  departAt: string | null;
+  prepaid: boolean;
+  pickupDeadline: string | null;
+  pickupOverdue: boolean;
+  myOffer: number | null;
   targeted: boolean;
   distanceKm: number;
   requestedAt: string;
@@ -604,6 +640,8 @@ export interface AdminOverview {
   approvals: AdminApproval[];
   revenueBars: { m: string; value: number }[];
   complaints: { id: string; who: string; message: string; priority: string }[];
+  // Paypack merchant float (real money held); null = not connected
+  paypack: { balance: number; mtn: number; airtel: number } | null;
 }
 export interface AdminApproval {
   id: string;

@@ -3,7 +3,6 @@ import { z } from "zod";
 import { formatRWF, type PaymentDetail } from "@relay/shared";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
-import { env } from "../env";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
 import { notify } from "../lib/notify";
@@ -19,9 +18,11 @@ function makeTicketCode(): string {
   return code;
 }
 
+// Real money: every payment draws from the Relay wallet (funded by real
+// Paypack deposits). Direct MoMo/QR charging was removed with mock payments.
 const createSchema = z.object({
   bookingId: z.string(),
-  method: z.enum(["MOBILE_MONEY", "WALLET", "QR"]),
+  method: z.literal("WALLET").default("WALLET"),
 });
 
 function toDetail(p: {
@@ -42,8 +43,10 @@ function toDetail(p: {
   };
 }
 
-// POST /payments — pay for a booking (mock provider: instantly succeeds).
-// On WALLET, deducts the wallet balance. Confirms the booking + sends a notification.
+// POST /payments — pay for a booking from the wallet balance. Deducts the
+// fare atomically, confirms the booking, issues tickets. 402 (with the
+// shortfall spelled out) when the balance can't cover it — the client offers
+// a top-up from there.
 paymentsRouter.post(
   "/",
   requireAuth,
@@ -63,20 +66,16 @@ paymentsRouter.post(
       }
       if (booking.status === "CANCELLED") throw new HttpError(409, "Booking cancelled");
 
-      if (method === "WALLET") {
-        const user = await tx.user.findUnique({ where: { id: req.auth!.sub } });
-        const balance = new Prisma.Decimal(user!.walletBalance);
-        if (balance.lessThan(booking.fare)) {
-          throw new HttpError(402, "Insufficient wallet balance");
-        }
-        await tx.user.update({
-          where: { id: req.auth!.sub },
-          data: { walletBalance: balance.minus(booking.fare) },
-        });
+      const user = await tx.user.findUnique({ where: { id: req.auth!.sub } });
+      const balance = new Prisma.Decimal(user!.walletBalance);
+      if (balance.lessThan(booking.fare)) {
+        const short = new Prisma.Decimal(booking.fare).minus(balance);
+        throw new HttpError(402, `Insufficient wallet balance — top up ${formatRWF(Number(short))} to pay this fare`);
       }
-
-      // Mock provider — always succeeds. Real MoMo/Airtel wiring goes here.
-      const status = env.mockPayments ? "PAID" : "PENDING";
+      await tx.user.update({
+        where: { id: req.auth!.sub },
+        data: { walletBalance: balance.minus(booking.fare) },
+      });
 
       const payment = await tx.payment.upsert({
         where: { bookingId },
@@ -84,35 +83,28 @@ paymentsRouter.post(
           bookingId,
           amount: booking.fare,
           method,
-          status,
+          status: "PAID",
           reference: "PAY-" + Math.random().toString(36).slice(2, 10).toUpperCase(),
         },
-        update: { method, status },
+        update: { method, status: "PAID" },
       });
 
-      await tx.booking.update({
-        where: { id: bookingId },
-        data: { status: status === "PAID" ? "CONFIRMED" : "PENDING" },
-      });
+      await tx.booking.update({ where: { id: bookingId }, data: { status: "CONFIRMED" } });
 
       // One independently-boardable ticket per purchased seat — a group
       // booking gets a distinct QR/seat per rider, not one shared pass.
-      if (status === "PAID") {
-        await tx.ticket.createMany({
-          data: Array.from({ length: booking.seats }, (_, i) => ({
-            bookingId,
-            seatNumber: "12" + String.fromCharCode(65 + i),
-            code: makeTicketCode(),
-          })),
-        });
-      }
+      await tx.ticket.createMany({
+        data: Array.from({ length: booking.seats }, (_, i) => ({
+          bookingId,
+          seatNumber: "12" + String.fromCharCode(65 + i),
+          code: makeTicketCode(),
+        })),
+      });
 
-      // record on the wallet ledger (ride charge) when the payment settles
-      if (status === "PAID") {
-        await tx.walletTransaction.create({
-          data: { userId: req.auth!.sub, kind: "DEBIT", amount: booking.fare, label: booking.trip.route.name },
-        });
-      }
+      // ride charge on the wallet ledger
+      await tx.walletTransaction.create({
+        data: { userId: req.auth!.sub, kind: "DEBIT", amount: booking.fare, label: booking.trip.route.name },
+      });
 
       return payment;
     });

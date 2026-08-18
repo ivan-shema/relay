@@ -117,17 +117,20 @@ no credentials (toggle in `apps/api/.env`):
 
 - **OTP / SMS** (`MOCK_OTP=true`) — codes are logged to the API console; the code
   `000000` always passes (verify + password reset).
-- **Payments** (`MOCK_PAYMENTS=true`) — Mobile Money / wallet / QR / smart card all
-  succeed instantly. Wallet payments deduct the seeded balance. The real
-  MTN/Airtel MoMo call belongs in `apps/api/src/routes/payments.ts`.
-- **Deposits & withdrawals (Paypack)** — wallet top-ups (cashin) and operator
-  payouts (cashout) go through [Paypack](https://paypack.rw), which handles both
-  MTN MoMo and Airtel Money. Set `PAYPACK_CLIENT_ID` / `PAYPACK_CLIENT_SECRET`
-  in `apps/api/.env` to go live; leave them empty and both flows settle
-  instantly in mock mode. Real top-ups sit `PENDING` until the customer approves
-  the USSD prompt — settled by the `POST /webhooks/paypack` webhook (configure
-  the URL + `PAYPACK_WEBHOOK_SECRET` in the Paypack dashboard) or, in local dev,
-  by the client's status poll against the Paypack events API.
+- **Payments are REAL (no mock)** — the Relay wallet is the only spending rail.
+  Booking fares and moto-ride escrow are deducted from the wallet balance;
+  money enters the wallet via Paypack deposits and leaves via Paypack payouts
+  (below). `MOCK_PAYMENTS` is gone — a payment either moves real recorded
+  money or fails.
+- **Deposits & withdrawals (Paypack, required)** — wallet top-ups (cashin) and
+  operator/driver payouts (cashout) go through [Paypack](https://paypack.rw),
+  which handles both MTN MoMo and Airtel Money. `PAYPACK_CLIENT_ID` /
+  `PAYPACK_CLIENT_SECRET` in `apps/api/.env` are required for these flows —
+  without them deposits/withdrawals return 503. Top-ups sit `PENDING` until the
+  customer approves the USSD prompt — settled by the `POST /webhooks/paypack`
+  webhook (configure the URL + `PAYPACK_WEBHOOK_SECRET` in the Paypack
+  dashboard) or, in local dev, by the client's status poll against the Paypack
+  events API. The admin dashboard shows the live Paypack merchant balances.
 - **Maps / GPS** — the live-tracking map uses the design's SVG with a simulated
   vehicle interpolated along the route polyline (`apps/api/src/lib/tracking.ts`),
   polled every 3s by the client. Swap in Google Maps + real GPS later.

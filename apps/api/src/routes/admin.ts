@@ -8,8 +8,15 @@ import { hashPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
 import { notify } from "../lib/notify";
+import { fetchMerchantBalances } from "../lib/paypack";
+import { getMotoCommissionPct, setMotoCommissionPct } from "../lib/settings";
+import { z } from "zod";
 
 export const adminRouter = Router();
+
+const zSettings = z.object({
+  motoCommissionPct: z.coerce.number().min(0, "Can't be negative").max(50, "Commission above 50% is not allowed"),
+});
 
 adminRouter.use(requireAuth, requireRole("ADMIN"));
 
@@ -61,13 +68,14 @@ function mapApproval(o: ApprovalOperator) {
 adminRouter.get(
   "/overview",
   asyncHandler(async (_req, res) => {
-    const [users, operators, trips, paidAll, pendingOps, complaints] = await Promise.all([
+    const [users, operators, trips, paidAll, pendingOps, complaints, paypack] = await Promise.all([
       prisma.user.count(),
       prisma.operator.count(),
       prisma.booking.count(),
       prisma.payment.findMany({ where: { status: "PAID" } }),
       prisma.operator.findMany({ where: { status: "PENDING" }, orderBy: { createdAt: "asc" }, include: { documents: true, ownerUser: true } }),
       prisma.complaint.findMany({ where: { status: "OPEN" }, orderBy: { createdAt: "desc" }, take: 4 }),
+      fetchMerchantBalances(), // null when Paypack isn't configured/reachable
     ]);
     const revenue = paidAll.reduce((s, p) => s + dec(p.amount), 0);
 
@@ -85,6 +93,8 @@ adminRouter.get(
       approvals: pendingOps.map(mapApproval),
       revenueBars: months.map((m, i) => ({ m, value: base[i] })),
       complaints: complaints.map((c) => ({ id: c.id, who: c.who, message: c.message, priority: c.priority })),
+      // Paypack merchant float — the real money the platform holds
+      paypack,
     });
   })
 );
@@ -435,6 +445,24 @@ adminRouter.get(
       multimodalPct,
       revenueBars,
     });
+  })
+);
+
+// GET /admin/settings — platform configuration (currently: moto commission)
+adminRouter.get(
+  "/settings",
+  asyncHandler(async (_req, res) => {
+    res.json({ motoCommissionPct: await getMotoCommissionPct() });
+  })
+);
+
+// PATCH /admin/settings — update platform configuration
+adminRouter.patch(
+  "/settings",
+  asyncHandler(async (req, res) => {
+    const { motoCommissionPct } = zSettings.parse(req.body);
+    await setMotoCommissionPct(motoCommissionPct);
+    res.json({ motoCommissionPct });
   })
 );
 

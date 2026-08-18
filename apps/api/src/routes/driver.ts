@@ -6,6 +6,8 @@ import { asyncHandler, HttpError } from "../lib/http";
 import { fullNameOf } from "../lib/mappers";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { notify } from "../lib/notify";
+import { normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
+import { settlePayout } from "../lib/settlement";
 
 export const driverRouter = Router();
 
@@ -124,8 +126,11 @@ function rideMockDistanceKm(id: string): number {
   return Math.round((3 + (h % 27)) * 10) / 100;
 }
 
+const DRIVER_ACTIVE_RIDE_STATUSES = ["ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM"] as const;
+
 // GET /driver/moto-requests — open hails this moto can take (broadcasts +
-// requests targeted directly at them), plus their currently accepted ride.
+// requests targeted at them, with their own pending counter-offer attached),
+// plus their current ride at whatever lifecycle stage it's in.
 driverRouter.get(
   "/moto-requests",
   asyncHandler(async (req, res) => {
@@ -133,22 +138,30 @@ driverRouter.get(
     const [open, current] = await Promise.all([
       prisma.rideRequest.findMany({
         where: { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: driver.id }] },
-        include: { passenger: true },
+        include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
         orderBy: { createdAt: "desc" },
         take: 20,
       }),
       prisma.rideRequest.findFirst({
-        where: { status: "ACCEPTED", acceptedDriverId: driver.id },
-        include: { passenger: true },
+        where: { status: { in: [...DRIVER_ACTIVE_RIDE_STATUSES] }, acceptedDriverId: driver.id },
+        include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
       }),
     ]);
     const map = (r: (typeof open)[number]) => ({
       id: r.id,
+      status: r.status,
       passenger: fullNameOf(r.passenger),
       passengerPhone: r.passenger.phone,
       from: r.originLabel,
       to: r.destLabel,
       offerFare: r.offerFare === null ? null : dec(r.offerFare),
+      agreedFare: r.agreedFare === null ? null : dec(r.agreedFare),
+      departAt: r.departAt?.toISOString() ?? null,
+      // funded re-broadcast: accepting goes straight to pickup, price locked
+      prepaid: Boolean(r.paidAt),
+      pickupDeadline: r.pickupDeadline?.toISOString() ?? null,
+      pickupOverdue: r.status === "CONFIRMED" && r.pickupDeadline !== null && r.pickupDeadline.getTime() < Date.now(),
+      myOffer: r.offers[0] ? dec(r.offers[0].amount) : null,
       targeted: r.targetDriverId === driver.id,
       distanceKm: rideMockDistanceKm(r.id),
       requestedAt: r.createdAt.toISOString(),
@@ -157,49 +170,138 @@ driverRouter.get(
   })
 );
 
-// POST /driver/moto-requests/:id/accept — claim a hail. The claim is a single
-// atomic OPEN→ACCEPTED update: whichever driver's request lands first wins,
-// and every later acceptance matches zero rows and is rejected. No lock, no
-// double-assignment window.
+// POST /driver/moto-requests/:id/accept — claim a hail at the passenger's
+// asking price (or the already-funded fare on a re-broadcast). The claim is a
+// single atomic OPEN→next-state update: whichever driver's request lands first
+// wins, and every later acceptance matches zero rows and is rejected.
 driverRouter.post(
   "/moto-requests/:id/accept",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
     if (driver.suspended) throw new HttpError(403, "Your account is suspended");
 
-    const busy = await prisma.rideRequest.findFirst({ where: { status: "ACCEPTED", acceptedDriverId: driver.id } });
+    const busy = await prisma.rideRequest.findFirst({
+      where: { status: { in: [...DRIVER_ACTIVE_RIDE_STATUSES] }, acceptedDriverId: driver.id },
+    });
     if (busy) throw new HttpError(409, "Finish your current ride before accepting another");
 
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride) throw new HttpError(404, "Ride not found");
+
+    // A funded re-broadcast keeps its fare and skips payment; a fresh ride
+    // needs the passenger's asking price to accept directly (else counter).
+    const prepaid = Boolean(ride.paidAt);
+    const fare = prepaid ? ride.agreedFare : ride.offerFare;
+    if (!fare) throw new HttpError(409, "The passenger didn't propose a price — send them your offer instead");
+
+    const now = new Date();
     const claimed = await prisma.rideRequest.updateMany({
       where: {
-        id: req.params.id,
+        id: ride.id,
         status: "OPEN",
         OR: [{ targetDriverId: null }, { targetDriverId: driver.id }],
       },
-      data: { status: "ACCEPTED", acceptedDriverId: driver.id, acceptedAt: new Date() },
+      data: prepaid
+        ? {
+            status: "CONFIRMED",
+            acceptedDriverId: driver.id,
+            acceptedAt: now,
+            pickupDeadline: new Date(Math.max(now.getTime(), ride.departAt?.getTime() ?? 0) + 10 * 60_000),
+          }
+        : { status: "ACCEPTED", acceptedDriverId: driver.id, acceptedAt: now, agreedFare: fare },
     });
     if (claimed.count === 0) throw new HttpError(409, "Too late — another driver already took this ride");
 
-    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { passenger: true } });
-    if (ride) {
-      await notify(ride.passengerId, "Moto on the way", `${fullNameOf(driver.user)} accepted your ride ${ride.originLabel} → ${ride.destLabel}.`);
-    }
+    await prisma.rideOffer.updateMany({ where: { rideId: ride.id, status: "PENDING" }, data: { status: "DECLINED" } });
+    await notify(
+      ride.passengerId,
+      prepaid ? "New moto on the way" : "Moto accepted your request",
+      prepaid
+        ? `${fullNameOf(driver.user)} took over your ride ${ride.originLabel} → ${ride.destLabel} — already paid, they're coming.`
+        : `${fullNameOf(driver.user)} accepted ${ride.originLabel} → ${ride.destLabel} at your price. Pay to confirm the ride.`
+    );
     res.json({ accepted: true });
   })
 );
 
-// POST /driver/moto-requests/:id/complete — wrap up an accepted hail
+// POST /driver/moto-requests/:id/offer — bargaining: quote a price (when the
+// passenger didn't set one, or theirs is too low for the distance). One live
+// offer per driver per ride; re-quoting replaces it.
+driverRouter.post(
+  "/moto-requests/:id/offer",
+  asyncHandler(async (req, res) => {
+    const { amount } = z.object({ amount: z.coerce.number().positive().max(100_000) }).parse(req.body);
+    const driver = await getDriver(req.auth!.sub);
+    if (driver.suspended) throw new HttpError(403, "Your account is suspended");
+
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.status !== "OPEN") throw new HttpError(409, "This ride is no longer open");
+    if (ride.paidAt) throw new HttpError(409, "This ride is already funded at a fixed price — accept it as is");
+    if (ride.targetDriverId && ride.targetDriverId !== driver.id) throw new HttpError(403, "This request was sent to another driver");
+
+    await prisma.rideOffer.upsert({
+      where: { rideId_driverId: { rideId: ride.id, driverId: driver.id } },
+      create: { rideId: ride.id, driverId: driver.id, amount },
+      update: { amount, status: "PENDING" },
+    });
+    await notify(
+      ride.passengerId,
+      "Price offer from a moto",
+      `${fullNameOf(driver.user)} offers RWF ${Math.round(amount).toLocaleString("en-US")} for ${ride.originLabel} → ${ride.destLabel}. Accept it to continue.`
+    );
+    res.status(201).json({ offered: true });
+  })
+);
+
+// POST /driver/moto-requests/:id/withdraw — driver backs out of an ACCEPTED
+// (still unpaid) ride; it reopens for everyone else.
+driverRouter.post(
+  "/moto-requests/:id/withdraw",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.acceptedDriverId !== driver.id) throw new HttpError(404, "Ride not found");
+    if (ride.status !== "ACCEPTED") throw new HttpError(409, "You can only withdraw before the passenger pays");
+
+    await prisma.rideRequest.update({
+      where: { id: ride.id },
+      data: { status: "OPEN", acceptedDriverId: null, acceptedAt: null, agreedFare: null, targetDriverId: null },
+    });
+    await notify(ride.passengerId, "Driver withdrew", `${fullNameOf(driver.user)} can't take ${ride.originLabel} → ${ride.destLabel} — your request is open to other motos again.`);
+    res.json({ withdrawn: true });
+  })
+);
+
+// POST /driver/moto-requests/:id/pickup — driver confirms the passenger is on
+// the moto. Allowed while CONFIRMED, even slightly past the deadline (if the
+// passenger hasn't re-broadcast or cancelled yet, the ride is still theirs).
+driverRouter.post(
+  "/moto-requests/:id/pickup",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.acceptedDriverId !== driver.id || ride.status !== "CONFIRMED") throw new HttpError(404, "Ride not found");
+
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "IN_PROGRESS", pickedUpAt: new Date() } });
+    await notify(ride.passengerId, "Ride started", `${fullNameOf(driver.user)} picked you up — enjoy the ride to ${ride.destLabel}.`);
+    res.json({ pickedUp: true });
+  })
+);
+
+// POST /driver/moto-requests/:id/complete — the driver says the ride is done.
+// This does NOT release the money: the passenger must confirm completion, and
+// only that confirmation pays the driver (escrow minus platform commission).
 driverRouter.post(
   "/moto-requests/:id/complete",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
     const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { passenger: true } });
-    if (!ride || ride.acceptedDriverId !== driver.id || ride.status !== "ACCEPTED") {
+    if (!ride || ride.acceptedDriverId !== driver.id || ride.status !== "IN_PROGRESS") {
       throw new HttpError(404, "Ride not found");
     }
-    await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "COMPLETED" } });
-    await notify(ride.passengerId, "Ride completed", `Thanks for riding with ${fullNameOf(driver.user)} — ${ride.originLabel} → ${ride.destLabel}.`);
-    res.json({ completed: true });
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "AWAITING_CONFIRM", completionRequestedAt: new Date() } });
+    await notify(ride.passengerId, "Confirm your ride", `${fullNameOf(driver.user)} marked ${ride.originLabel} → ${ride.destLabel} as completed — confirm it to release their payment.`);
+    res.json({ requested: true });
   })
 );
 
@@ -246,22 +348,61 @@ driverRouter.post(
   })
 );
 
-// POST /driver/cashout — settle today's earnings to Mobile Money
+// POST /driver/cashout — settle today's earnings to Mobile Money. Real money:
+// a Paypack cashout to the driver's phone, PENDING until the provider
+// confirms (webhook/poll settles it). Earnings already cashed out (or in
+// flight) today are excluded; failed cashouts return to the pool.
 driverRouter.post(
   "/cashout",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
     const today = startOfToday();
-    const paid = await prisma.payment.findMany({
-      where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { driverId: driver.id } } },
-    });
-    const amount = paid.reduce((s, p) => s + dec(p.amount), 0);
-    if (amount <= 0) throw new HttpError(409, "No earnings to cash out yet");
+    const [paid, payouts] = await Promise.all([
+      prisma.payment.findMany({
+        where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { driverId: driver.id } } },
+      }),
+      prisma.payout.findMany({ where: { driverId: driver.id, createdAt: { gte: today }, status: { not: "FAILED" } } }),
+    ]);
+    const earned = paid.reduce((s, p) => s + dec(p.amount), 0);
+    const alreadyOut = payouts.reduce((s, p) => s + dec(p.amount), 0);
+    const amount = Math.floor(earned - alreadyOut); // whole RWF; remainder stays cashable
+    if (amount < 100) throw new HttpError(409, "No earnings to cash out yet"); // Paypack minimum transfer is RWF 100
+
+    const number = normalizeMomoNumber(driver.user.phone);
+    const transfer = await requestCashout(amount, number);
     const payout = await prisma.payout.create({
-      data: { reference: "PO-" + Math.random().toString(36).slice(2, 9).toUpperCase(), driverId: driver.id, amount, method: "MTN MoMo" },
+      data: {
+        reference: "PO-" + Math.random().toString(36).slice(2, 9).toUpperCase(),
+        driverId: driver.id,
+        amount,
+        method: momoProviderLabel(number),
+        status: "PENDING",
+        momoRef: transfer.ref,
+      },
     });
-    await notify(req.auth!.sub, "Payout sent", `RWF ${Math.round(amount).toLocaleString("en-US")} sent to your MTN MoMo.`);
-    res.status(201).json({ amount: Number(amount.toFixed(2)), reference: payout.reference });
+    res.status(201).json({ amount, reference: payout.reference, status: "PENDING" });
+  })
+);
+
+// GET /driver/cashout/:reference/status — poll backup while Paypack processes
+// the cashout: local record first; only asks Paypack (and settles locally)
+// when the webhook hasn't landed yet.
+driverRouter.get(
+  "/cashout/:reference/status",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const payout = await prisma.payout.findUnique({ where: { reference: req.params.reference } });
+    if (!payout || payout.driverId !== driver.id) throw new HttpError(404, "Payout not found");
+
+    let status = payout.status;
+    if (status === "PENDING" && payout.momoRef) {
+      const outcome = await fetchTransferOutcome(payout.momoRef, "CASHOUT");
+      if (outcome !== "pending") {
+        await settlePayout(payout.momoRef, outcome);
+        status = outcome === "successful" ? "COMPLETED" : "FAILED";
+      }
+    }
+    res.json({ status, amount: dec(payout.amount), reference: payout.reference });
   })
 );
 

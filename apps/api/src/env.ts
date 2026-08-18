@@ -16,7 +16,6 @@ export const env = {
   jwtRefreshTtl: process.env.JWT_REFRESH_TTL ?? "30d",
   port: Number(process.env.PORT ?? 4000),
   webOrigin: process.env.WEB_ORIGIN ?? "http://localhost:3000",
-  mockPayments: (process.env.MOCK_PAYMENTS ?? "true") === "true",
   mockOtp: (process.env.MOCK_OTP ?? "true") === "true",
   mockOtpCode: process.env.MOCK_OTP_CODE ?? "000000",
   // Paypack (MTN MoMo + Airtel Money). When the client id/secret are unset the

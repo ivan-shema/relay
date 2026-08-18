@@ -427,9 +427,9 @@ async function withdrawableToday(opId: string): Promise<number> {
   return gross * 0.88 - alreadyOut;
 }
 
-// POST /operator/payout — withdraw today's net earnings. With Paypack
-// configured this is a real MoMo/Airtel cashout to the owner's phone and stays
-// PENDING until the provider confirms; otherwise it settles instantly (mock).
+// POST /operator/payout — withdraw today's net earnings. Real money only: a
+// Paypack MoMo/Airtel cashout to the owner's phone, PENDING until the provider
+// confirms. Requires Paypack credentials — no mock fallback.
 operatorRouter.post(
   "/payout",
   asyncHandler(async (req, res) => {
@@ -437,13 +437,6 @@ operatorRouter.post(
     const net = await withdrawableToday(opId);
     if (net < 100) throw new HttpError(409, "Nothing to withdraw yet"); // Paypack minimum transfer is RWF 100
     const reference = "PO-" + Math.random().toString(36).slice(2, 9).toUpperCase();
-
-    if (!paypackEnabled) {
-      const payout = await prisma.payout.create({
-        data: { reference, operatorId: opId, amount: net, method: "MTN MoMo" },
-      });
-      return res.status(201).json({ amount: Number(net.toFixed(2)), reference: payout.reference, status: "COMPLETED" });
-    }
 
     const owner = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
     const number = normalizeMomoNumber(owner!.phone);

@@ -59,10 +59,19 @@ export async function settlePayout(ref: string, outcome: "successful" | "failed"
     if (claimed.count === 0) return null;
 
     const payout = await tx.payout.findUnique({ where: { momoRef: ref } });
-    if (!payout?.operatorId) return null;
-    const operator = await tx.operator.findUnique({ where: { id: payout.operatorId } });
-    if (!operator?.ownerUserId) return null;
-    return { ownerUserId: operator.ownerUserId, reference: payout.reference, amount: Number(payout.amount), method: payout.method };
+    if (!payout) return null;
+
+    // Resolve who to tell: the operator's owner, or the driver's user.
+    let userId: string | null = null;
+    if (payout.operatorId) {
+      const operator = await tx.operator.findUnique({ where: { id: payout.operatorId } });
+      userId = operator?.ownerUserId ?? null;
+    } else if (payout.driverId) {
+      const driver = await tx.driver.findUnique({ where: { id: payout.driverId } });
+      userId = driver?.userId ?? null;
+    }
+    if (!userId) return null;
+    return { ownerUserId: userId, reference: payout.reference, amount: Number(payout.amount), method: payout.method };
   });
 
   if (!settled) return;

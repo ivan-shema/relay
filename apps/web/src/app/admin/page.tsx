@@ -69,6 +69,7 @@ export default function AdminConsole() {
     { key: "payments", label: "Payments", icon: "◈" },
     { key: "reports", label: "Reports", icon: "▧" },
     { key: "complaints", label: "Complaints", icon: "!" },
+    { key: "settings", label: "Settings", icon: "⚙" },
   ];
 
   const titles: Record<string, string> = {
@@ -79,6 +80,7 @@ export default function AdminConsole() {
     payments: "Payments",
     reports: "Reports & analytics",
     complaints: "Complaints & feedback",
+    settings: "Platform settings",
   };
 
   return (
@@ -123,6 +125,7 @@ export default function AdminConsole() {
             {tab === "payments" && <PaymentsTab />}
             {tab === "reports" && <ReportsTab />}
             {tab === "complaints" && <ComplaintsTab />}
+            {tab === "settings" && <SettingsTab onToast={setToast} />}
           </>
         )}
       </ConsoleShell>
@@ -162,20 +165,57 @@ function Dashboard({ onReview, onReviewAll }: { onReview: (id: string) => void; 
             <BarChart bars={data.revenueBars} />
           </Card>
         </div>
-        <Card>
-          <CardTitle right={<span style={{ fontSize: 12, fontWeight: 700, color: "#ff6a1a" }}>{data.complaints.length} open</span>}>Complaints &amp; feedback</CardTitle>
-          {data.complaints.map((c) => (
-            <div key={c.id} style={{ padding: "14px 0", borderTop: "1px solid #f1ece2" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: "#8c8378" }}>{c.who}</span>
-                <StatusPill status={c.priority} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <PaypackBalancesCard paypack={data.paypack} />
+          <Card>
+            <CardTitle right={<span style={{ fontSize: 12, fontWeight: 700, color: "#ff6a1a" }}>{data.complaints.length} open</span>}>Complaints &amp; feedback</CardTitle>
+            {data.complaints.map((c) => (
+              <div key={c.id} style={{ padding: "14px 0", borderTop: "1px solid #f1ece2" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#8c8378" }}>{c.who}</span>
+                  <StatusPill status={c.priority} />
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{c.message}</div>
               </div>
-              <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{c.message}</div>
-            </div>
-          ))}
-        </Card>
+            ))}
+          </Card>
+        </div>
       </div>
     </>
+  );
+}
+
+// Live Paypack merchant balances — the real money the platform holds across
+// MTN MoMo and Airtel Money (deposits in, payouts out).
+function PaypackBalancesCard({ paypack }: { paypack: AdminOverview["paypack"] }) {
+  return (
+    <div style={{ background: "#1b1714", borderRadius: 18, padding: 20, color: "#fff" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <span style={{ fontSize: 12.5, color: "#cfc7bb", fontWeight: 700 }}>Paypack float</span>
+        <span style={{ fontSize: 11, fontWeight: 800, borderRadius: 20, padding: "3px 9px", background: paypack ? "#1f9d6b22" : "#c2553f22", color: paypack ? "#4cd396" : "#e0a99a" }}>
+          {paypack ? "● live" : "not connected"}
+        </span>
+      </div>
+      {paypack ? (
+        <>
+          <div style={{ fontFamily: MONO, fontSize: 28, fontWeight: 700, margin: "2px 0 12px" }}>{formatRWF(paypack.balance)}</div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10.5, color: "#9a9186", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em" }}>MTN MoMo</div>
+              <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, marginTop: 3 }}>{formatRWF(paypack.mtn)}</div>
+            </div>
+            <div style={{ flex: 1, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10.5, color: "#9a9186", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em" }}>Airtel Money</div>
+              <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, marginTop: 3 }}>{formatRWF(paypack.airtel)}</div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, lineHeight: 1.5, marginTop: 4 }}>
+          Set PAYPACK_CLIENT_ID / PAYPACK_CLIENT_SECRET in apps/api/.env to see the platform&apos;s live MoMo &amp; Airtel balances here.
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -670,6 +710,62 @@ function ReportsTab() {
         <button onClick={downloadReport} style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 13, padding: 14, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Download full report</button>
       </div>
     </div>
+  );
+}
+
+// Platform-wide knobs. Currently: the commission Relay keeps from each
+// completed moto hail (applied at completion time — changing it never
+// rewrites already-settled rides).
+function SettingsTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
+  const [pct, setPct] = useState<string>("");
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.adminSettings().then((s) => { setPct(String(s.motoCommissionPct)); setLoaded(true); }).catch(() => setLoaded(true));
+  }, []);
+
+  const save = async () => {
+    const value = Number(pct);
+    if (!Number.isFinite(value) || value < 0 || value > 50) {
+      onToast({ kind: "error", msg: "Commission must be between 0 and 50%." });
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.adminUpdateSettings({ motoCommissionPct: value });
+      setPct(String(r.motoCommissionPct));
+      onToast({ kind: "success", msg: `Moto commission set to ${r.motoCommissionPct}%.` });
+    } catch (e) {
+      onToast({ kind: "error", msg: e instanceof Error ? e.message : "Could not save settings" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!loaded) return <Loading />;
+
+  return (
+    <Card style={{ maxWidth: 620 }}>
+      <CardTitle>Moto ride commission</CardTitle>
+      <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, marginBottom: 16, lineHeight: 1.5 }}>
+        Relay keeps this percentage of every completed moto hail; the driver receives the rest when the passenger
+        confirms completion. Applies to rides completed from now on.
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <input
+          value={pct}
+          onChange={(e) => setPct(e.target.value.replace(/[^0-9.]/g, ""))}
+          inputMode="decimal"
+          style={{ width: 120, border: "1px solid #e3ddd1", borderRadius: 11, padding: "11px 13px", fontSize: 15, fontWeight: 700, fontFamily: MONO, outline: "none" }}
+        />
+        <span style={{ fontSize: 14, fontWeight: 700, color: "#8c8378" }}>%</span>
+        <button onClick={save} disabled={busy} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 11, padding: "11px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: "#a39a8d", fontWeight: 600, marginTop: 12 }}>Default: 10% · allowed range 0–50%.</div>
+    </Card>
   );
 }
 

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   BookingDetail,
-  PaymentMethod,
   Place,
   TrackingSnapshot,
   TripSummary,
@@ -14,7 +13,7 @@ import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView } from "@/lib/api";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
@@ -29,11 +28,6 @@ type Tab = "plan" | "trips" | "orders" | "wallet" | "you";
 // loading, null = never applied, object = has an application on file.
 type OperatorStatus = { status: string; companyName: string } | null | undefined;
 
-const PAY_METHODS: { method: PaymentMethod; name: string; sub: string; glyph: string; gbg: string; gink: string }[] = [
-  { method: "MOBILE_MONEY", name: "MTN MoMo", sub: "•••• 4821", glyph: "M", gbg: "#ffd400", gink: "#1b1714" },
-  { method: "WALLET", name: "Relay Wallet", sub: "balance", glyph: "◈", gbg: "#1b1714", gink: "#ff6a1a" },
-  { method: "QR", name: "QR Code", sub: "scan to pay", glyph: "▦", gbg: "#e9f0ff", gink: "#2f6bff" },
-];
 
 export default function PassengerApp() {
   const router = useRouter();
@@ -63,7 +57,6 @@ export default function PassengerApp() {
   const [tripsLoading, setTripsLoading] = useState(false);
   const [selected, setSelected] = useState<TripSummary | null>(null);
   const [booking, setBooking] = useState<BookingDetail | null>(null);
-  const [payMethod, setPayMethod] = useState<PaymentMethod>("MOBILE_MONEY");
   const [trackPhase, setTrackPhase] = useState<"approaching" | "boarded">("approaching");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -96,7 +89,6 @@ export default function PassengerApp() {
   const payExistingBooking = useCallback((b: BookingDetail) => {
     setSelected(b.trip);
     setBooking(b);
-    setPayMethod("MOBILE_MONEY");
     setTab("plan");
     setScreen("pay");
   }, []);
@@ -169,7 +161,7 @@ export default function PassengerApp() {
     setBusy(true);
     setError(null);
     try {
-      await api.pay({ bookingId: booking.id, method: payMethod });
+      await api.pay({ bookingId: booking.id });
       await refreshUser();
       loadPrimaryBookings();
       setTrackPhase("approaching");
@@ -179,7 +171,7 @@ export default function PassengerApp() {
     } finally {
       setBusy(false);
     }
-  }, [booking, payMethod, refreshUser, loadPrimaryBookings]);
+  }, [booking, refreshUser, loadPrimaryBookings]);
 
   const submitRating = useCallback(
     async (score: number, bookingId?: string, comment?: string) => {
@@ -278,7 +270,7 @@ export default function PassengerApp() {
           </div>
         )}
         {tab === "plan" && screen === "pay" && selected && booking && (
-          <PayScreen trip={selected} bookingId={booking.id} method={payMethod} setMethod={setPayMethod} busy={busy} onBack={() => setScreen("available")} onPay={pay} />
+          <PayScreen trip={selected} bookingId={booking.id} busy={busy} onBack={() => setScreen("available")} onPay={pay} onTopUp={() => setTab("wallet")} />
         )}
         {tab === "plan" && screen === "track" && selected && booking && (
           <TrackScreen booking={booking} trip={selected} phase={trackPhase} onBoard={() => setTrackPhase("boarded")} onArrived={() => setScreen("done")} />
@@ -867,20 +859,31 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
 }
 
 /* ============ MOTO HAIL ============ */
-// On-demand moto hailing — no schedules. The passenger sees nearby online
-// motos and requests one directly (or broadcasts to all); the first driver to
-// accept wins the ride, and this screen polls until that happens.
+const RIDE_ACTIVE: RideStatus[] = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM"];
+
+function fmtClock(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+// On-demand moto hailing, full lifecycle:
+//   request (optional price + departure time) → bargain over counter-offers →
+//   pay into platform escrow → 10-min pickup window (rebroadcast or refund if
+//   the driver never comes) → ride → driver requests completion → passenger
+//   confirms → driver is paid out minus the platform commission.
 function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string; onBack: () => void }) {
+  const { refreshUser } = useAuth();
   const [ride, setRide] = useState<RideView | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [nearby, setNearby] = useState<NearbyMoto[]>([]);
   const [from, setFrom] = useState(origin);
   const [to, setTo] = useState(dest);
   const [offer, setOffer] = useState("");
+  const [departTime, setDepartTime] = useState("");
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const active = ride && (ride.status === "OPEN" || ride.status === "ACCEPTED") ? ride : null;
+  const active = ride && RIDE_ACTIVE.includes(ride.status) ? ride : null;
 
   useEffect(() => {
     let on = true;
@@ -897,76 +900,149 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
     return () => { on = false; };
   }, [active]);
 
-  const submit = async (targetDriverId?: string) => {
+  const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
     try {
-      const offerFare = offer.trim() ? Number(offer) : undefined;
-      const r = await api.requestRide({ originLabel: from, destLabel: to, offerFare, targetDriverId });
+      await fn();
+      const r = await api.myRide();
       setRide(r);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Could not send your request");
+      setError(e instanceof ApiError ? e.message : "Something went wrong — try again");
     } finally {
       setBusy(false);
     }
   };
 
-  const cancel = async () => {
-    if (!active) return;
-    setBusy(true);
-    try {
-      await api.cancelRide(active.id);
-      setRide({ ...active, status: "CANCELLED" });
-    } catch {
-      /* next poll corrects the state */
-    } finally {
-      setBusy(false);
-    }
-  };
+  const submit = (targetDriverId?: string) =>
+    run(() => {
+      const offerFare = offer.trim() ? Number(offer) : undefined;
+      let departAt: string | undefined;
+      if (departTime) {
+        const d = new Date();
+        const [h, m] = departTime.split(":").map(Number);
+        d.setHours(h, m, 0, 0);
+        if (d.getTime() < Date.now()) d.setDate(d.getDate() + 1); // that time already passed today → tomorrow
+        departAt = d.toISOString();
+      }
+      return api.requestRide({ originLabel: from, destLabel: to, offerFare, targetDriverId, departAt });
+    });
+
+  const btn = (bg: string, color = "#fff", border = "none"): React.CSSProperties => ({
+    width: "100%", background: bg, color, border, borderRadius: 13, padding: 13, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif",
+  });
 
   return (
     <div style={{ padding: "8px 22px 28px" }} className="rel-up">
       <ScreenHeader onBack={onBack} title="Hail a moto" sub="On-demand — the moto goes where you go" />
+      {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{error}</div>}
 
       {!loaded ? (
         <div style={{ padding: 30, textAlign: "center", color: "#a39a8d", fontWeight: 600 }}>Loading…</div>
       ) : active ? (
-        /* -------- waiting / accepted -------- */
-        <div style={{ background: "#fff", border: `2px solid ${active.status === "ACCEPTED" ? "#1f9d6b" : "#ff6a1a"}`, borderRadius: 20, padding: 20, boxShadow: "0 14px 40px -20px rgba(27,23,20,.35)" }}>
+        <div style={{ background: "#fff", border: `2px solid ${active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue ? "#c2553f" : "#1f9d6b"}`, borderRadius: 20, padding: 20, boxShadow: "0 14px 40px -20px rgba(27,23,20,.35)" }}>
+          {/* status line */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-            <span className="rel-pulse" style={{ width: 9, height: 9, borderRadius: "50%", background: active.status === "ACCEPTED" ? "#1f9d6b" : "#ff6a1a" }} />
-            <span style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", color: active.status === "ACCEPTED" ? "#1f9d6b" : "#ff6a1a" }}>
-              {active.status === "ACCEPTED" ? "Moto on the way" : active.targeted ? "Waiting for your moto to accept" : "Finding you a moto…"}
+            <span className="rel-pulse" style={{ width: 9, height: 9, borderRadius: "50%", background: active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue ? "#c2553f" : "#1f9d6b" }} />
+            <span style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", color: active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue ? "#c2553f" : "#1f9d6b" }}>
+              {active.status === "OPEN" && (active.prepaid ? "Finding you a new moto (already paid)" : active.targeted ? "Waiting for your moto" : "Finding you a moto…")}
+              {active.status === "ACCEPTED" && "Accepted — pay to confirm"}
+              {active.status === "CONFIRMED" && (active.pickupOverdue ? "Driver hasn't arrived" : "Moto on the way")}
+              {active.status === "IN_PROGRESS" && "On the ride"}
+              {active.status === "AWAITING_CONFIRM" && "Confirm your ride"}
             </span>
           </div>
           <div style={{ fontSize: 15, fontWeight: 700 }}>{active.from} → {active.to}</div>
-          {active.offerFare !== null && (
-            <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>Your offer: <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(active.offerFare)}</span></div>
-          )}
+          <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>
+            {active.agreedFare !== null
+              ? <>Fare: <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(active.agreedFare)}</span>{active.paidAt && " · paid, held by Relay until the ride completes"}</>
+              : active.offerFare !== null
+                ? <>Your offer: <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(active.offerFare)}</span></>
+                : "No price set — drivers will quote you"}
+            {active.departAt && <> · departs {fmtClock(active.departAt)}</>}
+          </div>
 
-          {active.status === "ACCEPTED" && active.driver ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 16, paddingTop: 16, borderTop: "1px solid #f1ece2" }}>
-              <div style={{ width: 48, height: 48, borderRadius: 14, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
+          {/* assigned driver */}
+          {active.driver && active.status !== "OPEN" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ width: 46, height: 46, borderRadius: 13, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 700 }}>{active.driver.name} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
-                <div style={{ fontSize: 12.5, color: "#8c8378" }}>{active.driver.model} · <span style={{ fontFamily: MONO }}>{active.driver.plate}</span> · ~{active.driver.distanceKm} km away</div>
-                <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginTop: 2, fontFamily: MONO }}>{active.driver.phone}</div>
+                <div style={{ fontSize: 14.5, fontWeight: 700 }}>{active.driver.name} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
+                <div style={{ fontSize: 12, color: "#8c8378" }}>{active.driver.model} · <span style={{ fontFamily: MONO }}>{active.driver.plate}</span> · <span style={{ fontFamily: MONO }}>{active.driver.phone}</span></div>
               </div>
             </div>
-          ) : (
-            <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #f1ece2", fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>
-              {active.targeted && active.driver
-                ? `Requested ${active.driver.name} (${active.driver.plate}) directly — if they don't take it, cancel and broadcast to all motos.`
-                : "Every online moto nearby can see your request. First to accept gets the ride."}
+          )}
+
+          {/* per-state content */}
+          {active.status === "OPEN" && active.offers.length > 0 && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 9 }}>Price offers from drivers</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                {active.offers.map((o) => (
+                  <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #ffd9c2", background: "#fff6f0", borderRadius: 13, padding: "11px 13px" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{o.driverName} · <span style={{ color: "#ff6a1a" }}>★ {o.rating.toFixed(1)}</span></div>
+                      <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600 }}><span style={{ fontFamily: MONO }}>{o.plate}</span> · ~{o.distanceKm} km away</div>
+                    </div>
+                    <button onClick={() => run(() => api.acceptRideOffer(active.id, o.id))} disabled={busy} style={{ background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>
+                      Accept {formatRWF(o.amount)}
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
-          <button onClick={cancel} disabled={busy} style={{ width: "100%", marginTop: 16, background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 13, padding: 13, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
-              {busy ? "Cancelling…" : "Cancel request"}
-          </button>
+          {active.status === "ACCEPTED" && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginBottom: 12 }}>
+                Pay from your Relay Wallet to confirm — Relay holds the money and only pays the driver after you confirm the ride is done. Top up via MoMo from the Wallet tab if your balance is short.
+              </div>
+              <button onClick={() => run(async () => { await api.payRide(active.id); await refreshUser(); })} disabled={busy} style={{ ...btn("#ff6a1a"), boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>
+                {busy ? "Paying…" : `Pay ${active.agreedFare !== null ? formatRWF(active.agreedFare) : ""} & confirm`}
+              </button>
+            </div>
+          )}
+
+          {active.status === "CONFIRMED" && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              {active.pickupOverdue ? (
+                <>
+                  <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 13px", fontSize: 12.5, fontWeight: 700, marginBottom: 11 }}>
+                    The pickup window has passed and the driver hasn't picked you up. Your money is safe — hand the ride to another moto, or cancel for a full refund.
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => run(() => api.rebroadcastRide(active.id))} disabled={busy} style={btn("#ff6a1a")}>Find another moto</button>
+                    <button onClick={() => run(() => api.cancelRide(active.id).then(() => refreshUser()))} disabled={busy} style={btn("#fff", "#c2553f", "1px solid #f0d4cc")}>Cancel & refund</button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600 }}>
+                  Paid ✓ — your moto should pick you up by <span style={{ fontFamily: MONO, fontWeight: 700 }}>{active.pickupDeadline ? fmtClock(active.pickupDeadline) : "—"}</span>. If they don't make it, you'll be able to reassign or get a refund.
+                </div>
+              )}
+            </div>
+          )}
+
+          {active.status === "AWAITING_CONFIRM" && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginBottom: 11 }}>
+                {active.driver?.name ?? "Your driver"} marked the ride as completed. Confirming releases their payment.
+              </div>
+              <button onClick={() => run(() => api.confirmRideComplete(active.id))} disabled={busy} style={{ ...btn("#1f9d6b"), boxShadow: "0 12px 26px -12px rgba(31,157,107,.7)" }}>
+                {busy ? "Confirming…" : "Confirm — ride completed"}
+              </button>
+            </div>
+          )}
+
+          {/* cancel is available at every pre-completion stage */}
+          {active.status !== "AWAITING_CONFIRM" && (
+            <button onClick={() => run(() => api.cancelRide(active.id).then(() => refreshUser()))} disabled={busy} style={{ ...btn("#fff", "#c2553f", "1px solid #f0d4cc"), marginTop: 12 }}>
+              {active.paidAt ? "Cancel ride (full refund)" : "Cancel request"}
+            </button>
+          )}
         </div>
       ) : (
-        /* -------- request form + nearby motos -------- */
         <>
           {ride?.status === "COMPLETED" && (
             <div style={{ background: "#e7f6ee", border: "1px solid #bfe6d2", color: "#1f9d6b", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 700, marginBottom: 14 }}>
@@ -978,17 +1054,26 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
             <div style={{ height: 1, background: "#e9e3d8", margin: "0 14px" }} />
             <FromToRow value={to} onChange={setTo} label="DESTINATION" highlight />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
             <input
               value={offer}
               onChange={(e) => setOffer(e.target.value.replace(/[^0-9]/g, ""))}
               placeholder="Offer fare (optional)"
               inputMode="numeric"
-              style={{ flex: 1, border: "1px solid #e9e3d8", borderRadius: 12, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, outline: "none", fontFamily: "'Manrope', sans-serif", background: "#fff" }}
+              style={{ flex: "1 1 140px", border: "1px solid #e9e3d8", borderRadius: 12, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, outline: "none", fontFamily: "'Manrope', sans-serif", background: "#fff" }}
             />
             <span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>RWF</span>
+            <input
+              type="time"
+              value={departTime}
+              onChange={(e) => setDepartTime(e.target.value)}
+              title="Departure time (optional) — the moto must pick you up within 10 minutes of it"
+              style={{ border: "1px solid #e9e3d8", borderRadius: 12, padding: "11px 12px", fontSize: 13, fontWeight: 700, outline: "none", fontFamily: MONO, background: "#fff", color: departTime ? "#1b1714" : "#8c8378" }}
+            />
           </div>
-          {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{error}</div>}
+          <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginBottom: 12 }}>
+            Leave the price empty to let drivers quote you — or set one and drivers can accept it or counter. Departure time is optional (defaults to now).
+          </div>
           <PrimaryBtn onClick={() => submit()} busy={busy}>Request any nearby moto</PrimaryBtn>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "22px 0 10px" }}>
@@ -1022,29 +1107,18 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
 }
 
 /* ============ PAY ============ */
-function PayScreen({ trip, bookingId, method, setMethod, busy, onBack, onPay }: { trip: TripSummary; bookingId: string; method: PaymentMethod; setMethod: (m: PaymentMethod) => void; busy: boolean; onBack: () => void; onPay: () => void }) {
+// Real money: the Relay wallet is the only payment method — it holds real
+// funds (Paypack deposits), so paying is a straight balance deduction.
+function PayScreen({ trip, busy, onBack, onPay, onTopUp }: { trip: TripSummary; bookingId: string; busy: boolean; onBack: () => void; onPay: () => void; onTopUp: () => void }) {
+  const { user } = useAuth();
   const fee = 100;
   const total = trip.fare + fee;
-  const [showQr, setShowQr] = useState(false);
-
-  // QR method shows a scannable code first; other methods pay instantly.
-  const handlePay = () => {
-    if (method === "QR") setShowQr(true);
-    else onPay();
-  };
+  const balance = user?.walletBalance ?? 0;
+  const short = Math.max(0, total - balance);
 
   return (
     <div className="rel-up">
-      {showQr && (
-        <QrPayOverlay
-          amount={total}
-          payload={`relay:pay?ref=${bookingId}&amt=${Math.round(total)}&cur=RWF`}
-          busy={busy}
-          onConfirm={onPay}
-          onCancel={() => setShowQr(false)}
-        />
-      )}
-      <ScreenHeader onBack={onBack} title="Confirm & pay" sub="Contactless · secured by Relay" />
+      <ScreenHeader onBack={onBack} title="Confirm & pay" sub="Paid from your Relay wallet" />
       <div className="rel-pay-grid">
         {/* left — trip summary + fare */}
         <div>
@@ -1074,28 +1148,29 @@ function PayScreen({ trip, bookingId, method, setMethod, busy, onBack, onPay }: 
           </div>
         </div>
 
-        {/* right — payment methods + pay */}
+        {/* right — wallet + pay */}
         <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 22 }}>
           <SectionLabel>Pay with</SectionLabel>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-            {PAY_METHODS.map((m) => {
-              const sel = method === m.method;
-              return (
-                <button key={m.method} onClick={() => setMethod(m.method)} style={{ display: "flex", alignItems: "center", gap: 13, width: "100%", textAlign: "left", background: sel ? "#fff6f0" : "#fff", border: `2px solid ${sel ? "#ff6a1a" : "#e9e3d8"}`, borderRadius: 15, padding: "13px 15px", cursor: "pointer" }}>
-                  <div style={{ width: 38, height: 38, borderRadius: 10, background: m.gbg, color: m.gink, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, fontWeight: 800, flex: "none" }}>{m.glyph}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14.5, fontWeight: 700 }}>{m.name}</div>
-                    <div style={{ fontSize: 12, color: "#8c8378", fontFamily: MONO }}>{m.sub}</div>
-                  </div>
-                  {sel && <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#ff6a1a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>✓</div>}
-                </button>
-              );
-            })}
+          <div style={{ display: "flex", alignItems: "center", gap: 13, background: "#fff6f0", border: "2px solid #ff6a1a", borderRadius: 15, padding: "13px 15px", marginBottom: 12 }}>
+            <div style={{ width: 38, height: 38, borderRadius: 10, background: "#1b1714", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, fontWeight: 800, flex: "none" }}>◈</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 700 }}>Relay Wallet</div>
+              <div style={{ fontSize: 12, color: "#8c8378", fontFamily: MONO }}>balance {formatRWF(balance)}</div>
+            </div>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#ff6a1a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>✓</div>
           </div>
-          <PrimaryBtn onClick={handlePay} busy={busy}>
-            {method === "QR" ? `Show QR to pay ${formatRWF(total)}` : `Pay ${formatRWF(total)} & book seat`}
+          {short > 0 && (
+            <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 13px", fontSize: 12.5, fontWeight: 600, marginBottom: 12 }}>
+              You&apos;re {formatRWF(short)} short for this fare.{" "}
+              <button onClick={onTopUp} style={{ background: "none", border: "none", color: "#c2553f", fontWeight: 800, cursor: "pointer", textDecoration: "underline", padding: 0, fontFamily: "'Manrope', sans-serif", fontSize: 12.5 }}>
+                Top up with MoMo / Airtel
+              </button>
+            </div>
+          )}
+          <PrimaryBtn onClick={onPay} busy={busy} disabled={short > 0}>
+            {`Pay ${formatRWF(total)} & book seat`}
           </PrimaryBtn>
-          <div style={{ textAlign: "center", fontSize: 11.5, color: "#a39a8d", marginTop: 11 }}>⊘ Encrypted · seat held until departure</div>
+          <div style={{ textAlign: "center", fontSize: 11.5, color: "#a39a8d", marginTop: 11 }}>⊘ Deducted from your wallet · seat held until departure</div>
         </div>
       </div>
     </div>
@@ -2529,9 +2604,10 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 12, fontWeight: 700, color: "#8c8378", letterSpacing: ".05em", textTransform: "uppercase", margin: "0 0 9px" }}>{children}</div>;
 }
 
-function PrimaryBtn({ children, onClick, busy }: { children: React.ReactNode; onClick: () => void; busy?: boolean }) {
+function PrimaryBtn({ children, onClick, busy, disabled }: { children: React.ReactNode; onClick: () => void; busy?: boolean; disabled?: boolean }) {
+  const inactive = busy || disabled;
   return (
-    <button onClick={onClick} disabled={busy} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: 16, fontSize: 15, fontWeight: 700, cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1, boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>
+    <button onClick={onClick} disabled={inactive} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: 16, fontSize: 15, fontWeight: 700, cursor: inactive ? "default" : "pointer", opacity: inactive ? 0.7 : 1, boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>
       {busy ? "Please wait…" : children}
     </button>
   );

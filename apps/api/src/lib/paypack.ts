@@ -36,7 +36,10 @@ export function momoProviderLabel(number: string): string {
   return /^07[89]/.test(number) ? "MTN MoMo" : "Airtel Money";
 }
 
+// Wrap SDK/axios failures; our own HttpErrors (e.g. the 503 "not configured")
+// pass through untouched.
 function providerError(e: unknown): HttpError {
+  if (e instanceof HttpError) return e;
   const err = e as { response?: { data?: { message?: string } }; message?: string };
   const detail = err.response?.data?.message ?? err.message;
   return new HttpError(502, detail ? `Mobile money request failed: ${detail}` : "Mobile money request failed");
@@ -81,6 +84,19 @@ export async function fetchTransferOutcome(ref: string, kind: "CASHIN" | "CASHOU
     return "pending";
   } catch (e) {
     throw providerError(e);
+  }
+}
+
+// Merchant account balances (total + per provider) for the admin dashboard.
+// Null when Paypack isn't configured or the lookup fails — the dashboard
+// renders "not connected" rather than the overview request failing.
+export async function fetchMerchantBalances(): Promise<{ balance: number; mtn: number; airtel: number } | null> {
+  if (!paypackEnabled) return null;
+  try {
+    const res = await paypack().me();
+    return { balance: res.data.balance, mtn: res.data.mtn_balance, airtel: res.data.airtel_balance };
+  } catch {
+    return null;
   }
 }
 

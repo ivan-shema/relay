@@ -61,7 +61,23 @@ export default function DriverConsole() {
   const cashOut = async () => {
     try {
       const r = await api.driverCashout();
-      window.alert(`Payout of ${formatRWF(r.amount)} sent to MTN MoMo.\nRef: ${r.reference}`);
+      window.alert(`Payout of ${formatRWF(r.amount)} is on its way to your mobile money.\nRef: ${r.reference}`);
+      // The cashout settles at Paypack; the webhook notifies in real time.
+      // This slow poll is the backup — it only nags again if it failed.
+      void (async () => {
+        for (let i = 0; i < 18; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+          try {
+            const s = await api.driverCashoutStatus(r.reference);
+            if (s.status === "FAILED") {
+              window.alert(`Payout ${r.reference} failed — the amount is available to cash out again.`);
+              await reload();
+              return;
+            }
+            if (s.status === "COMPLETED") { await reload(); return; }
+          } catch { /* transient — keep polling */ }
+        }
+      })();
       await reload();
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Cash out failed");
@@ -209,13 +225,21 @@ export default function DriverConsole() {
   );
 }
 
-// On-demand moto hails: open requests (broadcast + targeted at this driver)
-// with an Accept that races other motos — the backend's atomic claim means a
-// second acceptance gets a 409, surfaced here as "already taken".
+// On-demand moto hails, driver side. Open requests can be accepted at the
+// passenger's price or countered with the driver's own quote (bargaining).
+// The accept races other motos — the backend's atomic claim 409s the losers.
+// After winning: wait for payment (escrow) → pick up within the deadline →
+// request completion → passenger's confirmation releases the payout.
+function fmtHm(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
 function MotoHailSection({ online }: { online: boolean }) {
   const [open, setOpen] = useState<DriverMotoRequest[]>([]);
   const [current, setCurrent] = useState<DriverMotoRequest | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [counterFor, setCounterFor] = useState<string | null>(null);
+  const [counterAmount, setCounterAmount] = useState("");
 
   const load = useCallback(() => {
     api.driverMotoRequests().then((r) => { setOpen(r.open); setCurrent(r.current); }).catch(() => undefined);
@@ -227,54 +251,93 @@ function MotoHailSection({ online }: { online: boolean }) {
     return () => clearInterval(t);
   }, [load]);
 
-  const accept = async (id: string) => {
+  const run = async (id: string, fn: () => Promise<unknown>) => {
     setBusyId(id);
     try {
-      await api.driverAcceptMotoRide(id);
+      await fn();
     } catch (e) {
-      window.alert(e instanceof ApiError ? e.message : "Could not accept this ride");
+      window.alert(e instanceof ApiError ? e.message : "That didn't go through — please try again");
     } finally {
       setBusyId(null);
       load();
     }
   };
 
-  const complete = async () => {
-    if (!current) return;
-    setBusyId(current.id);
-    try {
-      await api.driverCompleteMotoRide(current.id);
-    } catch (e) {
-      window.alert(e instanceof ApiError ? e.message : "Could not complete the ride");
-    } finally {
-      setBusyId(null);
-      load();
-    }
+  const sendCounter = (id: string) => {
+    const amount = Number(counterAmount);
+    if (!amount || amount <= 0) return;
+    run(id, async () => {
+      await api.driverOfferMotoRide(id, amount);
+      setCounterFor(null);
+      setCounterAmount("");
+    });
   };
+
+  const smallBtn = (bg: string, color = "#fff", border = "none"): React.CSSProperties => ({
+    background: bg, color, border, borderRadius: 10, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none",
+  });
 
   return (
     <div style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "18px 20px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <div style={{ fontSize: 15, fontWeight: 700 }}>Moto hails</div>
         <span style={{ fontSize: 11.5, fontWeight: 700, color: current ? "#ff6a1a" : "#8c8378" }}>
-          {current ? "On a ride" : `${open.length} open`}
+          {current ? "Active ride" : `${open.length} open`}
         </span>
       </div>
 
       {current ? (
-        <div style={{ border: "2px solid #1f9d6b", borderRadius: 15, padding: 15 }}>
+        <div style={{ border: `2px solid ${current.pickupOverdue ? "#c2553f" : "#1f9d6b"}`, borderRadius: 15, padding: 15 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
-            <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#1f9d6b" }} />
-            <span style={{ fontSize: 11.5, fontWeight: 800, textTransform: "uppercase", color: "#1f9d6b" }}>Current ride</span>
+            <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: current.pickupOverdue ? "#c2553f" : "#1f9d6b" }} />
+            <span style={{ fontSize: 11.5, fontWeight: 800, textTransform: "uppercase", color: current.pickupOverdue ? "#c2553f" : "#1f9d6b" }}>
+              {current.status === "ACCEPTED" && "Waiting for passenger payment"}
+              {current.status === "CONFIRMED" && (current.pickupOverdue ? "Pickup overdue!" : "Paid — go pick up")}
+              {current.status === "IN_PROGRESS" && "Ride in progress"}
+              {current.status === "AWAITING_CONFIRM" && "Waiting for passenger confirmation"}
+            </span>
           </div>
           <div style={{ fontSize: 14.5, fontWeight: 700 }}>{current.from} → {current.to}</div>
           <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>
             {current.passenger} · <span style={{ fontFamily: MONO }}>{current.passengerPhone}</span>
-            {current.offerFare !== null && <> · offer <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(current.offerFare)}</span></>}
+            {current.agreedFare !== null && <> · fare <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(current.agreedFare)}</span></>}
           </div>
-          <button onClick={complete} disabled={busyId === current.id} style={{ width: "100%", marginTop: 13, background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
-            {busyId === current.id ? "Saving…" : "Complete ride"}
-          </button>
+
+          {current.status === "ACCEPTED" && (
+            <>
+              <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 8 }}>
+                The ride confirms once the passenger pays — the money is held by Relay and paid to you (minus commission) after they confirm the trip is done.
+              </div>
+              <button onClick={() => run(current.id, () => api.driverWithdrawMotoRide(current.id))} disabled={busyId === current.id} style={{ ...smallBtn("#fff", "#c2553f", "1px solid #f0d4cc"), width: "100%", marginTop: 12 }}>
+                {busyId === current.id ? "…" : "Withdraw — can't take this ride"}
+              </button>
+            </>
+          )}
+
+          {current.status === "CONFIRMED" && (
+            <>
+              <div style={{ fontSize: 12, color: current.pickupOverdue ? "#c2553f" : "#8c8378", fontWeight: 700, marginTop: 8 }}>
+                {current.pickupOverdue
+                  ? "The pickup window has passed — the passenger can reassign this ride any moment. Pick up NOW if you're there."
+                  : `Pick up by ${current.pickupDeadline ? fmtHm(current.pickupDeadline) : "—"}${current.departAt ? ` (departure ${fmtHm(current.departAt)})` : ""}`}
+              </div>
+              <button onClick={() => run(current.id, () => api.driverPickupMotoRide(current.id))} disabled={busyId === current.id} style={{ ...smallBtn("#1f9d6b"), width: "100%", marginTop: 12 }}>
+                {busyId === current.id ? "…" : "Passenger picked up"}
+              </button>
+            </>
+          )}
+
+          {current.status === "IN_PROGRESS" && (
+            <button onClick={() => run(current.id, () => api.driverCompleteMotoRide(current.id))} disabled={busyId === current.id} style={{ ...smallBtn("#1b1714"), width: "100%", marginTop: 12 }}>
+              {busyId === current.id ? "…" : "Ride done — request completion"}
+            </button>
+          )}
+
+          {current.status === "AWAITING_CONFIRM" && (
+            <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 8 }}>
+              The passenger confirms on their side — your payout lands in your wallet right after.
+            </div>
+          )}
         </div>
       ) : !online ? (
         <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>Go online to receive hails from passengers nearby.</div>
@@ -283,20 +346,52 @@ function MotoHailSection({ online }: { online: boolean }) {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {open.map((r) => (
-            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 12, border: `1px solid ${r.targeted ? "#ffd9c2" : "#ece6db"}`, background: r.targeted ? "#fff6f0" : "#fff", borderRadius: 14, padding: "12px 14px" }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700 }}>
-                  {r.from} → {r.to}
-                  {r.targeted && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>Asked for you</span>}
+            <div key={r.id} style={{ border: `1px solid ${r.targeted ? "#ffd9c2" : "#ece6db"}`, background: r.targeted ? "#fff6f0" : "#fff", borderRadius: 14, padding: "12px 14px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700 }}>
+                    {r.from} → {r.to}
+                    {r.targeted && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>Asked for you</span>}
+                    {r.prepaid && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#1f9d6b", background: "#e7f6ee", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>Prepaid</span>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
+                    {r.passenger} · ~{r.distanceKm} km away
+                    {r.departAt && <> · departs {fmtHm(r.departAt)}</>}
+                    {r.prepaid && r.agreedFare !== null
+                      ? <> · pays <span style={{ fontFamily: MONO, color: "#1f9d6b", fontWeight: 700 }}>{formatRWF(r.agreedFare)}</span></>
+                      : r.offerFare !== null
+                        ? <> · offers <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(r.offerFare)}</span></>
+                        : <> · <span style={{ color: "#ff6a1a", fontWeight: 700 }}>no price — quote yours</span></>}
+                    {r.myOffer !== null && <> · you offered <span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(r.myOffer)}</span></>}
+                  </div>
                 </div>
-                <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
-                  {r.passenger} · ~{r.distanceKm} km away
-                  {r.offerFare !== null && <> · offers <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(r.offerFare)}</span></>}
+                <div style={{ display: "flex", gap: 7, flex: "none" }}>
+                  {(r.prepaid || r.offerFare !== null) && (
+                    <button onClick={() => run(r.id, () => api.driverAcceptMotoRide(r.id))} disabled={busyId === r.id} style={smallBtn("#ff6a1a")}>
+                      {busyId === r.id ? "…" : `Accept ${formatRWF(r.prepaid ? (r.agreedFare ?? 0) : (r.offerFare ?? 0))}`}
+                    </button>
+                  )}
+                  {!r.prepaid && (
+                    <button onClick={() => { setCounterFor(counterFor === r.id ? null : r.id); setCounterAmount(""); }} style={smallBtn("#fff", "#1b1714", "1px solid #e3ddd1")}>
+                      {r.myOffer !== null ? "Re-quote" : r.offerFare !== null ? "Counter" : "Quote price"}
+                    </button>
+                  )}
                 </div>
               </div>
-              <button onClick={() => accept(r.id)} disabled={busyId === r.id} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 10, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>
-                {busyId === r.id ? "…" : "Accept"}
-              </button>
+              {counterFor === r.id && (
+                <div style={{ display: "flex", gap: 8, marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1ece2" }}>
+                  <input
+                    value={counterAmount}
+                    onChange={(e) => setCounterAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                    placeholder="Your price (RWF)"
+                    inputMode="numeric"
+                    style={{ flex: 1, border: "1px solid #e3ddd1", borderRadius: 10, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, fontFamily: MONO, outline: "none" }}
+                  />
+                  <button onClick={() => sendCounter(r.id)} disabled={busyId === r.id || !counterAmount} style={smallBtn("#1b1714")}>
+                    {busyId === r.id ? "…" : "Send offer"}
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>

@@ -9,7 +9,6 @@ import { hashPassword, verifyPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
 import { paypackEnabled, normalizeMomoNumber, requestCashin, fetchTransferOutcome } from "../lib/paypack";
 import { settleWalletTopup } from "../lib/settlement";
-import { notify } from "../lib/notify";
 import { verifyAccessToken } from "../lib/auth";
 import { subscribe } from "../lib/realtime";
 
@@ -271,27 +270,15 @@ meRouter.post(
   })
 );
 
-// Deposit. With Paypack configured this fires a MoMo/Airtel cashin: the rider
-// gets a USSD prompt to approve, and the wallet is only credited once the
-// transfer settles (webhook or the status poll below). Without credentials it
-// stays the instant mock top-up.
+// Deposit — real money only: fires a Paypack MoMo/Airtel cashin, the rider
+// approves the USSD prompt, and the wallet is credited once the transfer
+// settles (webhook or the status poll below). Requires Paypack credentials —
+// there is no mock fallback since money became real.
 meRouter.post(
   "/wallet/topup",
   asyncHandler(async (req, res) => {
     const { amount, phone } = topUpSchema.parse(req.body);
     const userId = req.auth!.sub;
-
-    if (!paypackEnabled) {
-      const result = await prisma.$transaction(async (tx) => {
-        const user = await tx.user.findUnique({ where: { id: userId } });
-        const balance = new Prisma.Decimal(user!.walletBalance).plus(amount);
-        await tx.user.update({ where: { id: userId }, data: { walletBalance: balance } });
-        await tx.walletTransaction.create({ data: { userId, kind: "CREDIT", amount, label: "Wallet top-up" } });
-        return balance;
-      });
-      await notify(userId, "Wallet topped up", `You added RWF ${Math.round(amount).toLocaleString("en-US")} to your Relay wallet.`);
-      return res.json({ status: "COMPLETED", balance: dec(result) });
-    }
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new HttpError(404, "User not found");
