@@ -82,6 +82,15 @@ enum WalletTxnKind {
   DEBIT
 }
 
+// Lifecycle of a mobile-money transfer (Paypack cashin/cashout). Mock-mode
+// transfers settle instantly (COMPLETED); real ones start PENDING until the
+// customer confirms on their phone / the provider processes the payout.
+enum MomoTransferStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
 enum DocumentKind {
   NATIONAL_ID
   PASSPORT
@@ -335,14 +344,18 @@ model Complaint {
 }
 
 // Unified wallet ledger — ride charges (DEBIT) and top-ups (CREDIT).
+// A Paypack top-up is written PENDING with the provider ref and only counts
+// toward the balance once the transfer settles.
 model WalletTransaction {
-  id        String        @id @default(cuid())
+  id        String             @id @default(cuid())
   userId    String
-  user      User          @relation(fields: [userId], references: [id])
+  user      User               @relation(fields: [userId], references: [id])
   kind      WalletTxnKind
-  amount    Decimal       @db.Decimal(10, 2)
+  amount    Decimal            @db.Decimal(10, 2)
   label     String
-  createdAt DateTime      @default(now())
+  status    MomoTransferStatus @default(COMPLETED)
+  momoRef   String?            @unique // Paypack transaction ref
+  createdAt DateTime           @default(now())
 }
 
 model SavedPlace {
@@ -373,11 +386,13 @@ model Document {
 
 // Cash-outs / settlements for drivers and operators.
 model Payout {
-  id         String   @id @default(cuid())
-  reference  String   @unique
+  id         String             @id @default(cuid())
+  reference  String             @unique
   driverId   String?
   operatorId String?
-  amount     Decimal  @db.Decimal(10, 2)
-  method     String   @default("MTN MoMo")
-  createdAt  DateTime @default(now())
+  amount     Decimal            @db.Decimal(10, 2)
+  method     String             @default("MTN MoMo")
+  status     MomoTransferStatus @default(COMPLETED)
+  momoRef    String?            @unique // Paypack transaction ref
+  createdAt  DateTime           @default(now())
 }

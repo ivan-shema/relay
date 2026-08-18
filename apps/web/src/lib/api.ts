@@ -266,7 +266,8 @@ export const api = {
   markNotificationRead: (id: string) => request<unknown>(`/me/notifications/${id}/read`, { method: "POST", auth: true }),
   markAllNotificationsRead: () => request<unknown>("/me/notifications/read-all", { method: "POST", auth: true }),
   wallet: () => request<WalletData>("/me/wallet", { auth: true }),
-  walletTopup: (amount: number) => request<{ balance: number }>("/me/wallet/topup", { method: "POST", body: { amount }, auth: true }),
+  walletTopup: (amount: number, phone?: string) => request<TopupResult>("/me/wallet/topup", { method: "POST", body: { amount, phone }, auth: true }),
+  walletTopupStatus: (ref: string) => request<{ status: TransferStatus; balance: number }>(`/me/wallet/topup/${ref}/status`, { auth: true }),
   setAutoTopup: (enabled: boolean) => request<{ autoTopupEnabled: boolean }>("/me/wallet/auto-topup", { method: "POST", body: { enabled }, auth: true }),
   insights: () => request<Insights>("/me/insights", { auth: true }),
   savedPlaces: () => request<SavedPlace[]>("/me/places", { auth: true }),
@@ -282,7 +283,8 @@ export const api = {
   operatorAddDeparture: (body: { routeId: string; fare: number; departInMinutes?: number; durationMinutes?: number; capacity?: number; mode?: string; vehicleId?: string; driverId?: string }) => request<{ id: string }>("/operator/departures", { method: "POST", body, auth: true }),
   // multipart: KYC fields + ID document + driving licence document
   operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string }>("/operator/drivers/invite", formData, true),
-  operatorWithdraw: () => request<{ amount: number; reference: string }>("/operator/payout", { method: "POST", auth: true }),
+  operatorWithdraw: () => request<{ amount: number; reference: string; status: TransferStatus }>("/operator/payout", { method: "POST", auth: true }),
+  operatorPayoutStatus: (reference: string) => request<{ status: TransferStatus; amount: number; reference: string }>(`/operator/payout/${reference}/status`, { auth: true }),
 
   // ---- admin writes ----
   adminAddUser: (body: { firstName: string; lastName: string; phone: string; email: string; role: string; companyName?: string; modes?: string[] }) =>
@@ -373,12 +375,23 @@ export interface NotificationItem {
 export interface NotificationList extends Paginated<NotificationItem> {
   unread: number;
 }
+export type TransferStatus = "PENDING" | "COMPLETED" | "FAILED";
+
 export interface WalletTxn {
   id: string;
   label: string;
   kind: "CREDIT" | "DEBIT";
   amount: number;
+  status: TransferStatus;
   date: string;
+}
+
+// Top-up via Paypack: PENDING + ref until the rider approves the USSD prompt;
+// mock mode settles instantly with the new balance.
+export interface TopupResult {
+  status: TransferStatus;
+  balance?: number;
+  ref?: string;
 }
 export interface WalletData {
   balance: number;

@@ -54,6 +54,11 @@ bookingsRouter.post(
     const booking = await prisma.$transaction(async (tx) => {
       const trip = await tx.trip.findUnique({ where: { id: tripId } });
       if (!trip) throw new HttpError(404, "Trip not found");
+      // Moto-taxis carry one passenger — a moto-only trip can never be booked
+      // for more than one seat, whatever its stored capacity says.
+      const legs = (trip.legs as { mode?: string }[] | null) ?? [];
+      const motoOnly = legs.length > 0 && legs.every((l) => l.mode === "MOTO");
+      if (motoOnly && seats > 1) throw new HttpError(409, "A moto-taxi carries one passenger — book one seat per moto");
       if (trip.seatsLeft < seats) throw new HttpError(409, "Not enough seats left");
 
       await tx.trip.update({

@@ -17,6 +17,8 @@ import { hashPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
 import { upload, requireFile } from "../lib/uploads";
+import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
+import { settlePayout } from "../lib/settlement";
 
 export const operatorRouter = Router();
 
@@ -417,20 +419,66 @@ operatorRouter.post(
   })
 );
 
-// POST /operator/payout — withdraw today's net earnings
+// Today's withdrawable balance: net of Relay's fee, minus what was already
+// paid out (or is in flight) today. Failed payouts return to the pool.
+async function withdrawableToday(opId: string): Promise<number> {
+  const today = startOfToday();
+  const [paid, payouts] = await Promise.all([
+    prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } }),
+    prisma.payout.findMany({ where: { operatorId: opId, createdAt: { gte: today }, status: { not: "FAILED" } } }),
+  ]);
+  const gross = paid.reduce((s, p) => s + dec(p.amount), 0);
+  const alreadyOut = payouts.reduce((s, p) => s + dec(p.amount), 0);
+  return gross * 0.88 - alreadyOut;
+}
+
+// POST /operator/payout — withdraw today's net earnings. With Paypack
+// configured this is a real MoMo/Airtel cashout to the owner's phone and stays
+// PENDING until the provider confirms; otherwise it settles instantly (mock).
 operatorRouter.post(
   "/payout",
   asyncHandler(async (req, res) => {
     const opId = await resolveVerifiedOperatorId(req.auth!.sub);
-    const today = startOfToday();
-    const paid = await prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } });
-    const gross = paid.reduce((s, p) => s + dec(p.amount), 0);
-    const net = gross * 0.88;
-    if (net <= 0) throw new HttpError(409, "Nothing to withdraw yet");
+    const net = await withdrawableToday(opId);
+    if (net < 100) throw new HttpError(409, "Nothing to withdraw yet"); // Paypack minimum transfer is RWF 100
+    const reference = "PO-" + Math.random().toString(36).slice(2, 9).toUpperCase();
+
+    if (!paypackEnabled) {
+      const payout = await prisma.payout.create({
+        data: { reference, operatorId: opId, amount: net, method: "MTN MoMo" },
+      });
+      return res.status(201).json({ amount: Number(net.toFixed(2)), reference: payout.reference, status: "COMPLETED" });
+    }
+
+    const owner = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
+    const number = normalizeMomoNumber(owner!.phone);
+    const amount = Math.floor(net); // whole RWF; the remainder stays withdrawable
+    const transfer = await requestCashout(amount, number);
     const payout = await prisma.payout.create({
-      data: { reference: "PO-" + Math.random().toString(36).slice(2, 9).toUpperCase(), operatorId: opId, amount: net, method: "MTN MoMo" },
+      data: { reference, operatorId: opId, amount, method: momoProviderLabel(number), status: "PENDING", momoRef: transfer.ref },
     });
-    res.status(201).json({ amount: Number(net.toFixed(2)), reference: payout.reference });
+    res.status(201).json({ amount, reference: payout.reference, status: "PENDING" });
+  })
+);
+
+// GET /operator/payout/:reference/status — poll a withdrawal while Paypack
+// processes it (works without a publicly reachable webhook in local dev).
+operatorRouter.get(
+  "/payout/:reference/status",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const payout = await prisma.payout.findUnique({ where: { reference: req.params.reference } });
+    if (!payout || payout.operatorId !== opId) throw new HttpError(404, "Payout not found");
+
+    let status = payout.status;
+    if (status === "PENDING" && payout.momoRef && paypackEnabled) {
+      const outcome = await fetchTransferOutcome(payout.momoRef, "CASHOUT");
+      if (outcome !== "pending") {
+        await settlePayout(payout.momoRef, outcome);
+        status = outcome === "successful" ? "COMPLETED" : "FAILED";
+      }
+    }
+    res.json({ status, amount: dec(payout.amount), reference: payout.reference });
   })
 );
 
@@ -709,6 +757,8 @@ operatorRouter.get(
     const paidToday = await prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } });
     const gross = paidToday.reduce((s, pay) => s + dec(pay.amount), 0);
     const fee = gross * 0.12;
+    // What's actually left to withdraw (net of fee AND of today's payouts)
+    const withdrawable = Math.max(0, await withdrawableToday(opId));
     res.json({
       transactions: paged(
         payments.map((pay) => ({
@@ -724,8 +774,8 @@ operatorRouter.get(
       payout: {
         grossToday: Number(gross.toFixed(2)),
         fee: Number(fee.toFixed(2)),
-        net: Number((gross - fee).toFixed(2)),
-        nextPayout: Number((gross - fee).toFixed(2)),
+        net: Number(withdrawable.toFixed(2)),
+        nextPayout: Number(withdrawable.toFixed(2)),
       },
     });
   })

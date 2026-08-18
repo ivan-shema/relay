@@ -19,4 +19,10 @@ export const env = {
   mockPayments: (process.env.MOCK_PAYMENTS ?? "true") === "true",
   mockOtp: (process.env.MOCK_OTP ?? "true") === "true",
   mockOtpCode: process.env.MOCK_OTP_CODE ?? "000000",
+  // Paypack (MTN MoMo + Airtel Money). When the client id/secret are unset the
+  // wallet top-up and payout flows fall back to the instant mock provider.
+  paypackClientId: process.env.PAYPACK_CLIENT_ID ?? "",
+  paypackClientSecret: process.env.PAYPACK_CLIENT_SECRET ?? "",
+  paypackWebhookSecret: process.env.PAYPACK_WEBHOOK_SECRET ?? "",
+  paypackMode: process.env.PAYPACK_MODE === "production" ? "production" : "development",
 };

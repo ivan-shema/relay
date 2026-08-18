@@ -74,13 +74,23 @@ export const newPasswordSchema = z
   });
 
 /* ---------------- Operator / Admin creates ---------------- */
-export const createVehicleSchema = z.object({
-  plateNumber: z.string().min(3, "Enter a plate number"),
-  type: modeEnum,
-  capacity: z.coerce.number({ invalid_type_error: "Enter a number" }).int("Whole number").min(1, "At least 1"),
-  model: z.string().optional().default("—"),
-  label: z.string().optional(),
-});
+// Moto-taxis in Rwanda carry exactly one passenger — capacity above 1 is
+// physically impossible, so both the vehicle and its departures reject it.
+const MOTO_CAPACITY_MSG = "A moto-taxi carries one passenger — capacity must be 1";
+
+export const createVehicleSchema = z
+  .object({
+    plateNumber: z.string().min(3, "Enter a plate number"),
+    type: modeEnum,
+    capacity: z.coerce.number({ invalid_type_error: "Enter a number" }).int("Whole number").min(1, "At least 1"),
+    model: z.string().optional().default("—"),
+    label: z.string().optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.type === "MOTO" && d.capacity !== 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["capacity"], message: MOTO_CAPACITY_MSG });
+    }
+  });
 
 // Drivers are onboarded exclusively by operators, with KYC: ID number +
 // driving licence number, plus their document uploads (validated server-side).
@@ -133,16 +143,22 @@ export const createRouteSchema = z
     message: "Pick a different destination",
   });
 
-export const createDepartureSchema = z.object({
-  routeId: z.string().min(1, "Pick a route"),
-  mode: modeEnum.default("BUS"),
-  fare: z.coerce.number({ invalid_type_error: "Enter a fare" }).positive("Fare must be greater than 0"),
-  departInMinutes: z.coerce.number().int().min(1).default(30),
-  durationMinutes: z.coerce.number().int().min(1).default(30),
-  capacity: z.coerce.number().int().min(1).default(33),
-  vehicleId: z.string().optional(),
-  driverId: z.string().optional(),
-});
+export const createDepartureSchema = z
+  .object({
+    routeId: z.string().min(1, "Pick a route"),
+    mode: modeEnum.default("BUS"),
+    fare: z.coerce.number({ invalid_type_error: "Enter a fare" }).positive("Fare must be greater than 0"),
+    departInMinutes: z.coerce.number().int().min(1).default(30),
+    durationMinutes: z.coerce.number().int().min(1).default(30),
+    capacity: z.coerce.number().int().min(1).default(33),
+    vehicleId: z.string().optional(),
+    driverId: z.string().optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.mode === "MOTO" && d.capacity !== 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["capacity"], message: MOTO_CAPACITY_MSG });
+    }
+  });
 
 export const assignVehicleSchema = z.object({
   vehicleId: z.string().nullable().optional(),
@@ -172,8 +188,18 @@ export const changePasswordSchema = z
   });
 
 /* ---------------- Passenger ---------------- */
+// MTN MoMo (078/079) or Airtel Money (072/073), with optional +250/250 prefix.
+export const momoNumberRegex = /^(\+?250|0)?7[2389]\d{7}$/;
+
 export const topUpSchema = z.object({
-  amount: z.coerce.number({ invalid_type_error: "Enter an amount" }).positive("Enter an amount").max(1_000_000, "That's too much"),
+  amount: z.coerce
+    .number({ invalid_type_error: "Enter an amount" })
+    .min(100, "Minimum top-up is RWF 100")
+    .max(1_000_000, "That's too much"),
+  // The number the MoMo/Airtel charge is sent to; empty = the account's phone.
+  phone: z
+    .union([z.string().trim().regex(momoNumberRegex, "Enter a valid MTN MoMo or Airtel Money number"), z.literal("")])
+    .optional(),
 });
 
 export const savedPlaceSchema = z.object({

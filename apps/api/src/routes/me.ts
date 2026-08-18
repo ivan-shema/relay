@@ -7,6 +7,8 @@ import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
 import { hashPassword, verifyPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
+import { paypackEnabled, normalizeMomoNumber, requestCashin, fetchTransferOutcome } from "../lib/paypack";
+import { settleWalletTopup } from "../lib/settlement";
 
 export const meRouter = Router();
 
@@ -222,6 +224,7 @@ meRouter.get(
         label: t.label,
         kind: t.kind,
         amount: dec(t.amount),
+        status: t.status,
         date: t.createdAt.toISOString(),
       })),
     });
@@ -237,20 +240,61 @@ meRouter.post(
   })
 );
 
+// Deposit. With Paypack configured this fires a MoMo/Airtel cashin: the rider
+// gets a USSD prompt to approve, and the wallet is only credited once the
+// transfer settles (webhook or the status poll below). Without credentials it
+// stays the instant mock top-up.
 meRouter.post(
   "/wallet/topup",
   asyncHandler(async (req, res) => {
-    const { amount } = topUpSchema.parse(req.body);
+    const { amount, phone } = topUpSchema.parse(req.body);
     const userId = req.auth!.sub;
-    const result = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.findUnique({ where: { id: userId } });
-      const balance = new Prisma.Decimal(user!.walletBalance).plus(amount);
-      await tx.user.update({ where: { id: userId }, data: { walletBalance: balance } });
-      await tx.walletTransaction.create({ data: { userId, kind: "CREDIT", amount, label: "Wallet top-up" } });
-      await tx.notification.create({ data: { userId, title: "Wallet topped up", message: `You added RWF ${Math.round(amount).toLocaleString("en-US")} to your Relay wallet.` } });
-      return balance;
+
+    if (!paypackEnabled) {
+      const result = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.findUnique({ where: { id: userId } });
+        const balance = new Prisma.Decimal(user!.walletBalance).plus(amount);
+        await tx.user.update({ where: { id: userId }, data: { walletBalance: balance } });
+        await tx.walletTransaction.create({ data: { userId, kind: "CREDIT", amount, label: "Wallet top-up" } });
+        await tx.notification.create({ data: { userId, title: "Wallet topped up", message: `You added RWF ${Math.round(amount).toLocaleString("en-US")} to your Relay wallet.` } });
+        return balance;
+      });
+      return res.json({ status: "COMPLETED", balance: dec(result) });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new HttpError(404, "User not found");
+    const number = normalizeMomoNumber(phone && phone.length > 0 ? phone : user.phone);
+    const transfer = await requestCashin(amount, number);
+    await prisma.walletTransaction.create({
+      data: { userId, kind: "CREDIT", amount, label: "Wallet top-up", status: "PENDING", momoRef: transfer.ref },
     });
-    res.json({ balance: dec(result) });
+    res.status(202).json({ status: "PENDING", ref: transfer.ref });
+  })
+);
+
+// GET /me/wallet/topup/:ref/status — client polls while the rider approves the
+// USSD prompt. Checks Paypack directly so the flow also works without a
+// publicly reachable webhook (local dev).
+meRouter.get(
+  "/wallet/topup/:ref/status",
+  asyncHandler(async (req, res) => {
+    const userId = req.auth!.sub;
+    const ref = req.params.ref;
+    const txn = await prisma.walletTransaction.findUnique({ where: { momoRef: ref } });
+    if (!txn || txn.userId !== userId) throw new HttpError(404, "Top-up not found");
+
+    let status = txn.status;
+    if (status === "PENDING" && paypackEnabled) {
+      const outcome = await fetchTransferOutcome(ref, "CASHIN");
+      if (outcome !== "pending") {
+        await settleWalletTopup(ref, outcome);
+        status = outcome === "successful" ? "COMPLETED" : "FAILED";
+      }
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    res.json({ status, balance: dec(user!.walletBalance) });
   })
 );
 

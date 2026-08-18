@@ -16,11 +16,15 @@ import { adminRouter } from "./routes/admin";
 import { meRouter } from "./routes/me";
 import { documentsRouter } from "./routes/documents";
 import { ticketsRouter } from "./routes/tickets";
+import { webhooksRouter } from "./routes/webhooks";
 
 export function createApp() {
   const app = express();
 
   app.use(cors({ origin: env.webOrigin, credentials: true }));
+  // Provider webhooks verify an HMAC over the raw body, so they mount before
+  // the JSON parser (the router applies its own raw() parser).
+  app.use("/webhooks", webhooksRouter);
   app.use(express.json());
 
   app.get("/health", (_req, res) => res.json({ ok: true, service: "relay-api" }));
