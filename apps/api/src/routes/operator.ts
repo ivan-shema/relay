@@ -19,6 +19,7 @@ import { fullNameOf } from "../lib/mappers";
 import { upload, requireFile } from "../lib/uploads";
 import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
+import { notify } from "../lib/notify";
 
 export const operatorRouter = Router();
 
@@ -367,13 +368,7 @@ operatorRouter.post(
     for (const w of watches) {
       await prisma.plannedTrip.update({ where: { id: w.id }, data: { matchedTripId: trip.id } });
       if (w.notify) {
-        await prisma.notification.create({
-          data: {
-            userId: w.passengerId,
-            title: "Trip match found",
-            message: `${route.name} departs at ${timeLabel} — a trip you planned ahead for is now bookable.`,
-          },
-        });
+        await notify(w.passengerId, "Trip match found", `${route.name} departs at ${timeLabel} — a trip you planned ahead for is now bookable.`);
       }
     }
 
@@ -780,3 +775,4 @@ operatorRouter.get(
     });
   })
 );
+                                                                                                                                  

@@ -6,6 +6,7 @@ import { prisma } from "../prisma";
 import { env } from "../env";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
+import { notify } from "../lib/notify";
 
 export const paymentsRouter = Router();
 
@@ -106,14 +107,6 @@ paymentsRouter.post(
         });
       }
 
-      await tx.notification.create({
-        data: {
-          userId: req.auth!.sub,
-          title: "Booking confirmed",
-          message: `Payment of ${formatRWF(Number(booking.fare))} received. Your seat is reserved.`,
-        },
-      });
-
       // record on the wallet ledger (ride charge) when the payment settles
       if (status === "PAID") {
         await tx.walletTransaction.create({
@@ -123,6 +116,9 @@ paymentsRouter.post(
 
       return payment;
     });
+
+    // after commit: in-app row + SSE push + email
+    await notify(req.auth!.sub, "Booking confirmed", `Payment of ${formatRWF(Number(result.amount))} received. Your seat is reserved.`);
 
     res.status(201).json(toDetail(result));
   })

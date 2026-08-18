@@ -197,8 +197,15 @@ export const topUpSchema = z.object({
     .min(100, "Minimum top-up is RWF 100")
     .max(1_000_000, "That's too much"),
   // The number the MoMo/Airtel charge is sent to; empty = the account's phone.
+  // Spaces/dashes are tolerated ("+250 788 123 456") and stripped before check.
   phone: z
-    .union([z.string().trim().regex(momoNumberRegex, "Enter a valid MTN MoMo or Airtel Money number"), z.literal("")])
+    .union([
+      z
+        .string()
+        .transform((v) => v.replace(/[\s-]/g, ""))
+        .pipe(z.string().regex(momoNumberRegex, "Enter a valid MTN MoMo or Airtel Money number")),
+      z.literal(""),
+    ])
     .optional(),
 });
 

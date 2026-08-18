@@ -25,4 +25,12 @@ export const env = {
   paypackClientSecret: process.env.PAYPACK_CLIENT_SECRET ?? "",
   paypackWebhookSecret: process.env.PAYPACK_WEBHOOK_SECRET ?? "",
   paypackMode: process.env.PAYPACK_MODE === "production" ? "production" : "development",
+  // SMTP for notification emails. When the host is unset, emails are logged to
+  // the API console instead (mock mode, same philosophy as MOCK_OTP).
+  smtpHost: process.env.SMTP_HOST ?? "",
+  smtpPort: Number(process.env.SMTP_PORT ?? 587),
+  smtpSecure: (process.env.SMTP_SECURE ?? "false") === "true",
+  smtpUser: process.env.SMTP_USER ?? "",
+  smtpPass: process.env.SMTP_PASS ?? "",
+  mailFrom: process.env.MAIL_FROM ?? "Relay <no-reply@relay.app>",
 };

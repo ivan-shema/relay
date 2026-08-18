@@ -14,7 +14,7 @@ import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch } from "@/lib/api";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
@@ -22,7 +22,7 @@ import { NotificationBell } from "@/components/notification-bell";
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
-type PlanScreen = "home" | "search" | "available" | "planAhead" | "pay" | "track" | "done";
+type PlanScreen = "home" | "search" | "available" | "planAhead" | "pay" | "track" | "done" | "moto";
 type Tab = "plan" | "trips" | "orders" | "wallet" | "you";
 
 // Operator application status for the current passenger: undefined = still
@@ -249,6 +249,7 @@ export default function PassengerApp() {
               onSearch={() => setScreen("search")}
               onSeeTrips={goAvailable}
               onPlanAhead={() => setScreen("planAhead")}
+              onHailMoto={() => setScreen("moto")}
               onBook={startBooking}
               activeBooking={activeBooking}
               onTrackActive={trackExistingBooking}
@@ -269,6 +270,11 @@ export default function PassengerApp() {
         {tab === "plan" && screen === "planAhead" && (
           <div className="rel-narrow">
             <PlanAheadScreen origin={origin} dest={dest} requireAuth={requireAuth} onBack={() => setScreen("home")} onDone={() => setScreen("home")} />
+          </div>
+        )}
+        {tab === "plan" && screen === "moto" && (
+          <div className="rel-narrow">
+            <MotoHailScreen origin={origin} dest={dest} onBack={() => setScreen("home")} />
           </div>
         )}
         {tab === "plan" && screen === "pay" && selected && booking && (
@@ -322,6 +328,7 @@ function HomeScreen({
   onSearch,
   onSeeTrips,
   onPlanAhead,
+  onHailMoto,
   onBook,
   activeBooking,
   onTrackActive,
@@ -338,6 +345,7 @@ function HomeScreen({
   onSearch: () => void;
   onSeeTrips: () => void;
   onPlanAhead: () => void;
+  onHailMoto: () => void;
   onBook: (t: TripSummary) => void;
   activeBooking: BookingDetail | null;
   onTrackActive: (b: BookingDetail) => void;
@@ -436,14 +444,21 @@ function HomeScreen({
             </>
           )}
 
-          {/* mode chips */}
+          {/* mode chips — motos aren't scheduled: tapping the moto card opens
+              on-demand hailing, the other modes lead to scheduled trips */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 11, marginTop: 14 }}>
             {MODE_CARDS.map((m) => (
-              <div key={m.code} style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: 14 }}>
+              <button
+                key={m.code}
+                onClick={() => (m.code === "M" ? onHailMoto() : onSeeTrips())}
+                style={{ textAlign: "left", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: 14, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
+              >
                 <div style={{ width: 34, height: 34, borderRadius: 10, background: m.bg, color: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, fontFamily: MONO, marginBottom: 10 }}>{m.code}</div>
                 <div style={{ fontSize: 13, fontWeight: 700 }}>{m.label}</div>
-                <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>from <span style={{ fontFamily: MONO, color: "#ff6a1a" }}>{m.from}</span></div>
-              </div>
+                <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
+                  {m.code === "M" ? <span style={{ color: "#ff6a1a", fontWeight: 700 }}>Hail now →</span> : <>from <span style={{ fontFamily: MONO, color: "#ff6a1a" }}>{m.from}</span></>}
+                </div>
+              </button>
             ))}
           </div>
 
@@ -847,6 +862,161 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
       </div>
       {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{error}</div>}
       <PrimaryBtn onClick={save} busy={busy}>Start watching for trips</PrimaryBtn>
+    </div>
+  );
+}
+
+/* ============ MOTO HAIL ============ */
+// On-demand moto hailing — no schedules. The passenger sees nearby online
+// motos and requests one directly (or broadcasts to all); the first driver to
+// accept wins the ride, and this screen polls until that happens.
+function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string; onBack: () => void }) {
+  const [ride, setRide] = useState<RideView | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [nearby, setNearby] = useState<NearbyMoto[]>([]);
+  const [from, setFrom] = useState(origin);
+  const [to, setTo] = useState(dest);
+  const [offer, setOffer] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const active = ride && (ride.status === "OPEN" || ride.status === "ACCEPTED") ? ride : null;
+
+  useEffect(() => {
+    let on = true;
+    const poll = () => api.myRide().then((r) => { if (on) { setRide(r); setLoaded(true); } }).catch(() => undefined);
+    poll();
+    const t = setInterval(poll, 4000);
+    return () => { on = false; clearInterval(t); };
+  }, []);
+
+  useEffect(() => {
+    if (active) return;
+    let on = true;
+    api.nearbyMotos().then((m) => on && setNearby(m)).catch(() => undefined);
+    return () => { on = false; };
+  }, [active]);
+
+  const submit = async (targetDriverId?: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const offerFare = offer.trim() ? Number(offer) : undefined;
+      const r = await api.requestRide({ originLabel: from, destLabel: to, offerFare, targetDriverId });
+      setRide(r);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not send your request");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = async () => {
+    if (!active) return;
+    setBusy(true);
+    try {
+      await api.cancelRide(active.id);
+      setRide({ ...active, status: "CANCELLED" });
+    } catch {
+      /* next poll corrects the state */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ padding: "8px 22px 28px" }} className="rel-up">
+      <ScreenHeader onBack={onBack} title="Hail a moto" sub="On-demand — the moto goes where you go" />
+
+      {!loaded ? (
+        <div style={{ padding: 30, textAlign: "center", color: "#a39a8d", fontWeight: 600 }}>Loading…</div>
+      ) : active ? (
+        /* -------- waiting / accepted -------- */
+        <div style={{ background: "#fff", border: `2px solid ${active.status === "ACCEPTED" ? "#1f9d6b" : "#ff6a1a"}`, borderRadius: 20, padding: 20, boxShadow: "0 14px 40px -20px rgba(27,23,20,.35)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <span className="rel-pulse" style={{ width: 9, height: 9, borderRadius: "50%", background: active.status === "ACCEPTED" ? "#1f9d6b" : "#ff6a1a" }} />
+            <span style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", color: active.status === "ACCEPTED" ? "#1f9d6b" : "#ff6a1a" }}>
+              {active.status === "ACCEPTED" ? "Moto on the way" : active.targeted ? "Waiting for your moto to accept" : "Finding you a moto…"}
+            </span>
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>{active.from} → {active.to}</div>
+          {active.offerFare !== null && (
+            <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>Your offer: <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(active.offerFare)}</span></div>
+          )}
+
+          {active.status === "ACCEPTED" && active.driver ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 16, paddingTop: 16, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ width: 48, height: 48, borderRadius: 14, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{active.driver.name} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
+                <div style={{ fontSize: 12.5, color: "#8c8378" }}>{active.driver.model} · <span style={{ fontFamily: MONO }}>{active.driver.plate}</span> · ~{active.driver.distanceKm} km away</div>
+                <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginTop: 2, fontFamily: MONO }}>{active.driver.phone}</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #f1ece2", fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>
+              {active.targeted && active.driver
+                ? `Requested ${active.driver.name} (${active.driver.plate}) directly — if they don't take it, cancel and broadcast to all motos.`
+                : "Every online moto nearby can see your request. First to accept gets the ride."}
+            </div>
+          )}
+
+          <button onClick={cancel} disabled={busy} style={{ width: "100%", marginTop: 16, background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 13, padding: 13, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+              {busy ? "Cancelling…" : "Cancel request"}
+          </button>
+        </div>
+      ) : (
+        /* -------- request form + nearby motos -------- */
+        <>
+          {ride?.status === "COMPLETED" && (
+            <div style={{ background: "#e7f6ee", border: "1px solid #bfe6d2", color: "#1f9d6b", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 700, marginBottom: 14 }}>
+              Ride completed — thanks for riding with Relay!
+            </div>
+          )}
+          <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 8, marginBottom: 12 }}>
+            <FromToRow dotBorder value={from} onChange={setFrom} label="PICK-UP" />
+            <div style={{ height: 1, background: "#e9e3d8", margin: "0 14px" }} />
+            <FromToRow value={to} onChange={setTo} label="DESTINATION" highlight />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <input
+              value={offer}
+              onChange={(e) => setOffer(e.target.value.replace(/[^0-9]/g, ""))}
+              placeholder="Offer fare (optional)"
+              inputMode="numeric"
+              style={{ flex: 1, border: "1px solid #e9e3d8", borderRadius: 12, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, outline: "none", fontFamily: "'Manrope', sans-serif", background: "#fff" }}
+            />
+            <span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>RWF</span>
+          </div>
+          {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{error}</div>}
+          <PrimaryBtn onClick={() => submit()} busy={busy}>Request any nearby moto</PrimaryBtn>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "22px 0 10px" }}>
+            <SectionLabel>Nearby motos</SectionLabel>
+            <span style={{ fontSize: 11.5, color: "#1f9d6b", fontWeight: 700 }}>{nearby.length} online</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {nearby.length === 0 && (
+              <div style={{ background: "#fff", border: "1px dashed #d8d1c4", borderRadius: 16, padding: 16, fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>
+                No motos online right now — broadcast a request and the next one to come online will see it.
+              </div>
+            )}
+            {nearby.map((m) => (
+              <div key={m.driverId} style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff", border: "1px solid #e9e3d8", borderRadius: 15, padding: "12px 14px" }}>
+                <div style={{ width: 40, height: 40, borderRadius: 12, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, fontFamily: MONO, flex: "none" }}>M</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name} · <span style={{ color: "#ff6a1a" }}>★ {m.rating.toFixed(1)}</span></div>
+                  <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600 }}>{m.model} · <span style={{ fontFamily: MONO }}>{m.plate}</span> · {m.operator}</div>
+                </div>
+                <div style={{ textAlign: "right", flex: "none" }}>
+                  <div style={{ fontSize: 11.5, color: "#1f9d6b", fontWeight: 700, marginBottom: 5 }}>~{m.distanceKm} km</div>
+                  <button onClick={() => submit(m.driverId)} disabled={busy} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 9, padding: "7px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Request</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1565,13 +1735,68 @@ function BoardingTicket({ booking, onTrack }: { booking: BookingDetail; onTrack:
 
 /* ============ WALLET TAB ============ */
 function WalletTab({ insights }: { insights?: Insights | null }) {
-  const { refreshUser } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [data, setData] = useState<WalletData | null>(null);
   const [showTopup, setShowTopup] = useState(false);
   const [txFilter, setTxFilter] = useState<"all" | "pay" | "topup">("all");
+  // Paypack ref of a top-up awaiting the rider's approval on their phone
+  const [pendingRef, setPendingRef] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(() => { api.wallet().then(setData).catch(() => undefined); }, []);
   useEffect(() => { load(); }, [load]);
+
+  // Watch the pending top-up until it settles (the wallet is only credited
+  // once the MoMo/Airtel transfer is confirmed). Primary signal: the SSE
+  // stream — the Paypack webhook settles server-side and pushes the outcome
+  // here instantly. Backup: a slow status poll, which itself checks the local
+  // record first and only asks Paypack (then updates the local record) when
+  // the webhook hasn't landed.
+  useEffect(() => {
+    if (!pendingRef) return;
+    let done = false;
+    const startedAt = Date.now();
+
+    const finish = (status: "COMPLETED" | "FAILED") => {
+      if (done) return;
+      done = true;
+      setPendingRef(null);
+      if (status === "COMPLETED") {
+        setNotice({ ok: true, text: "Top-up received — your wallet has been credited." });
+        refreshUser();
+      } else {
+        setNotice({ ok: false, text: "Top-up failed or was declined. No money was taken." });
+      }
+      load();
+    };
+
+    const stream = new EventSource(api.streamUrl());
+    stream.addEventListener("wallet:topup", (e) => {
+      try {
+        const d = JSON.parse((e as MessageEvent).data) as { ref: string; status: string };
+        if (d.ref === pendingRef && (d.status === "COMPLETED" || d.status === "FAILED")) finish(d.status);
+      } catch { /* malformed push — the poll will catch up */ }
+    });
+
+    const timer = setInterval(async () => {
+      try {
+        const r = await api.walletTopupStatus(pendingRef);
+        if (done) return;
+        if (r.status === "COMPLETED" || r.status === "FAILED") {
+          finish(r.status);
+        } else if (Date.now() - startedAt > 180_000) {
+          done = true;
+          setPendingRef(null);
+          setNotice({ ok: false, text: "Still waiting for confirmation — the top-up will appear once approved." });
+          load();
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    }, 10_000);
+
+    return () => { done = true; stream.close(); clearInterval(timer); };
+  }, [pendingRef, load, refreshUser]);
 
   const toggleAutoTopup = async () => {
     if (!data) return;
@@ -1596,10 +1821,38 @@ function WalletTab({ insights }: { insights?: Insights | null }) {
           title="Top up wallet"
           submitLabel="Top up"
           schema={topUpSchema}
-          fields={[{ name: "amount", label: "Amount (RWF)", type: "number", defaultValue: "5000", placeholder: "5000" }]}
-          onSubmit={async (v) => { await api.walletTopup((v as TopUpInput).amount); await Promise.all([load(), refreshUser()]); }}
+          fields={[
+            { name: "amount", label: "Amount (RWF)", type: "number", defaultValue: "5000", placeholder: "5000" },
+            { name: "phone", label: "MoMo / Airtel Money number", defaultValue: user?.phone ?? "", placeholder: "078XXXXXXX" },
+          ]}
+          onSubmit={async (v) => {
+            const input = v as TopUpInput;
+            setNotice(null);
+            const r = await api.walletTopup(input.amount, input.phone || undefined);
+            if (r.status === "PENDING" && r.ref) {
+              setPendingRef(r.ref); // credited once the rider approves the prompt
+              load();
+            } else {
+              await Promise.all([load(), refreshUser()]);
+            }
+          }}
           onClose={() => setShowTopup(false)}
         />
+      )}
+
+      {pendingRef && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff7e8", border: "1px solid #f0dcb4", borderRadius: 14, padding: "12px 16px", marginBottom: 16 }}>
+          <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#e9a13b", flex: "none", animation: "relPulse 1.2s ease-in-out infinite" }} />
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#8a6a2a" }}>
+            Approve the payment on your phone to finish the top-up. If no prompt appears, dial *182*7*1# (MTN) or *500# (Airtel).
+          </div>
+        </div>
+      )}
+      {notice && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: notice.ok ? "#e7f6ee" : "#fbeae6", border: `1px solid ${notice.ok ? "#bfe5d0" : "#f0d4cc"}`, borderRadius: 14, padding: "12px 16px", marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: notice.ok ? "#1f9d6b" : "#c2553f" }}>{notice.text}</div>
+          <button onClick={() => setNotice(null)} style={{ border: "none", background: "none", cursor: "pointer", color: "#8c8378", fontSize: 14, fontWeight: 700 }}>✕</button>
+        </div>
       )}
 
       <div style={{ marginBottom: 20 }}>
@@ -1647,14 +1900,19 @@ function WalletTab({ insights }: { insights?: Insights | null }) {
             {data && txs.length === 0 && <div style={{ padding: "10px 4px", fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No wallet activity yet.</div>}
             {txs.map((w, i) => {
               const credit = w.kind === "CREDIT";
+              const settled = w.status === "COMPLETED";
               return (
-                <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 13, padding: "14px 4px", borderTop: i > 0 ? "1px solid #f0ebe1" : "none" }}>
+                <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 13, padding: "14px 4px", borderTop: i > 0 ? "1px solid #f0ebe1" : "none", opacity: settled ? 1 : 0.75 }}>
                   <span style={{ width: 36, height: 36, borderRadius: 10, background: credit ? "#e7f6ee" : "#f7ece8", color: credit ? "#1f9d6b" : "#c2553f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flex: "none" }}>{credit ? "↓" : "↑"}</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.label}</div>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {w.label}
+                      {w.status === "PENDING" && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#a4791f", background: "#fdf3dd", borderRadius: 8, padding: "2px 7px", textTransform: "uppercase", letterSpacing: ".04em" }}>Pending</span>}
+                      {w.status === "FAILED" && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#c2553f", background: "#fbeae6", borderRadius: 8, padding: "2px 7px", textTransform: "uppercase", letterSpacing: ".04em" }}>Failed</span>}
+                    </div>
                     <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>{fmtDateTime(w.date)}</div>
                   </div>
-                  <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: credit ? "#1f9d6b" : "#1b1714", flex: "none" }}>{credit ? "+" : "−"}{formatRWF(w.amount)}</span>
+                  <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: !settled ? "#8c8378" : credit ? "#1f9d6b" : "#1b1714", flex: "none", textDecoration: w.status === "FAILED" ? "line-through" : "none" }}>{credit ? "+" : "−"}{formatRWF(w.amount)}</span>
                 </div>
               );
             })}

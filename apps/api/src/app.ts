@@ -17,6 +17,7 @@ import { meRouter } from "./routes/me";
 import { documentsRouter } from "./routes/documents";
 import { ticketsRouter } from "./routes/tickets";
 import { webhooksRouter } from "./routes/webhooks";
+import { ridesRouter } from "./routes/rides";
 
 export function createApp() {
   const app = express();
@@ -43,6 +44,7 @@ export function createApp() {
   app.use("/me", meRouter);
   app.use("/documents", documentsRouter);
   app.use("/tickets", ticketsRouter);
+  app.use("/rides", ridesRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
   app.use(errorHandler);

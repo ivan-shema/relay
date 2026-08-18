@@ -115,6 +115,105 @@ driverRouter.get(
   })
 );
 
+/* -------- On-demand moto hailing (drivers with a MOTO vehicle) -------- */
+
+function rideMockDistanceKm(id: string): number {
+  let h = 0;
+  for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return Math.round((3 + (h % 27)) * 10) / 100;
+}
+
+// GET /driver/moto-requests — open hails this moto can take (broadcasts +
+// requests targeted directly at them), plus their currently accepted ride.
+driverRouter.get(
+  "/moto-requests",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const [open, current] = await Promise.all([
+      prisma.rideRequest.findMany({
+        where: { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: driver.id }] },
+        include: { passenger: true },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      }),
+      prisma.rideRequest.findFirst({
+        where: { status: "ACCEPTED", acceptedDriverId: driver.id },
+        include: { passenger: true },
+      }),
+    ]);
+    const map = (r: (typeof open)[number]) => ({
+      id: r.id,
+      passenger: fullNameOf(r.passenger),
+      passengerPhone: r.passenger.phone,
+      from: r.originLabel,
+      to: r.destLabel,
+      offerFare: r.offerFare === null ? null : dec(r.offerFare),
+      targeted: r.targetDriverId === driver.id,
+      distanceKm: rideMockDistanceKm(r.id),
+      requestedAt: r.createdAt.toISOString(),
+    });
+    res.json({ open: open.map(map), current: current ? map(current) : null });
+  })
+);
+
+// POST /driver/moto-requests/:id/accept — claim a hail. The claim is a single
+// atomic OPEN→ACCEPTED update: whichever driver's request lands first wins,
+// and every later acceptance matches zero rows and is rejected. No lock, no
+// double-assignment window.
+driverRouter.post(
+  "/moto-requests/:id/accept",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    if (driver.suspended) throw new HttpError(403, "Your account is suspended");
+
+    const busy = await prisma.rideRequest.findFirst({ where: { status: "ACCEPTED", acceptedDriverId: driver.id } });
+    if (busy) throw new HttpError(409, "Finish your current ride before accepting another");
+
+    const claimed = await prisma.rideRequest.updateMany({
+      where: {
+        id: req.params.id,
+        status: "OPEN",
+        OR: [{ targetDriverId: null }, { targetDriverId: driver.id }],
+      },
+      data: { status: "ACCEPTED", acceptedDriverId: driver.id, acceptedAt: new Date() },
+    });
+    if (claimed.count === 0) throw new HttpError(409, "Too late — another driver already took this ride");
+
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { passenger: true } });
+    if (ride) {
+      await prisma.notification.create({
+        data: {
+          userId: ride.passengerId,
+          title: "Moto on the way",
+          message: `${fullNameOf(driver.user)} accepted your ride ${ride.originLabel} → ${ride.destLabel}.`,
+        },
+      });
+    }
+    res.json({ accepted: true });
+  })
+);
+
+// POST /driver/moto-requests/:id/complete — wrap up an accepted hail
+driverRouter.post(
+  "/moto-requests/:id/complete",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { passenger: true } });
+    if (!ride || ride.acceptedDriverId !== driver.id || ride.status !== "ACCEPTED") {
+      throw new HttpError(404, "Ride not found");
+    }
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "COMPLETED" } });
+    await prisma.notification.create({
+      data: {
+        userId: ride.passengerId,
+        title: "Ride completed",
+        message: `Thanks for riding with ${fullNameOf(driver.user)} — ${ride.originLabel} → ${ride.destLabel}.`,
+      },
+    });
+    res.json({ completed: true });
+  })
+);
+
 // POST /driver/requests/:id/accept — start the trip
 driverRouter.post(
   "/requests/:id/accept",

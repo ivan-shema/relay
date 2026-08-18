@@ -124,6 +124,7 @@ model User {
   complaints    Complaint[]
   walletTxns    WalletTransaction[]
   savedPlaces   SavedPlace[]
+  rideRequests  RideRequest[]
 }
 
 model Operator {
@@ -161,6 +162,39 @@ model Driver {
   vehicle   Vehicle?
   trips     Trip[]
   documents Document[]
+
+  targetedRideRequests RideRequest[] @relation("RideRequestTarget")
+  acceptedRideRequests RideRequest[] @relation("RideRequestAccepted")
+}
+
+// On-demand moto hailing — motos in Rwanda go wherever the customer needs,
+// so instead of scheduled routes a passenger posts a request (to one specific
+// nearby moto, or broadcast to all online motos) and the first driver to
+// accept claims it. The claim is an atomic OPEN→ACCEPTED transition, so a
+// second acceptance can never go through.
+enum RideRequestStatus {
+  OPEN
+  ACCEPTED
+  COMPLETED
+  CANCELLED
+}
+
+model RideRequest {
+  id               String            @id @default(cuid())
+  passengerId      String
+  passenger        User              @relation(fields: [passengerId], references: [id])
+  originLabel      String
+  destLabel        String
+  // fare the passenger proposes; the driver sees it before accepting
+  offerFare        Decimal?          @db.Decimal(10, 2)
+  // null = broadcast to every online moto; set = sent to one specific driver
+  targetDriverId   String?
+  targetDriver     Driver?           @relation("RideRequestTarget", fields: [targetDriverId], references: [id])
+  status           RideRequestStatus @default(OPEN)
+  acceptedDriverId String?
+  acceptedDriver   Driver?           @relation("RideRequestAccepted", fields: [acceptedDriverId], references: [id])
+  acceptedAt       DateTime?
+  createdAt        DateTime          @default(now())
 }
 
 model Vehicle {

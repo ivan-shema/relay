@@ -201,6 +201,16 @@ export const api = {
   tracking: (bookingId: string) =>
     request<TrackingSnapshot>(`/tracking/${bookingId}`, { auth: true }),
 
+  // on-demand moto hailing
+  nearbyMotos: () => request<NearbyMoto[]>("/rides/nearby", { auth: true }),
+  requestRide: (body: { originLabel: string; destLabel: string; offerFare?: number; targetDriverId?: string }) =>
+    request<RideView>("/rides", { method: "POST", body, auth: true }),
+  myRide: () => request<RideView | null>("/rides/mine", { auth: true }),
+  cancelRide: (id: string) => request<{ cancelled: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
+  driverMotoRequests: () => request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null }>("/driver/moto-requests", { auth: true }),
+  driverAcceptMotoRide: (id: string) => request<{ accepted: boolean }>(`/driver/moto-requests/${id}/accept`, { method: "POST", auth: true }),
+  driverCompleteMotoRide: (id: string) => request<{ completed: boolean }>(`/driver/moto-requests/${id}/complete`, { method: "POST", auth: true }),
+
   // tickets — one per purchased seat, boarded independently. Staff confirm
   // boarding by the code on the ticket the passenger presents, never by an id
   // already visible to them from a booking list.
@@ -268,6 +278,9 @@ export const api = {
   wallet: () => request<WalletData>("/me/wallet", { auth: true }),
   walletTopup: (amount: number, phone?: string) => request<TopupResult>("/me/wallet/topup", { method: "POST", body: { amount, phone }, auth: true }),
   walletTopupStatus: (ref: string) => request<{ status: TransferStatus; balance: number }>(`/me/wallet/topup/${ref}/status`, { auth: true }),
+  // SSE channel for real-time settlement pushes (webhook → server → UI).
+  // EventSource can't set headers, so the access token rides as a query param.
+  streamUrl: () => `${BASE}/me/stream?token=${encodeURIComponent(tokenStore.access ?? "")}`,
   setAutoTopup: (enabled: boolean) => request<{ autoTopupEnabled: boolean }>("/me/wallet/auto-topup", { method: "POST", body: { enabled }, auth: true }),
   insights: () => request<Insights>("/me/insights", { auth: true }),
   savedPlaces: () => request<SavedPlace[]>("/me/places", { auth: true }),
@@ -342,6 +355,39 @@ export interface RatingResult {
   comment: string | null;
   createdAt: string;
   editableUntil: string;
+}
+
+// ---------- on-demand moto hailing ----------
+export interface NearbyMoto {
+  driverId: string;
+  name: string;
+  rating: number;
+  plate: string;
+  model: string;
+  operator: string;
+  distanceKm: number;
+}
+export interface RideView {
+  id: string;
+  from: string;
+  to: string;
+  offerFare: number | null;
+  status: "OPEN" | "ACCEPTED" | "COMPLETED" | "CANCELLED";
+  targeted: boolean;
+  driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number } | null;
+  createdAt: string;
+  acceptedAt: string | null;
+}
+export interface DriverMotoRequest {
+  id: string;
+  passenger: string;
+  passengerPhone: string;
+  from: string;
+  to: string;
+  offerFare: number | null;
+  targeted: boolean;
+  distanceKm: number;
+  requestedAt: string;
 }
 
 export interface PlannedWatch {

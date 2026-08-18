@@ -9,8 +9,39 @@ import { hashPassword, verifyPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
 import { paypackEnabled, normalizeMomoNumber, requestCashin, fetchTransferOutcome } from "../lib/paypack";
 import { settleWalletTopup } from "../lib/settlement";
+import { notify } from "../lib/notify";
+import { verifyAccessToken } from "../lib/auth";
+import { subscribe } from "../lib/realtime";
 
 export const meRouter = Router();
+
+// GET /me/stream — Server-Sent Events channel for real-time updates (e.g. a
+// Paypack settlement landing via webhook). Declared BEFORE the router-wide
+// auth guard because EventSource can't send an Authorization header — the
+// access token comes as a query param and is verified the same way.
+meRouter.get("/stream", (req, res) => {
+  let userId: string;
+  try {
+    userId = verifyAccessToken(String(req.query.token ?? "")).sub;
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.write(":connected\n\n");
+
+  const unsubscribe = subscribe(userId, res);
+  // Comment-line heartbeat keeps proxies from closing the idle connection.
+  const heartbeat = setInterval(() => res.write(":ping\n\n"), 25_000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+});
 
 meRouter.use(requireAuth);
 
@@ -256,9 +287,9 @@ meRouter.post(
         const balance = new Prisma.Decimal(user!.walletBalance).plus(amount);
         await tx.user.update({ where: { id: userId }, data: { walletBalance: balance } });
         await tx.walletTransaction.create({ data: { userId, kind: "CREDIT", amount, label: "Wallet top-up" } });
-        await tx.notification.create({ data: { userId, title: "Wallet topped up", message: `You added RWF ${Math.round(amount).toLocaleString("en-US")} to your Relay wallet.` } });
         return balance;
       });
+      await notify(userId, "Wallet topped up", `You added RWF ${Math.round(amount).toLocaleString("en-US")} to your Relay wallet.`);
       return res.json({ status: "COMPLETED", balance: dec(result) });
     }
 

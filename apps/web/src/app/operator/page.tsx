@@ -672,10 +672,56 @@ function PaymentsTab() {
   const [page, setPage] = useState(1);
   const load = useCallback((pg: number) => { api.operatorPayments(pg).then(setData).catch(() => undefined); }, []);
   useEffect(() => { load(page); }, [page, load]);
+  // Reference of a withdrawal still processing at Paypack
+  const [pendingPayout, setPendingPayout] = useState<string | null>(null);
+
+  // Primary signal: SSE push when the Paypack webhook settles the cashout.
+  // Backup: a slow status poll (which checks the local record first and only
+  // asks Paypack — updating the local record — when the webhook hasn't landed).
+  useEffect(() => {
+    if (!pendingPayout) return;
+    let done = false;
+
+    const finish = (status: "COMPLETED" | "FAILED") => {
+      if (done) return;
+      done = true;
+      setPendingPayout(null);
+      if (status === "FAILED") {
+        window.alert(`Withdrawal ${pendingPayout} failed — the amount is available to withdraw again.`);
+      }
+      load(page);
+    };
+
+    const stream = new EventSource(api.streamUrl());
+    stream.addEventListener("payout", (e) => {
+      try {
+        const d = JSON.parse((e as MessageEvent).data) as { reference: string; status: string };
+        if (d.reference === pendingPayout && (d.status === "COMPLETED" || d.status === "FAILED")) finish(d.status);
+      } catch { /* malformed push — the poll will catch up */ }
+    });
+
+    const startedAt = Date.now();
+    const timer = setInterval(async () => {
+      try {
+        const s = await api.operatorPayoutStatus(pendingPayout);
+        if (done) return;
+        if (s.status === "COMPLETED" || s.status === "FAILED") finish(s.status);
+        else if (Date.now() - startedAt > 180_000) { done = true; setPendingPayout(null); }
+      } catch { /* transient — keep polling */ }
+    }, 10_000);
+
+    return () => { done = true; stream.close(); clearInterval(timer); };
+  }, [pendingPayout, load, page]);
+
   const withdraw = async () => {
     try {
       const r = await api.operatorWithdraw();
-      window.alert(`Withdrawal of ${formatRWF(r.amount)} sent to MTN MoMo.\nRef: ${r.reference}`);
+      if (r.status === "PENDING") {
+        window.alert(`Withdrawal of ${formatRWF(r.amount)} is on its way to your mobile money account.\nRef: ${r.reference}`);
+        setPendingPayout(r.reference);
+      } else {
+        window.alert(`Withdrawal of ${formatRWF(r.amount)} sent to mobile money.\nRef: ${r.reference}`);
+      }
       load(page);
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Withdrawal failed");

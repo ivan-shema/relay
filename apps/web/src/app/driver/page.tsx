@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { formatRWF } from "@relay/shared";
-import { api, type DriverMe, type DriverRequest, type DriverTrip } from "@/lib/api";
+import { api, ApiError, type DriverMe, type DriverRequest, type DriverTrip, type DriverMotoRequest } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { StatusPill, TicketVerifyForm, ProfileSettingsPage } from "@/components/console";
 
@@ -110,6 +110,9 @@ export default function DriverConsole() {
               <Tile label="Accept" value={`${s.acceptance}%`} />
             </div>
 
+            {/* on-demand moto hails — only for drivers riding a moto */}
+            {me.vehicle?.type === "MOTO" && <MotoHailSection online={me.online} />}
+
             {/* requests */}
             {requests.length > 0 ? (
               requests.map((r) => (
@@ -202,6 +205,102 @@ export default function DriverConsole() {
         </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// On-demand moto hails: open requests (broadcast + targeted at this driver)
+// with an Accept that races other motos — the backend's atomic claim means a
+// second acceptance gets a 409, surfaced here as "already taken".
+function MotoHailSection({ online }: { online: boolean }) {
+  const [open, setOpen] = useState<DriverMotoRequest[]>([]);
+  const [current, setCurrent] = useState<DriverMotoRequest | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api.driverMotoRequests().then((r) => { setOpen(r.open); setCurrent(r.current); }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const accept = async (id: string) => {
+    setBusyId(id);
+    try {
+      await api.driverAcceptMotoRide(id);
+    } catch (e) {
+      window.alert(e instanceof ApiError ? e.message : "Could not accept this ride");
+    } finally {
+      setBusyId(null);
+      load();
+    }
+  };
+
+  const complete = async () => {
+    if (!current) return;
+    setBusyId(current.id);
+    try {
+      await api.driverCompleteMotoRide(current.id);
+    } catch (e) {
+      window.alert(e instanceof ApiError ? e.message : "Could not complete the ride");
+    } finally {
+      setBusyId(null);
+      load();
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "18px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>Moto hails</div>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: current ? "#ff6a1a" : "#8c8378" }}>
+          {current ? "On a ride" : `${open.length} open`}
+        </span>
+      </div>
+
+      {current ? (
+        <div style={{ border: "2px solid #1f9d6b", borderRadius: 15, padding: 15 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+            <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#1f9d6b" }} />
+            <span style={{ fontSize: 11.5, fontWeight: 800, textTransform: "uppercase", color: "#1f9d6b" }}>Current ride</span>
+          </div>
+          <div style={{ fontSize: 14.5, fontWeight: 700 }}>{current.from} → {current.to}</div>
+          <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>
+            {current.passenger} · <span style={{ fontFamily: MONO }}>{current.passengerPhone}</span>
+            {current.offerFare !== null && <> · offer <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(current.offerFare)}</span></>}
+          </div>
+          <button onClick={complete} disabled={busyId === current.id} style={{ width: "100%", marginTop: 13, background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+            {busyId === current.id ? "Saving…" : "Complete ride"}
+          </button>
+        </div>
+      ) : !online ? (
+        <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>Go online to receive hails from passengers nearby.</div>
+      ) : open.length === 0 ? (
+        <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No open hails right now — new requests appear here automatically.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {open.map((r) => (
+            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 12, border: `1px solid ${r.targeted ? "#ffd9c2" : "#ece6db"}`, background: r.targeted ? "#fff6f0" : "#fff", borderRadius: 14, padding: "12px 14px" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700 }}>
+                  {r.from} → {r.to}
+                  {r.targeted && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>Asked for you</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
+                  {r.passenger} · ~{r.distanceKm} km away
+                  {r.offerFare !== null && <> · offers <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(r.offerFare)}</span></>}
+                </div>
+              </div>
+              <button onClick={() => accept(r.id)} disabled={busyId === r.id} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 10, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>
+                {busyId === r.id ? "…" : "Accept"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
