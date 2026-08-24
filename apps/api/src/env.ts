@@ -8,10 +8,22 @@ function required(name: string, fallback?: string): string {
   return v;
 }
 
+// Signing secrets may fall back to a well-known dev value locally, but never in
+// production: any token minted with the same default elsewhere (a dev laptop,
+// another deployment) would be accepted here.
+const isProduction = process.env.NODE_ENV === "production";
+function secret(name: string, devFallback: string): string {
+  const v = process.env[name];
+  if (v && v.length >= 16) return v;
+  if (isProduction) throw new Error(`${name} must be set to a strong value (>= 16 chars) in production`);
+  console.warn(`[env] ${name} is unset or short — using the dev default. Set it before deploying.`);
+  return v || devFallback;
+}
+
 export const env = {
   databaseUrl: required("DATABASE_URL"),
-  jwtAccessSecret: required("JWT_ACCESS_SECRET", "dev-access-secret"),
-  jwtRefreshSecret: required("JWT_REFRESH_SECRET", "dev-refresh-secret"),
+  jwtAccessSecret: secret("JWT_ACCESS_SECRET", "dev-access-secret"),
+  jwtRefreshSecret: secret("JWT_REFRESH_SECRET", "dev-refresh-secret"),
   jwtAccessTtl: process.env.JWT_ACCESS_TTL ?? "15m",
   jwtRefreshTtl: process.env.JWT_REFRESH_TTL ?? "30d",
   port: Number(process.env.PORT ?? 4000),

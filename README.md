@@ -194,6 +194,9 @@ GET    /planned   POST /planned   DELETE /planned/:id
 ```bash
 npm run typecheck                 # typecheck every workspace
 npm run build                     # build shared → api → web
+# `@relay/shared` is consumed from its gitignored dist/. `npm install` and every
+# `npm run dev` rebuild it automatically; after pulling shared changes without
+# reinstalling, run `npm run build --workspace @relay/shared` (or just restart dev).
 npm run db:seed                   # reseed demo data
 npm run prisma:push -w @relay/api # push schema without a migration
 ```
