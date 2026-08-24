@@ -875,7 +875,7 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
 }
 
 /* ============ MOTO HAIL ============ */
-const RIDE_ACTIVE: RideStatus[] = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM"];
+const RIDE_ACTIVE: RideStatus[] = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"];
 
 function fmtClock(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -957,16 +957,17 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
       {!loaded ? (
         <div style={{ padding: 30, textAlign: "center", color: "#a39a8d", fontWeight: 600 }}>Loading…</div>
       ) : active ? (
-        <div style={{ background: "#fff", border: `2px solid ${active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue ? "#c2553f" : "#1f9d6b"}`, borderRadius: 20, padding: 20, boxShadow: "0 14px 40px -20px rgba(27,23,20,.35)" }}>
+        <div style={{ background: "#fff", border: `2px solid ${active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue || active.status === "DISPUTED" ? "#c2553f" : "#1f9d6b"}`, borderRadius: 20, padding: 20, boxShadow: "0 14px 40px -20px rgba(27,23,20,.35)" }}>
           {/* status line */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-            <span className="rel-pulse" style={{ width: 9, height: 9, borderRadius: "50%", background: active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue ? "#c2553f" : "#1f9d6b" }} />
-            <span style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", color: active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue ? "#c2553f" : "#1f9d6b" }}>
+            <span className="rel-pulse" style={{ width: 9, height: 9, borderRadius: "50%", background: active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue || active.status === "DISPUTED" ? "#c2553f" : "#1f9d6b" }} />
+            <span style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", color: active.status === "OPEN" ? "#ff6a1a" : active.pickupOverdue || active.status === "DISPUTED" ? "#c2553f" : "#1f9d6b" }}>
               {active.status === "OPEN" && (active.prepaid ? "Finding you a new moto (already paid)" : active.targeted ? "Waiting for your moto" : "Finding you a moto…")}
               {active.status === "ACCEPTED" && "Accepted — pay to confirm"}
               {active.status === "CONFIRMED" && (active.pickupOverdue ? "Driver hasn't arrived" : "Moto on the way")}
               {active.status === "IN_PROGRESS" && "On the ride"}
               {active.status === "AWAITING_CONFIRM" && "Confirm your ride"}
+              {active.status === "DISPUTED" && "Pickup disputed"}
             </span>
           </div>
           <div style={{ fontSize: 15, fontWeight: 700 }}>{active.from} → {active.to}</div>
@@ -1026,11 +1027,14 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
               {active.pickupOverdue ? (
                 <>
                   <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 13px", fontSize: 12.5, fontWeight: 700, marginBottom: 11 }}>
-                    The pickup window has passed and the driver hasn't picked you up. Your money is safe — hand the ride to another moto, or cancel for a full refund.
+                    The pickup window has passed. Your money is safe — if the driver is actually there (or almost), keep them and give 10 more minutes; otherwise hand the ride to another moto, or cancel for a full refund.
                   </div>
-                  <div style={{ display: "flex", gap: 10 }}>
-                    <button onClick={() => run(() => api.rebroadcastRide(active.id))} disabled={busy} style={btn("#ff6a1a")}>Find another moto</button>
-                    <button onClick={() => run(() => api.cancelRide(active.id).then(() => refreshUser()))} disabled={busy} style={btn("#fff", "#c2553f", "1px solid #f0d4cc")}>Cancel & refund</button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                    <button onClick={() => run(() => api.extendRide(active.id))} disabled={busy} style={btn("#1f9d6b")}>Driver&apos;s here — keep them (+10 min)</button>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => run(() => api.rebroadcastRide(active.id))} disabled={busy} style={btn("#ff6a1a")}>Find another moto</button>
+                      <button onClick={() => run(() => api.cancelRide(active.id).then(() => refreshUser()))} disabled={busy} style={btn("#fff", "#c2553f", "1px solid #f0d4cc")}>Cancel & refund</button>
+                    </div>
                   </div>
                 </>
               ) : (
@@ -1038,6 +1042,21 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
                   Paid ✓ — your moto should pick you up by <span style={{ fontFamily: MONO, fontWeight: 700 }}>{active.pickupDeadline ? fmtClock(active.pickupDeadline) : "—"}</span>. If they don't make it, you'll be able to reassign or get a refund.
                 </div>
               )}
+            </div>
+          )}
+
+          {active.status === "IN_PROGRESS" && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600 }}>
+                {active.driver?.name ?? "Your driver"} marked you as picked up. Enjoy the ride — you&apos;ll confirm completion at the end.
+              </div>
+              <button
+                onClick={() => { if (window.confirm("Report that the driver did NOT actually pick you up? The driver gets a chance to respond; if they agree or stay silent for 10 minutes you can reassign or get a refund. If they contest, Relay reviews it. You can undo this if it was a mistake.")) run(() => api.reportNoPickup(active.id)); }}
+                disabled={busy}
+                style={{ background: "none", border: "none", color: "#c2553f", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0, marginTop: 9, textDecoration: "underline", fontFamily: "'Manrope', sans-serif" }}
+              >
+                I wasn&apos;t picked up — this is wrong
+              </button>
             </div>
           )}
 
@@ -1049,11 +1068,36 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
               <button onClick={() => run(() => api.confirmRideComplete(active.id))} disabled={busy} style={{ ...btn("#1f9d6b"), boxShadow: "0 12px 26px -12px rgba(31,157,107,.7)" }}>
                 {busy ? "Confirming…" : "Confirm — ride completed"}
               </button>
+              <button
+                onClick={() => { if (window.confirm("Report that the driver never actually picked you up? Their payment is NOT released. The driver gets a chance to respond; if they agree or stay silent for 10 minutes you can reassign or get a refund. If they contest, Relay reviews it. You can undo this if it was a mistake.")) run(() => api.reportNoPickup(active.id)); }}
+                disabled={busy}
+                style={{ background: "none", border: "none", color: "#c2553f", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0, marginTop: 10, textDecoration: "underline", fontFamily: "'Manrope', sans-serif" }}
+              >
+                This ride never happened — I wasn&apos;t picked up
+              </button>
             </div>
           )}
 
-          {/* cancel is available at every pre-completion stage */}
-          {active.status !== "AWAITING_CONFIRM" && (
+          {active.status === "DISPUTED" && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 13px", fontSize: 12.5, fontWeight: 700 }}>
+                {active.disputeContested
+                  ? "The driver says the pickup did happen, so Relay is reviewing this ride. Your money stays safely held until it's resolved — you'll be notified."
+                  : "You reported you weren't picked up. The driver has up to 10 minutes to respond — if they agree or don't answer, you'll get the reassign and refund options here."}
+              </div>
+              <button
+                onClick={() => run(() => api.withdrawNoPickupReport(active.id))}
+                disabled={busy}
+                style={{ ...btn("#fff", "#1b1714", "1px solid #e3ddd1"), marginTop: 11 }}
+              >
+                I was picked up after all — undo my report
+              </button>
+            </div>
+          )}
+
+          {/* cancel is available at every pre-completion stage, except while a
+              dispute freezes the escrow (that's the "free ride" loophole) */}
+          {active.status !== "AWAITING_CONFIRM" && active.status !== "DISPUTED" && (
             <button onClick={() => run(() => api.cancelRide(active.id).then(() => refreshUser()))} disabled={busy} style={{ ...btn("#fff", "#c2553f", "1px solid #f0d4cc"), marginTop: 12 }}>
               {active.paidAt ? "Cancel ride (full refund)" : "Cancel request"}
             </button>

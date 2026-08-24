@@ -16,6 +16,10 @@ ridesRouter.use(requireAuth);
 // (measured from the desired departure time when one was given).
 export const PICKUP_WINDOW_MS = 10 * 60_000;
 
+// How long a driver has to contest a "I wasn't picked up" report before the
+// dispute auto-resolves in the passenger's favour.
+export const DISPUTE_RESPONSE_WINDOW_MS = 10 * 60_000;
+
 function dec(v: Prisma.Decimal | number | null): number | null {
   if (v === null) return null;
   return typeof v === "number" ? v : Number(v.toString());
@@ -70,7 +74,7 @@ const createRideSchema = z.object({
   departAt: z.coerce.date().optional(),
 });
 
-const ACTIVE_STATUSES = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM"] as const;
+const ACTIVE_STATUSES = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
 
 const rideInclude = {
   targetDriver: { include: { user: true, vehicle: true } },
@@ -98,6 +102,8 @@ function toRideView(r: RideWithRels) {
     pickupDeadline: r.pickupDeadline?.toISOString() ?? null,
     // the passenger's "driver never came" prompt trigger
     pickupOverdue: r.status === "CONFIRMED" && r.pickupDeadline !== null && r.pickupDeadline.getTime() < now,
+    disputedAt: r.disputedAt?.toISOString() ?? null,
+    disputeContested: r.disputeContestedAt !== null,
     driver: driver
       ? {
           name: fullNameOf(driver.user),
@@ -126,6 +132,39 @@ function toRideView(r: RideWithRels) {
 
 async function loadRideView(id: string): Promise<RideWithRels | null> {
   return prisma.rideRequest.findUnique({ where: { id }, include: rideInclude });
+}
+
+// A driver who ignores a pickup dispute shouldn't hold the passenger's money
+// hostage: once the response window passes with no contest, the dispute
+// auto-resolves as if the driver acknowledged — back to CONFIRMED with the
+// window expired, so the passenger regains keep / re-broadcast / refund.
+// Applied lazily on reads (no cron needed); atomic so a concurrent
+// contest/withdraw can't be clobbered.
+export async function autoResolveStaleDispute(ride: {
+  id: string;
+  status: string;
+  disputedAt: Date | null;
+  disputeContestedAt: Date | null;
+}): Promise<boolean> {
+  if (
+    ride.status !== "DISPUTED" ||
+    ride.disputeContestedAt !== null ||
+    !ride.disputedAt ||
+    ride.disputedAt.getTime() + DISPUTE_RESPONSE_WINDOW_MS > Date.now()
+  ) {
+    return false;
+  }
+  const updated = await prisma.rideRequest.updateMany({
+    where: { id: ride.id, status: "DISPUTED", disputeContestedAt: null },
+    data: {
+      status: "CONFIRMED",
+      pickedUpAt: null,
+      completionRequestedAt: null,
+      disputedAt: null,
+      pickupDeadline: new Date(),
+    },
+  });
+  return updated.count > 0;
 }
 
 // POST /rides — post a ride request: to one specific nearby moto, or (no
@@ -175,11 +214,12 @@ ridesRouter.post(
 ridesRouter.get(
   "/mine",
   asyncHandler(async (req, res) => {
-    const ride = await prisma.rideRequest.findFirst({
+    let ride = await prisma.rideRequest.findFirst({
       where: { passengerId: req.auth!.sub },
       orderBy: { createdAt: "desc" },
       include: rideInclude,
     });
+    if (ride && (await autoResolveStaleDispute(ride))) ride = await loadRideView(ride.id);
     res.json(ride ? toRideView(ride) : null);
   })
 );
@@ -195,6 +235,10 @@ ridesRouter.post(
     const offer = await prisma.rideOffer.findUnique({ where: { id: req.params.offerId }, include: { driver: { include: { user: true } } } });
     if (!offer || offer.rideId !== ride.id || offer.status !== "PENDING") throw new HttpError(404, "Offer not found");
 
+    // Lock the commission at the moment the price is agreed — a later admin
+    // change to the platform rate must not move the payout this driver was
+    // shown when they committed.
+    const pct = await getMotoCommissionPct();
     const claimed = await prisma.rideRequest.updateMany({
       where: { id: ride.id, status: "OPEN" },
       data: {
@@ -202,6 +246,8 @@ ridesRouter.post(
         acceptedDriverId: offer.driverId,
         agreedFare: offer.amount,
         acceptedAt: new Date(),
+        commissionPct: pct,
+        commissionAmount: new Prisma.Decimal(offer.amount).mul(pct).div(100).toDecimalPlaces(2),
       },
     });
     if (claimed.count === 0) throw new HttpError(409, "This ride is no longer open");
@@ -325,13 +371,103 @@ ridesRouter.post(
   })
 );
 
+// POST /rides/:id/extend — the pickup window expired but the driver actually
+// arrived (or is moments away) and just didn't tap "picked up" in time: the
+// passenger chooses to keep the same driver, which grants a fresh 10 minutes.
+ridesRouter.post(
+  "/:id/extend",
+  asyncHandler(async (req, res) => {
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: true } });
+    if (!ride || ride.passengerId !== req.auth!.sub) throw new HttpError(404, "Ride request not found");
+    if (ride.status !== "CONFIRMED") throw new HttpError(409, "Only a paid, un-picked-up ride can be extended");
+    if (!ride.pickupDeadline || ride.pickupDeadline.getTime() > Date.now()) {
+      throw new HttpError(409, "The pickup window hasn't expired yet");
+    }
+
+    const newDeadline = new Date(Date.now() + PICKUP_WINDOW_MS);
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { pickupDeadline: newDeadline } });
+    if (ride.acceptedDriver) {
+      await notify(
+        ride.acceptedDriver.userId,
+        "Passenger is keeping you",
+        `${ride.originLabel} → ${ride.destLabel}: the passenger extended your pickup window to ${newDeadline.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}. If you've already picked them up, tap "Passenger picked up".`
+      );
+    }
+
+    const fresh = await loadRideView(ride.id);
+    res.json(fresh ? toRideView(fresh) : null);
+  })
+);
+
+// POST /rides/:id/report-no-pickup — anti-fraud: the driver tapped "picked up"
+// but never actually showed. This does NOT hand the passenger an instant
+// refund (a rider could otherwise take the trip, then "report" and claw the
+// money back): it freezes the ride in DISPUTED. The driver then acknowledges
+// (ride reverts, passenger regains their exits), contests (admin resolves), or
+// stays silent for 10 minutes (auto-resolves in the passenger's favour). A
+// mis-click is undone with /withdraw-report.
+ridesRouter.post(
+  "/:id/report-no-pickup",
+  asyncHandler(async (req, res) => {
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: true } });
+    if (!ride || ride.passengerId !== req.auth!.sub) throw new HttpError(404, "Ride request not found");
+    if (ride.status !== "IN_PROGRESS" && ride.status !== "AWAITING_CONFIRM") {
+      throw new HttpError(409, "This ride isn't marked as picked up");
+    }
+
+    await prisma.rideRequest.update({
+      where: { id: ride.id },
+      data: { status: "DISPUTED", disputedAt: new Date(), disputeContestedAt: null },
+    });
+    if (ride.acceptedDriver) {
+      await notify(
+        ride.acceptedDriver.userId,
+        "Pickup disputed",
+        `The passenger reported they were NOT picked up for ${ride.originLabel} → ${ride.destLabel}. Respond in your dashboard within 10 minutes — if you did pick them up, contest it and Relay will review.`
+      );
+    }
+
+    const fresh = await loadRideView(ride.id);
+    res.json(fresh ? toRideView(fresh) : null);
+  })
+);
+
+// POST /rides/:id/withdraw-report — the passenger's report was a mistake (or a
+// mischievous tap): put the ride back to the driver's claimed state. The
+// driver's completion request is cleared so they simply re-request at the end.
+ridesRouter.post(
+  "/:id/withdraw-report",
+  asyncHandler(async (req, res) => {
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: true } });
+    if (!ride || ride.passengerId !== req.auth!.sub) throw new HttpError(404, "Ride request not found");
+
+    const undone = await prisma.rideRequest.updateMany({
+      where: { id: ride.id, status: "DISPUTED" },
+      data: { status: "IN_PROGRESS", disputedAt: null, disputeContestedAt: null, completionRequestedAt: null },
+    });
+    if (undone.count === 0) throw new HttpError(409, "There is no open pickup report on this ride");
+
+    if (ride.acceptedDriver) {
+      await notify(
+        ride.acceptedDriver.userId,
+        "Pickup report withdrawn",
+        `The passenger withdrew the no-pickup report for ${ride.originLabel} → ${ride.destLabel} — the ride continues. Request completion again when you arrive.`
+      );
+    }
+
+    const fresh = await loadRideView(ride.id);
+    res.json(fresh ? toRideView(fresh) : null);
+  })
+);
+
 // POST /rides/:id/confirm-complete — the driver said the ride is done; the
 // passenger's confirmation is what actually releases the escrow: driver gets
-// the fare minus the platform commission (admin-configurable).
+// the fare minus the platform commission. The commission % was locked on the
+// ride when the price was agreed — an admin change since then doesn't apply.
 ridesRouter.post(
   "/:id/confirm-complete",
   asyncHandler(async (req, res) => {
-    const pct = await getMotoCommissionPct();
+    const currentPct = await getMotoCommissionPct();
 
     const payout = await prisma.$transaction(async (tx) => {
       const ride = await tx.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: { include: { user: true } } } });
@@ -341,7 +477,8 @@ ridesRouter.post(
       const driver = ride.acceptedDriver;
       if (!fare || !driver) throw new HttpError(409, "Ride has no funded fare/driver");
 
-      const commission = new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2);
+      const pct = ride.commissionPct ?? currentPct;
+      const commission = ride.commissionAmount ?? new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2);
       const driverShare = new Prisma.Decimal(fare).minus(commission);
 
       await tx.rideRequest.update({
@@ -375,6 +512,12 @@ ridesRouter.post(
       const ride = await tx.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: true } });
       if (!ride || ride.passengerId !== passengerId) throw new HttpError(404, "Ride request not found");
       if (ride.status === "COMPLETED" || ride.status === "CANCELLED") throw new HttpError(409, "This ride is already finished");
+      // No self-refund while a pickup dispute is open — that's exactly the
+      // "ride for free, then report" hole. Undo the report, or wait for the
+      // driver / Relay to resolve it.
+      if (ride.status === "DISPUTED") {
+        throw new HttpError(409, "This ride is under a pickup dispute — withdraw your report or wait for it to be resolved");
+      }
 
       const refund = ride.paidAt && ride.agreedFare ? ride.agreedFare : null;
       await tx.rideRequest.update({

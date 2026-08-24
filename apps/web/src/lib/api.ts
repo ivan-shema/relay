@@ -211,13 +211,24 @@ export const api = {
     request<RideView>(`/rides/${rideId}/offers/${offerId}/accept`, { method: "POST", auth: true }),
   payRide: (id: string, idempotencyKey?: string) => request<RideView>(`/rides/${id}/pay`, { method: "POST", body: { method: "WALLET", idempotencyKey }, auth: true }),
   rebroadcastRide: (id: string) => request<RideView>(`/rides/${id}/rebroadcast`, { method: "POST", auth: true }),
+  extendRide: (id: string) => request<RideView>(`/rides/${id}/extend`, { method: "POST", auth: true }),
+  reportNoPickup: (id: string) => request<RideView>(`/rides/${id}/report-no-pickup`, { method: "POST", auth: true }),
+  withdrawNoPickupReport: (id: string) => request<RideView>(`/rides/${id}/withdraw-report`, { method: "POST", auth: true }),
   confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
   cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
-  driverMotoRequests: () => request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null }>("/driver/moto-requests", { auth: true }),
+  driverMotoRequests: () =>
+    request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null; platformCommissionPct: number }>("/driver/moto-requests", { auth: true }),
   driverAcceptMotoRide: (id: string) => request<{ accepted: boolean }>(`/driver/moto-requests/${id}/accept`, { method: "POST", auth: true }),
   driverOfferMotoRide: (id: string, amount: number) =>
     request<{ offered: boolean }>(`/driver/moto-requests/${id}/offer`, { method: "POST", body: { amount }, auth: true }),
   driverWithdrawMotoRide: (id: string) => request<{ withdrawn: boolean }>(`/driver/moto-requests/${id}/withdraw`, { method: "POST", auth: true }),
+  driverAcknowledgeNoPickup: (id: string) =>
+    request<{ acknowledged: boolean }>(`/driver/moto-requests/${id}/acknowledge-no-pickup`, { method: "POST", auth: true }),
+  driverContestDispute: (id: string) =>
+    request<{ contested: boolean }>(`/driver/moto-requests/${id}/contest-dispute`, { method: "POST", auth: true }),
+  adminRideDisputes: () => request<AdminRideDispute[]>("/admin/ride-disputes", { auth: true }),
+  adminResolveRideDispute: (id: string, outcome: "REFUND_PASSENGER" | "PAY_DRIVER") =>
+    request<{ resolved: boolean; outcome: string }>(`/admin/ride-disputes/${id}/resolve`, { method: "POST", body: { outcome }, auth: true }),
   driverPickupMotoRide: (id: string) => request<{ pickedUp: boolean }>(`/driver/moto-requests/${id}/pickup`, { method: "POST", auth: true }),
   driverCompleteMotoRide: (id: string) => request<{ requested: boolean }>(`/driver/moto-requests/${id}/complete`, { method: "POST", auth: true }),
 
@@ -381,7 +392,7 @@ export interface NearbyMoto {
   operator: string;
   distanceKm: number;
 }
-export type RideStatus = "OPEN" | "ACCEPTED" | "CONFIRMED" | "IN_PROGRESS" | "AWAITING_CONFIRM" | "COMPLETED" | "CANCELLED";
+export type RideStatus = "OPEN" | "ACCEPTED" | "CONFIRMED" | "IN_PROGRESS" | "AWAITING_CONFIRM" | "DISPUTED" | "COMPLETED" | "CANCELLED";
 export interface RideOfferView {
   id: string;
   amount: number;
@@ -403,6 +414,8 @@ export interface RideView {
   paidAt: string | null;
   pickupDeadline: string | null;
   pickupOverdue: boolean;
+  disputedAt: string | null;
+  disputeContested: boolean;
   driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number } | null;
   offers: RideOfferView[];
   createdAt: string;
@@ -425,6 +438,27 @@ export interface DriverMotoRequest {
   targeted: boolean;
   distanceKm: number;
   requestedAt: string;
+  disputedAt: string | null;
+  disputeContested: boolean;
+  commissionPct: number;
+  commissionLocked: boolean;
+  commissionAmount: number | null;
+  netPayout: number | null;
+}
+export interface AdminRideDispute {
+  id: string;
+  from: string;
+  to: string;
+  fare: number | null;
+  passenger: string;
+  passengerPhone: string;
+  driver: string;
+  driverPhone: string;
+  pickedUpClaimedAt: string | null;
+  disputedAt: string | null;
+  contestedAt: string | null;
+  contested: boolean;
+  commissionPct: number | null;
 }
 
 export interface PlannedWatch {

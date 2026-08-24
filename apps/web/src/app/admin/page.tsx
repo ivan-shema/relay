@@ -12,6 +12,7 @@ import {
   type AdminPayments,
   type AdminReports,
   type KycDocument,
+  type AdminRideDispute,
 } from "@/lib/api";
 import { formatRWF, createUserSchema, type CreateUserInput } from "@relay/shared";
 import { tokenStore } from "@/lib/api";
@@ -69,6 +70,7 @@ export default function AdminConsole() {
     { key: "payments", label: "Payments", icon: "◈" },
     { key: "reports", label: "Reports", icon: "▧" },
     { key: "complaints", label: "Complaints", icon: "!" },
+    { key: "disputes", label: "Ride disputes", icon: "⚖" },
     { key: "settings", label: "Settings", icon: "⚙" },
   ];
 
@@ -80,6 +82,7 @@ export default function AdminConsole() {
     payments: "Payments",
     reports: "Reports & analytics",
     complaints: "Complaints & feedback",
+    disputes: "Moto ride disputes",
     settings: "Platform settings",
   };
 
@@ -125,6 +128,7 @@ export default function AdminConsole() {
             {tab === "payments" && <PaymentsTab />}
             {tab === "reports" && <ReportsTab />}
             {tab === "complaints" && <ComplaintsTab />}
+            {tab === "disputes" && <DisputesTab onToast={setToast} />}
             {tab === "settings" && <SettingsTab onToast={setToast} />}
           </>
         )}
@@ -713,9 +717,95 @@ function ReportsTab() {
   );
 }
 
+// Pickup disputes on moto rides: passenger says "I wasn't picked up", driver
+// contested. The escrow is frozen until an admin picks a side here (uncontested
+// disputes auto-resolve for the passenger and never need this queue).
+function DisputesTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
+  const [rows, setRows] = useState<AdminRideDispute[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api.adminRideDisputes().then(setRows).catch(() => setRows([]));
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const resolve = async (d: AdminRideDispute, outcome: "REFUND_PASSENGER" | "PAY_DRIVER") => {
+    const msg = outcome === "REFUND_PASSENGER"
+      ? `Side with the PASSENGER? ${d.passenger} gets the full ${d.fare !== null ? formatRWF(d.fare) : "fare"} back and ${d.driver} is not paid.`
+      : `Side with the DRIVER? ${d.driver} is paid the fare minus the locked commission; ${d.passenger} gets no refund.`;
+    if (!window.confirm(msg)) return;
+    setBusyId(d.id);
+    try {
+      await api.adminResolveRideDispute(d.id, outcome);
+      onToast({ kind: "success", msg: outcome === "REFUND_PASSENGER" ? "Passenger refunded in full." : "Driver paid out." });
+      load();
+    } catch (e) {
+      onToast({ kind: "error", msg: e instanceof Error ? e.message : "Could not resolve the dispute" });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (!rows) return <Loading />;
+  if (rows.length === 0) {
+    return (
+      <Card>
+        <div style={{ padding: 22, textAlign: "center", color: "#8c8378", fontWeight: 600, fontSize: 13.5 }}>
+          No open ride disputes — passenger no-pickup reports only land here when the driver contests them.
+        </div>
+      </Card>
+    );
+  }
+
+  const fmtT = (iso: string | null) => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {rows.map((d) => (
+        <Card key={d.id}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, flex: 1, minWidth: 220 }}>{d.from} → {d.to}</div>
+            <span style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", borderRadius: 20, padding: "3px 10px", color: d.contested ? "#c2553f" : "#8c8378", background: d.contested ? "#fbeae6" : "#f1ece2" }}>
+              {d.contested ? "Contested — needs verdict" : "Awaiting driver response"}
+            </span>
+            {d.fare !== null && <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: "#ff6a1a" }}>{formatRWF(d.fare)}</span>}
+          </div>
+          <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, lineHeight: 1.7 }}>
+            Passenger <b>{d.passenger}</b> (<span style={{ fontFamily: MONO }}>{d.passengerPhone}</span>) reported no pickup at {fmtT(d.disputedAt)}.<br />
+            Driver <b>{d.driver}</b> (<span style={{ fontFamily: MONO }}>{d.driverPhone}</span>) claimed pickup at {fmtT(d.pickedUpClaimedAt)}{d.contested && <> and contested at {fmtT(d.contestedAt)}</>}.
+            {d.commissionPct !== null && <> Locked commission: {d.commissionPct}%.</>}
+          </div>
+          {d.contested && (
+            <div style={{ display: "flex", gap: 10, marginTop: 13 }}>
+              <button
+                onClick={() => resolve(d, "REFUND_PASSENGER")}
+                disabled={busyId === d.id}
+                style={{ background: "#fff", color: "#c2553f", border: "1px solid #f0d4cc", borderRadius: 11, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
+              >
+                Refund passenger in full
+              </button>
+              <button
+                onClick={() => resolve(d, "PAY_DRIVER")}
+                disabled={busyId === d.id}
+                style={{ background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 11, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
+              >
+                Pay the driver
+              </button>
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 // Platform-wide knobs. Currently: the commission Relay keeps from each
-// completed moto hail (applied at completion time — changing it never
-// rewrites already-settled rides).
+// moto hail. The rate is locked onto each ride the moment its fare is agreed,
+// so changing it here only affects agreements made from now on.
 function SettingsTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
   const [pct, setPct] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
@@ -749,8 +839,8 @@ function SettingsTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
     <Card style={{ maxWidth: 620 }}>
       <CardTitle>Moto ride commission</CardTitle>
       <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, marginBottom: 16, lineHeight: 1.5 }}>
-        Relay keeps this percentage of every completed moto hail; the driver receives the rest when the passenger
-        confirms completion. Applies to rides completed from now on.
+        Relay keeps this percentage of every moto hail; the driver receives the rest when the passenger confirms
+        completion. The rate is locked onto each ride when its fare is agreed, so changes here only affect new agreements.
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <input

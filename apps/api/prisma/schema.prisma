@@ -191,6 +191,12 @@ enum RideRequestStatus {
   CONFIRMED
   IN_PROGRESS
   AWAITING_CONFIRM
+  // the passenger reported "I wasn't picked up" against a ride the driver had
+  // marked as picked up. Escrow is frozen: the passenger can withdraw the
+  // report (mis-click), the driver can acknowledge (back to CONFIRMED,
+  // passenger regains reassign/refund) or contest (admin resolves either way).
+  // An uncontested dispute auto-resolves for the passenger after 10 minutes.
+  DISPUTED
   COMPLETED
   CANCELLED
 }
@@ -226,7 +232,12 @@ model RideRequest {
   pickupDeadline   DateTime?
   pickedUpAt       DateTime?
   completionRequestedAt DateTime?
-  // commission snapshot taken at completion (admin-configurable %)
+  // pickup dispute (see DISPUTED above)
+  disputedAt            DateTime?
+  disputeContestedAt    DateTime?
+  // commission snapshot locked when the fare is agreed — later admin changes
+  // to the platform rate never affect an already-agreed ride
+
   commissionPct    Float?
   commissionAmount Decimal?          @db.Decimal(10, 2)
   refundedAt       DateTime?

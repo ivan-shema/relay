@@ -466,6 +466,104 @@ adminRouter.patch(
   })
 );
 
+// GET /admin/ride-disputes — pickup disputes on moto rides. Contested ones
+// need an admin verdict; uncontested ones are shown for context (they
+// auto-resolve for the passenger after the driver's response window).
+adminRouter.get(
+  "/ride-disputes",
+  asyncHandler(async (_req, res) => {
+    const rides = await prisma.rideRequest.findMany({
+      where: { status: "DISPUTED" },
+      include: { passenger: true, acceptedDriver: { include: { user: true } } },
+      orderBy: { disputedAt: "desc" },
+    });
+    res.json(
+      rides.map((r) => ({
+        id: r.id,
+        from: r.originLabel,
+        to: r.destLabel,
+        fare: r.agreedFare === null ? null : Number(r.agreedFare.toString()),
+        passenger: fullNameOf(r.passenger),
+        passengerPhone: r.passenger.phone,
+        driver: r.acceptedDriver ? fullNameOf(r.acceptedDriver.user) : "—",
+        driverPhone: r.acceptedDriver?.user.phone ?? "—",
+        pickedUpClaimedAt: r.pickedUpAt?.toISOString() ?? null,
+        disputedAt: r.disputedAt?.toISOString() ?? null,
+        contestedAt: r.disputeContestedAt?.toISOString() ?? null,
+        contested: r.disputeContestedAt !== null,
+        commissionPct: r.commissionPct,
+      }))
+    );
+  })
+);
+
+// POST /admin/ride-disputes/:id/resolve — the platform's verdict on a
+// contested pickup dispute. REFUND_PASSENGER cancels the ride and returns the
+// escrow in full; PAY_DRIVER completes it and releases the payout at the
+// commission rate locked when the fare was agreed.
+const zResolveDispute = z.object({ outcome: z.enum(["REFUND_PASSENGER", "PAY_DRIVER"]) });
+adminRouter.post(
+  "/ride-disputes/:id/resolve",
+  asyncHandler(async (req, res) => {
+    const { outcome } = zResolveDispute.parse(req.body);
+    const fallbackPct = await getMotoCommissionPct();
+
+    const result = await prisma.$transaction(async (tx) => {
+      const ride = await tx.rideRequest.findUnique({
+        where: { id: req.params.id },
+        include: { passenger: true, acceptedDriver: { include: { user: true } } },
+      });
+      if (!ride || ride.status !== "DISPUTED") throw new HttpError(404, "Dispute not found or already resolved");
+      const fare = ride.agreedFare;
+      const driver = ride.acceptedDriver;
+      if (!fare || !driver) throw new HttpError(409, "Ride has no funded fare/driver");
+      const route = `${ride.originLabel} → ${ride.destLabel}`;
+
+      if (outcome === "REFUND_PASSENGER") {
+        await tx.rideRequest.update({
+          where: { id: ride.id },
+          data: { status: "CANCELLED", refundedAt: ride.paidAt ? new Date() : undefined },
+        });
+        if (ride.paidAt) {
+          await tx.user.update({
+            where: { id: ride.passengerId },
+            data: { walletBalance: new Prisma.Decimal(ride.passenger.walletBalance).plus(fare) },
+          });
+          await tx.walletTransaction.create({
+            data: { userId: ride.passengerId, kind: "CREDIT", amount: fare, label: `Moto ride refund (dispute) · ${route}` },
+          });
+        }
+        return { outcome, route, passengerId: ride.passengerId, driverUserId: driver.userId, amount: Number(fare.toString()) };
+      }
+
+      const pct = ride.commissionPct ?? fallbackPct;
+      const commission = ride.commissionAmount ?? new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2);
+      const driverShare = new Prisma.Decimal(fare).minus(commission);
+      await tx.rideRequest.update({
+        where: { id: ride.id },
+        data: { status: "COMPLETED", commissionPct: pct, commissionAmount: commission },
+      });
+      await tx.user.update({
+        where: { id: driver.userId },
+        data: { walletBalance: new Prisma.Decimal(driver.user.walletBalance).plus(driverShare) },
+      });
+      await tx.walletTransaction.create({
+        data: { userId: driver.userId, kind: "CREDIT", amount: driverShare, label: `Moto ride payout (dispute resolved) · ${route}` },
+      });
+      return { outcome, route, passengerId: ride.passengerId, driverUserId: driver.userId, amount: Number(driverShare.toString()) };
+    });
+
+    if (result.outcome === "REFUND_PASSENGER") {
+      await notify(result.passengerId, "Dispute resolved — refunded", `Relay reviewed the dispute on ${result.route} and refunded ${formatRWF(result.amount)} to your wallet.`);
+      await notify(result.driverUserId, "Dispute resolved", `Relay reviewed the dispute on ${result.route} in the passenger's favour — no payout was made. Repeated no-pickups can lead to suspension.`);
+    } else {
+      await notify(result.driverUserId, "Dispute resolved — paid", `Relay reviewed the dispute on ${result.route} in your favour: ${formatRWF(result.amount)} was added to your wallet.`);
+      await notify(result.passengerId, "Dispute resolved", `Relay reviewed the dispute on ${result.route} and confirmed the ride took place — the driver was paid. Contact support if you disagree.`);
+    }
+    res.json({ resolved: true, outcome: result.outcome });
+  })
+);
+
 // POST /admin/complaints/:id/resolve
 adminRouter.post(
   "/complaints/:id/resolve",

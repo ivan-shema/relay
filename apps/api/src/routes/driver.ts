@@ -8,6 +8,8 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { notify } from "../lib/notify";
 import { normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
+import { getMotoCommissionPct } from "../lib/settings";
+import { autoResolveStaleDispute } from "./rides";
 
 export const driverRouter = Router();
 
@@ -126,7 +128,7 @@ function rideMockDistanceKm(id: string): number {
   return Math.round((3 + (h % 27)) * 10) / 100;
 }
 
-const DRIVER_ACTIVE_RIDE_STATUSES = ["ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM"] as const;
+const DRIVER_ACTIVE_RIDE_STATUSES = ["ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
 
 // GET /driver/moto-requests — open hails this moto can take (broadcasts +
 // requests targeted at them, with their own pending counter-offer attached),
@@ -135,7 +137,11 @@ driverRouter.get(
   "/moto-requests",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
-    const [open, current] = await Promise.all([
+    // Current platform rate — for previewing the payout on rides that don't
+    // have a locked rate yet. Once a price is agreed, the rate is snapshotted
+    // on the ride (commissionPct) and later admin changes don't touch it.
+    const platformCommissionPct = await getMotoCommissionPct();
+    let [open, current] = await Promise.all([
       prisma.rideRequest.findMany({
         where: { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: driver.id }] },
         include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
@@ -147,26 +153,46 @@ driverRouter.get(
         include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
       }),
     ]);
-    const map = (r: (typeof open)[number]) => ({
-      id: r.id,
-      status: r.status,
-      passenger: fullNameOf(r.passenger),
-      passengerPhone: r.passenger.phone,
-      from: r.originLabel,
-      to: r.destLabel,
-      offerFare: r.offerFare === null ? null : dec(r.offerFare),
-      agreedFare: r.agreedFare === null ? null : dec(r.agreedFare),
-      departAt: r.departAt?.toISOString() ?? null,
-      // funded re-broadcast: accepting goes straight to pickup, price locked
-      prepaid: Boolean(r.paidAt),
-      pickupDeadline: r.pickupDeadline?.toISOString() ?? null,
-      pickupOverdue: r.status === "CONFIRMED" && r.pickupDeadline !== null && r.pickupDeadline.getTime() < Date.now(),
-      myOffer: r.offers[0] ? dec(r.offers[0].amount) : null,
-      targeted: r.targetDriverId === driver.id,
-      distanceKm: rideMockDistanceKm(r.id),
-      requestedAt: r.createdAt.toISOString(),
-    });
-    res.json({ open: open.map(map), current: current ? map(current) : null });
+    // A dispute the driver never answered resolves for the passenger.
+    if (current && (await autoResolveStaleDispute(current))) {
+      current = await prisma.rideRequest.findUnique({
+        where: { id: current.id },
+        include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
+      });
+    }
+    const map = (r: NonNullable<typeof current>) => {
+      // Fee transparency: the driver always sees what Relay takes and what
+      // lands in their wallet. Locked rate wins; otherwise the current rate.
+      const pct = r.commissionPct ?? platformCommissionPct;
+      const fare = r.agreedFare !== null ? dec(r.agreedFare) : r.offerFare !== null ? dec(r.offerFare) : null;
+      const commission = fare === null ? null : Math.round(fare * pct) / 100;
+      return {
+        id: r.id,
+        status: r.status,
+        passenger: fullNameOf(r.passenger),
+        passengerPhone: r.passenger.phone,
+        from: r.originLabel,
+        to: r.destLabel,
+        offerFare: r.offerFare === null ? null : dec(r.offerFare),
+        agreedFare: r.agreedFare === null ? null : dec(r.agreedFare),
+        departAt: r.departAt?.toISOString() ?? null,
+        // funded re-broadcast: accepting goes straight to pickup, price locked
+        prepaid: Boolean(r.paidAt),
+        pickupDeadline: r.pickupDeadline?.toISOString() ?? null,
+        pickupOverdue: r.status === "CONFIRMED" && r.pickupDeadline !== null && r.pickupDeadline.getTime() < Date.now(),
+        myOffer: r.offers[0] ? dec(r.offers[0].amount) : null,
+        targeted: r.targetDriverId === driver.id,
+        distanceKm: rideMockDistanceKm(r.id),
+        requestedAt: r.createdAt.toISOString(),
+        disputedAt: r.disputedAt?.toISOString() ?? null,
+        disputeContested: r.disputeContestedAt !== null,
+        commissionPct: pct,
+        commissionLocked: r.commissionPct !== null,
+        commissionAmount: commission,
+        netPayout: fare === null || commission === null ? null : Math.round((fare - commission) * 100) / 100,
+      };
+    };
+    res.json({ open: open.map(map), current: current ? map(current) : null, platformCommissionPct });
   })
 );
 
@@ -195,6 +221,11 @@ driverRouter.post(
     if (!fare) throw new HttpError(409, "The passenger didn't propose a price — send them your offer instead");
 
     const now = new Date();
+    // Snapshot the commission the moment the price is agreed: this is the rate
+    // the driver saw when accepting, and later admin changes must not move it.
+    // A prepaid re-broadcast already carries the rate locked at the original
+    // agreement, so it's left untouched.
+    const pct = await getMotoCommissionPct();
     const claimed = await prisma.rideRequest.updateMany({
       where: {
         id: ride.id,
@@ -208,7 +239,14 @@ driverRouter.post(
             acceptedAt: now,
             pickupDeadline: new Date(Math.max(now.getTime(), ride.departAt?.getTime() ?? 0) + 10 * 60_000),
           }
-        : { status: "ACCEPTED", acceptedDriverId: driver.id, acceptedAt: now, agreedFare: fare },
+        : {
+            status: "ACCEPTED",
+            acceptedDriverId: driver.id,
+            acceptedAt: now,
+            agreedFare: fare,
+            commissionPct: pct,
+            commissionAmount: new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2),
+          },
     });
     if (claimed.count === 0) throw new HttpError(409, "Too late — another driver already took this ride");
 
@@ -265,7 +303,7 @@ driverRouter.post(
 
     await prisma.rideRequest.update({
       where: { id: ride.id },
-      data: { status: "OPEN", acceptedDriverId: null, acceptedAt: null, agreedFare: null, targetDriverId: null },
+      data: { status: "OPEN", acceptedDriverId: null, acceptedAt: null, agreedFare: null, targetDriverId: null, commissionPct: null, commissionAmount: null },
     });
     await notify(ride.passengerId, "Driver withdrew", `${fullNameOf(driver.user)} can't take ${ride.originLabel} → ${ride.destLabel} — your request is open to other motos again.`);
     res.json({ withdrawn: true });
@@ -302,6 +340,60 @@ driverRouter.post(
     await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: "AWAITING_CONFIRM", completionRequestedAt: new Date() } });
     await notify(ride.passengerId, "Confirm your ride", `${fullNameOf(driver.user)} marked ${ride.originLabel} → ${ride.destLabel} as completed — confirm it to release their payment.`);
     res.json({ requested: true });
+  })
+);
+
+// POST /driver/moto-requests/:id/acknowledge-no-pickup — the passenger's
+// report was right (a mistaken or premature "picked up" tap): the ride goes
+// back to CONFIRMED with the window expired, so the passenger immediately gets
+// the keep / re-broadcast / refund choices.
+driverRouter.post(
+  "/moto-requests/:id/acknowledge-no-pickup",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.acceptedDriverId !== driver.id) throw new HttpError(404, "Ride not found");
+
+    const done = await prisma.rideRequest.updateMany({
+      where: { id: ride.id, status: "DISPUTED" },
+      data: {
+        status: "CONFIRMED",
+        pickedUpAt: null,
+        completionRequestedAt: null,
+        disputedAt: null,
+        disputeContestedAt: null,
+        pickupDeadline: new Date(),
+      },
+    });
+    if (done.count === 0) throw new HttpError(409, "There is no open pickup dispute on this ride");
+
+    await notify(ride.passengerId, "Driver confirmed your report", `The driver agreed you weren't picked up for ${ride.originLabel} → ${ride.destLabel} — you can keep them, hand the ride to another moto, or cancel for a full refund.`);
+    res.json({ acknowledged: true });
+  })
+);
+
+// POST /driver/moto-requests/:id/contest-dispute — the driver insists the
+// pickup DID happen. The escrow stays frozen and the case goes to the platform:
+// an admin resolves it either way from the Disputes queue.
+driverRouter.post(
+  "/moto-requests/:id/contest-dispute",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.acceptedDriverId !== driver.id) throw new HttpError(404, "Ride not found");
+
+    const done = await prisma.rideRequest.updateMany({
+      where: { id: ride.id, status: "DISPUTED", disputeContestedAt: null },
+      data: { disputeContestedAt: new Date() },
+    });
+    if (done.count === 0) throw new HttpError(409, "There is no open pickup dispute to contest on this ride");
+
+    await notify(ride.passengerId, "Driver contested your report", `${fullNameOf(driver.user)} says the pickup for ${ride.originLabel} → ${ride.destLabel} did happen. Relay will review and resolve — the money stays safely held until then.`);
+    const admins = await prisma.user.findMany({ where: { role: "ADMIN" }, select: { id: true } });
+    for (const a of admins) {
+      await notify(a.id, "Ride dispute needs review", `Pickup dispute on ${ride.originLabel} → ${ride.destLabel}: passenger says no pickup, driver contests. Resolve it in Admin → Disputes.`);
+    }
+    res.json({ contested: true });
   })
 );
 

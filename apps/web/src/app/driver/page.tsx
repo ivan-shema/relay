@@ -287,14 +287,15 @@ function MotoHailSection({ online }: { online: boolean }) {
       </div>
 
       {current ? (
-        <div style={{ border: `2px solid ${current.pickupOverdue ? "#c2553f" : "#1f9d6b"}`, borderRadius: 15, padding: 15 }}>
+        <div style={{ border: `2px solid ${current.pickupOverdue || current.status === "DISPUTED" ? "#c2553f" : "#1f9d6b"}`, borderRadius: 15, padding: 15 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
-            <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: current.pickupOverdue ? "#c2553f" : "#1f9d6b" }} />
-            <span style={{ fontSize: 11.5, fontWeight: 800, textTransform: "uppercase", color: current.pickupOverdue ? "#c2553f" : "#1f9d6b" }}>
+            <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: current.pickupOverdue || current.status === "DISPUTED" ? "#c2553f" : "#1f9d6b" }} />
+            <span style={{ fontSize: 11.5, fontWeight: 800, textTransform: "uppercase", color: current.pickupOverdue || current.status === "DISPUTED" ? "#c2553f" : "#1f9d6b" }}>
               {current.status === "ACCEPTED" && "Waiting for passenger payment"}
               {current.status === "CONFIRMED" && (current.pickupOverdue ? "Pickup overdue!" : "Paid — go pick up")}
               {current.status === "IN_PROGRESS" && "Ride in progress"}
               {current.status === "AWAITING_CONFIRM" && "Waiting for passenger confirmation"}
+              {current.status === "DISPUTED" && "Pickup disputed!"}
             </span>
           </div>
           <div style={{ fontSize: 14.5, fontWeight: 700 }}>{current.from} → {current.to}</div>
@@ -302,6 +303,13 @@ function MotoHailSection({ online }: { online: boolean }) {
             {current.passenger} · <span style={{ fontFamily: MONO }}>{current.passengerPhone}</span>
             {current.agreedFare !== null && <> · fare <span style={{ fontFamily: MONO, color: "#ff6a1a", fontWeight: 700 }}>{formatRWF(current.agreedFare)}</span></>}
           </div>
+          {current.netPayout !== null && current.commissionAmount !== null && (
+            <div style={{ marginTop: 8, background: "#faf7f1", border: "1px solid #f1ece2", borderRadius: 11, padding: "8px 12px", fontSize: 12, fontWeight: 600, color: "#8c8378" }}>
+              Relay fee {current.commissionPct}% (−{formatRWF(current.commissionAmount)}) · you receive{" "}
+              <span style={{ fontFamily: MONO, color: "#1f9d6b", fontWeight: 800 }}>{formatRWF(current.netPayout)}</span>
+              {current.commissionLocked && <span title="The rate was locked when the price was agreed — later changes don't affect this ride"> · rate locked&nbsp;🔒</span>}
+            </div>
+          )}
 
           {current.status === "ACCEPTED" && (
             <>
@@ -338,6 +346,34 @@ function MotoHailSection({ online }: { online: boolean }) {
               The passenger confirms on their side — your payout lands in your wallet right after.
             </div>
           )}
+
+          {current.status === "DISPUTED" && (
+            <>
+              <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 11, padding: "9px 12px", fontSize: 12, fontWeight: 700, marginTop: 10 }}>
+                {current.disputeContested
+                  ? "You contested the report — Relay is reviewing the ride. The fare stays held until it's resolved."
+                  : "The passenger reported they were NOT picked up. Respond now — if you don't within 10 minutes, the ride is returned to them."}
+              </div>
+              {!current.disputeContested && (
+                <div style={{ display: "flex", gap: 8, marginTop: 11 }}>
+                  <button
+                    onClick={() => { if (window.confirm("Confirm you DID pick up this passenger? Relay will review the dispute — false claims can lead to suspension.")) run(current.id, () => api.driverContestDispute(current.id)); }}
+                    disabled={busyId === current.id}
+                    style={{ ...smallBtn("#1b1714"), flex: 1 }}
+                  >
+                    I DID pick them up
+                  </button>
+                  <button
+                    onClick={() => run(current.id, () => api.driverAcknowledgeNoPickup(current.id))}
+                    disabled={busyId === current.id}
+                    style={{ ...smallBtn("#fff", "#c2553f", "1px solid #f0d4cc"), flex: 1 }}
+                  >
+                    They&apos;re right — no pickup yet
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       ) : !online ? (
         <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>Go online to receive hails from passengers nearby.</div>
@@ -364,6 +400,11 @@ function MotoHailSection({ online }: { online: boolean }) {
                         : <> · <span style={{ color: "#ff6a1a", fontWeight: 700 }}>no price — quote yours</span></>}
                     {r.myOffer !== null && <> · you offered <span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(r.myOffer)}</span></>}
                   </div>
+                  {r.netPayout !== null && (
+                    <div style={{ fontSize: 11.5, fontWeight: 700, color: "#1f9d6b", marginTop: 2 }}>
+                      You&apos;d receive {formatRWF(r.netPayout)} after the {r.commissionPct}% Relay fee{r.commissionLocked ? " (locked)" : ""}
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: "flex", gap: 7, flex: "none" }}>
                   {(r.prepaid || r.offerFare !== null) && (
@@ -390,6 +431,11 @@ function MotoHailSection({ online }: { online: boolean }) {
                   <button onClick={() => sendCounter(r.id)} disabled={busyId === r.id || !counterAmount} style={smallBtn("#1b1714")}>
                     {busyId === r.id ? "…" : "Send offer"}
                   </button>
+                </div>
+              )}
+              {counterFor === r.id && Number(counterAmount) > 0 && (
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", marginTop: 6 }}>
+                  At this price you&apos;d receive ≈ {formatRWF(Math.round(Number(counterAmount) * (100 - r.commissionPct)) / 100)} after the {r.commissionPct}% Relay fee
                 </div>
               )}
             </div>
