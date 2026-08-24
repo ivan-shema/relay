@@ -9,6 +9,45 @@ export const roleEnum = z.enum(["PASSENGER", "DRIVER", "OPERATOR", "ADMIN"]);
 export const modeEnum = z.enum(["BUS", "MOTO", "RIDE"]);
 export const paymentMethodEnum = z.enum(["MOBILE_MONEY", "WALLET", "QR"]);
 
+/* ---------------- Phone numbers (Rwanda) ---------------- */
+// Rwandan mobile numbers only — MTN (078/079) and Airtel (072/073). Users may
+// type either the international form (+250 7XX XXX XXX, 12 chars) or the local
+// form (07XX XXX XXX, 10 digits); spaces, dashes, dots and parentheses are
+// tolerated and stripped. Everything is STORED in the canonical +2507XXXXXXXX
+// form so lookups (login by phone, uniqueness) match regardless of how the
+// number was typed.
+export const rwandaPhoneRegex = /^(\+250|0)7[2389]\d{7}$/;
+export const PHONE_ERROR = "Enter a Rwandan mobile number: +2507XXXXXXXX or 07XXXXXXXX";
+
+export function normalizeRwandaPhone(raw: string): string | null {
+  const compact = raw.trim().replace(/[\s\-().]/g, "");
+  if (!rwandaPhoneRegex.test(compact)) return null;
+  return "+250" + compact.slice(-9);
+}
+
+// Validates + normalizes in one step; the parsed value is always canonical.
+export const phoneSchema = z.string().transform((v, ctx) => {
+  const n = normalizeRwandaPhone(v);
+  if (!n) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: PHONE_ERROR });
+    return z.NEVER;
+  }
+  return n;
+});
+
+// "Phone or email" fields: a valid email passes through, a phone is normalized.
+const emailSchema = z.string().trim().email();
+export const phoneOrEmailSchema = z.string().transform((v, ctx) => {
+  const e = emailSchema.safeParse(v);
+  if (e.success) return e.data;
+  const n = normalizeRwandaPhone(v);
+  if (!n) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid email or Rwandan mobile number" });
+    return z.NEVER;
+  }
+  return n;
+});
+
 /* ---------------- Auth ---------------- */
 export const loginSchema = z.object({
   identifier: z.string().min(3, "Enter your email or phone"),
@@ -21,7 +60,7 @@ export const registerSchema = z.object({
   firstName: z.string().min(2, "Enter your first name"),
   lastName: z.string().min(2, "Enter your last name"),
   email: z.string().email("Enter a valid email"),
-  phone: z.string().min(6, "Enter a valid phone number"),
+  phone: phoneSchema,
   password: z.string().min(8, "At least 8 characters"),
 });
 
@@ -39,7 +78,7 @@ const modesField = z
 // are validated server-side (PDF/JPEG/PNG/WebP, no GIFs).
 export const operatorOnboardingSchema = z.object({
   companyName: z.string().min(2, "Enter your company name"),
-  contactInfo: z.string().min(6, "Enter a company contact phone or email"),
+  contactInfo: phoneOrEmailSchema,
   idNumber: z.string().min(5, "Enter your ID or passport number"),
   modes: modesField,
 });
@@ -97,7 +136,7 @@ export const createVehicleSchema = z
 export const inviteDriverSchema = z.object({
   firstName: z.string().min(2, "Enter a first name"),
   lastName: z.string().min(2, "Enter a last name"),
-  phone: z.string().min(6, "Enter a phone number"),
+  phone: phoneSchema,
   email: z.union([z.string().email("Invalid email"), z.literal("")]).optional(),
   idNumber: z.string().min(5, "Enter the driver's ID number"),
   licenseNumber: z.string().min(4, "Enter the driving licence number"),
@@ -107,7 +146,7 @@ export const createUserSchema = z
   .object({
     firstName: z.string().min(2, "Enter a first name"),
     lastName: z.string().min(2, "Enter a last name"),
-    phone: z.string().min(6, "Enter a phone number"),
+    phone: phoneSchema,
     email: z.string().email("Enter a valid email"),
     role: roleEnum.default("PASSENGER"),
     // Required when role === OPERATOR (admin-created operators are VERIFIED
@@ -173,7 +212,7 @@ export const updateProfileSchema = z.object({
   firstName: z.string().min(2, "Enter your first name"),
   lastName: z.string().min(2, "Enter your last name"),
   email: z.string().email("Enter a valid email"),
-  phone: z.string().min(6, "Enter a valid phone number"),
+  phone: phoneSchema,
 });
 
 export const changePasswordSchema = z
@@ -188,25 +227,15 @@ export const changePasswordSchema = z
   });
 
 /* ---------------- Passenger ---------------- */
-// MTN MoMo (078/079) or Airtel Money (072/073), with optional +250/250 prefix.
-export const momoNumberRegex = /^(\+?250|0)?7[2389]\d{7}$/;
-
 export const topUpSchema = z.object({
   amount: z.coerce
     .number({ invalid_type_error: "Enter an amount" })
     .min(100, "Minimum top-up is RWF 100")
     .max(1_000_000, "That's too much"),
   // The number the MoMo/Airtel charge is sent to; empty = the account's phone.
-  // Spaces/dashes are tolerated ("+250 788 123 456") and stripped before check.
-  phone: z
-    .union([
-      z
-        .string()
-        .transform((v) => v.replace(/[\s-]/g, ""))
-        .pipe(z.string().regex(momoNumberRegex, "Enter a valid MTN MoMo or Airtel Money number")),
-      z.literal(""),
-    ])
-    .optional(),
+  // Same Rwandan-mobile rules as every other phone field (MTN 078/079,
+  // Airtel 072/073) — those are exactly the MoMo/Airtel Money networks.
+  phone: z.union([z.literal(""), phoneSchema]).optional(),
 });
 
 export const savedPlaceSchema = z.object({

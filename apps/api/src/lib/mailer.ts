@@ -26,3 +26,24 @@ export async function sendMail(to: string, subject: string, text: string): Promi
   }
   await mailer().sendMail({ from: env.mailFrom, to, subject, text });
 }
+
+// Login details for an account somebody else created (admin "Add user",
+// operator driver invite). Fire-and-forget — call AFTER the creating
+// transaction commits: a mail failure is logged, never surfaced, since the
+// account exists either way and the password can be reset.
+export function sendCredentialsEmail(to: { email: string; firstName: string }, opts: { tempPassword: string; roleLabel: string; createdBy: string }): void {
+  const text = [
+    `Hi ${to.firstName},`,
+    "",
+    `${opts.createdBy} created a Relay ${opts.roleLabel} account for you.`,
+    "",
+    `Sign in at ${env.webOrigin}/auth with:`,
+    `  Email:    ${to.email}`,
+    `  Password: ${opts.tempPassword}`,
+    "",
+    "This is a temporary password — please change it from your profile settings after your first sign-in.",
+    "",
+    "— Relay",
+  ].join("\n");
+  void sendMail(to.email, "Your Relay account", text).catch((e) => console.error(`[mail] failed to send credentials to ${to.email}:`, e));
+}

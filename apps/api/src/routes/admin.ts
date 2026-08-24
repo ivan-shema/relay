@@ -4,7 +4,8 @@ import { formatRWF, createUserSchema } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { hashPassword } from "../lib/auth";
+import { hashPassword, generateTempPassword } from "../lib/auth";
+import { sendCredentialsEmail } from "../lib/mailer";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
 import { notify } from "../lib/notify";
@@ -130,14 +131,16 @@ adminRouter.get(
 
 // POST /admin/users — create a platform user. Creating an OPERATOR here also
 // creates their company record, already VERIFIED (admin creation is itself
-// the trust/approval signal — no pending step).
+// the trust/approval signal — no pending step). The account gets a random
+// temporary password which is emailed to the new user once the row commits.
 adminRouter.post(
   "/users",
   asyncHandler(async (req, res) => {
     const body = createUserSchema.parse(req.body);
     const existing = await prisma.user.findFirst({ where: { OR: [{ email: body.email }, { phone: body.phone }] } });
     if (existing) throw new HttpError(409, "Email or phone already registered");
-    const passwordHash = await hashPassword("password123");
+    const tempPassword = generateTempPassword();
+    const passwordHash = await hashPassword(tempPassword);
     const user = await prisma.$transaction(async (tx) => {
       const u = await tx.user.create({
         data: { firstName: body.firstName, lastName: body.lastName, email: body.email, phone: body.phone, role: body.role, passwordHash, phoneVerified: true },
@@ -152,7 +155,8 @@ adminRouter.post(
       }
       return u;
     });
-    res.status(201).json({ id: user.id });
+    sendCredentialsEmail(user, { tempPassword, roleLabel: body.role.toLowerCase(), createdBy: "A Relay administrator" });
+    res.status(201).json({ id: user.id, credentialsSentTo: user.email });
   })
 );
 

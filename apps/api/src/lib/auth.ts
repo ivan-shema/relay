@@ -1,3 +1,4 @@
+import { randomInt } from "crypto";
 import bcrypt from "bcryptjs";
 import jwt, { type SignOptions } from "jsonwebtoken";
 import type { UserRole } from "@relay/shared";
@@ -14,6 +15,16 @@ export function hashPassword(plain: string): Promise<string> {
 
 export function verifyPassword(plain: string, hash: string): Promise<boolean> {
   return bcrypt.compare(plain, hash);
+}
+
+// Temporary password for accounts created on someone's behalf (admin "Add
+// user", operator driver invite). Unambiguous alphabet — no 0/O or 1/l/I —
+// because it gets read off an email or passed on verbally.
+const TEMP_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+export function generateTempPassword(length = 10): string {
+  let out = "";
+  for (let i = 0; i < length; i++) out += TEMP_ALPHABET[randomInt(TEMP_ALPHABET.length)];
+  return out;
 }
 
 export function signAccessToken(payload: TokenPayload): string {

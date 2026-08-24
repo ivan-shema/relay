@@ -399,9 +399,16 @@ function ApprovalReviewPage({ id, onClose, onNavigate, onToast }: { id: string; 
 function UsersTab() {
   const { data, page, setPage, reloadFirst } = usePaged<AdminUser>(useCallback((pg) => api.adminUsers(pg), []));
   const [modal, setModal] = useState(false);
+  const [created, setCreated] = useState<string | null>(null);
   if (!data) return <Loading />;
   return (
     <Card>
+      {created && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, background: "#e7f6ee", border: "1px solid #bfe8d2", borderRadius: 12, padding: "11px 14px", marginBottom: 14, fontSize: 13, fontWeight: 700 }}>
+          <span style={{ flex: 1 }}>User created — a temporary password was emailed to <span style={{ fontFamily: MONO }}>{created}</span>.</span>
+          <button onClick={() => setCreated(null)} style={{ background: "none", border: "none", color: "#8c8378", fontSize: 16, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+      )}
       {modal && (
         <FormModal
           title="Add user"
@@ -416,7 +423,7 @@ function UsersTab() {
             { name: "companyName", label: "Company name", placeholder: "Kigali Bus Co.", showIf: (v) => v.role === "OPERATOR" },
             { name: "modes", label: "Primary mode", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }], showIf: (v) => v.role === "OPERATOR" },
           ]}
-          onSubmit={async (v) => { const d = v as CreateUserInput; await api.adminAddUser({ firstName: d.firstName, lastName: d.lastName, phone: d.phone, email: d.email, role: d.role, companyName: d.companyName, modes: d.modes }); reloadFirst(); }}
+          onSubmit={async (v) => { const d = v as CreateUserInput; const r = await api.adminAddUser({ firstName: d.firstName, lastName: d.lastName, phone: d.phone, email: d.email, role: d.role, companyName: d.companyName, modes: d.modes }); setCreated(r.credentialsSentTo); reloadFirst(); }}
           onClose={() => setModal(false)}
         />
       )}

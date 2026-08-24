@@ -428,6 +428,9 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
   const [history, setHistory] = useState<OperatorDriverTrip[]>([]);
   const [lookups, setLookups] = useState<{ vehicles: { value: string; label: string }[]; trips: { value: string; label: string }[] }>({ vehicles: [], trips: [] });
   const [inviteModal, setInviteModal] = useState(false);
+  // Shown once after an invite: where the login details went, or — for a
+  // driver without an email — the temp password the operator must pass on.
+  const [invited, setInvited] = useState<{ name: string; phone: string; credentialsSentTo: string | null; tempPassword?: string } | null>(null);
   const [action, setAction] = useState<"vehicle" | "trip" | null>(null);
 
   const loadDetail = useCallback((id: string) => {
@@ -607,11 +610,28 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
             fd.append("licenseNumber", d.licenseNumber);
             fd.append("idDocument", d.idDocument);
             fd.append("licenseDocument", d.licenseDocument);
-            await api.operatorInviteDriver(fd);
+            const r = await api.operatorInviteDriver(fd);
+            setInvited({ name: `${d.firstName} ${d.lastName}`, phone: d.phone, credentialsSentTo: r.credentialsSentTo, tempPassword: r.tempPassword });
             reloadFirst();
           }}
           onClose={() => setInviteModal(false)}
         />
+      )}
+      {invited && (
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start", background: invited.tempPassword ? "#fff5e8" : "#e7f6ee", border: `1px solid ${invited.tempPassword ? "#f3d9b8" : "#bfe8d2"}`, borderRadius: 12, padding: "12px 14px", marginBottom: 14, fontSize: 13 }}>
+          <div style={{ flex: 1 }}>
+            {invited.tempPassword ? (
+              <>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Share these login details with {invited.name} — they are shown only once.</div>
+                <div style={{ fontFamily: MONO, fontSize: 12.5 }}>Phone: {invited.phone} · Temporary password: <b>{invited.tempPassword}</b></div>
+                <div style={{ fontSize: 12, color: "#8c8378", marginTop: 4 }}>No email was given, so nothing was sent. The driver signs in with their phone number and should change the password after the first sign-in.</div>
+              </>
+            ) : (
+              <div style={{ fontWeight: 700 }}>{invited.name} added — a temporary password was emailed to <span style={{ fontFamily: MONO }}>{invited.credentialsSentTo}</span>.</div>
+            )}
+          </div>
+          <button onClick={() => setInvited(null)} style={{ background: "none", border: "none", color: "#8c8378", fontSize: 16, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
       )}
       <CardTitle right={<AccentButton onClick={() => setInviteModal(true)}>+ Invite driver</AccentButton>}>Drivers · {list.total}</CardTitle>
       <TableHead cols={["Driver", "Vehicle", "Trips", "Rating", "Revenue", "Status", ""]} template="1.2fr 1.4fr .6fr .6fr .8fr .9fr 24px" />

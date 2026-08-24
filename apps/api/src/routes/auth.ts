@@ -7,6 +7,7 @@ import {
   verifyOtpSchema,
   forgotSchema,
   resetSchema,
+  normalizeRwandaPhone,
 } from "@relay/shared";
 import { prisma } from "../prisma";
 import { env } from "../env";
@@ -51,6 +52,15 @@ function issueTokens(user: { id: string; role: AuthUser["role"] }): {
     accessToken: signAccessToken(payload),
     refreshToken: signRefreshToken(payload),
   };
+}
+
+// "Email or phone" lookups: phones are stored canonically (+2507XXXXXXXX), so
+// a locally-typed 07… must be normalized before matching. The raw value is
+// still tried so rows that predate normalization keep working.
+function identifierWhere(identifier: string) {
+  const id = identifier.trim();
+  const phone = normalizeRwandaPhone(id);
+  return { OR: [{ email: id }, { phone: id }, ...(phone ? [{ phone }] : [])] };
 }
 
 // Generate + "send" an OTP (mock: logged to console).
@@ -104,9 +114,7 @@ authRouter.post(
   "/login",
   asyncHandler(async (req, res) => {
     const data = loginSchema.parse(req.body);
-    const user = await prisma.user.findFirst({
-      where: { OR: [{ email: data.identifier }, { phone: data.identifier }] },
-    });
+    const user = await prisma.user.findFirst({ where: identifierWhere(data.identifier) });
     if (!user || !(await verifyPassword(data.password, user.passwordHash))) {
       throw new HttpError(401, "Invalid credentials");
     }
@@ -142,9 +150,7 @@ authRouter.post(
   "/forgot-password",
   asyncHandler(async (req, res) => {
     const { identifier } = forgotSchema.parse(req.body);
-    const user = await prisma.user.findFirst({
-      where: { OR: [{ email: identifier }, { phone: identifier }] },
-    });
+    const user = await prisma.user.findFirst({ where: identifierWhere(identifier) });
     // Always 200 to avoid account enumeration.
     if (user) await issueOtp(user.id, "RESET_PASSWORD");
     res.json({ sent: true, userId: user?.id ?? null });

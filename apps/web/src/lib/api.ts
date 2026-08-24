@@ -317,13 +317,13 @@ export const api = {
   operatorAddRoute: (body: { origin: string; destination: string; distanceKm?: number }) => request<{ id: string; name: string }>("/operator/routes", { method: "POST", body, auth: true }),
   operatorAddDeparture: (body: { routeId: string; fare: number; departInMinutes?: number; durationMinutes?: number; capacity?: number; mode?: string; vehicleId?: string; driverId?: string }) => request<{ id: string }>("/operator/departures", { method: "POST", body, auth: true }),
   // multipart: KYC fields + ID document + driving licence document
-  operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string }>("/operator/drivers/invite", formData, true),
+  operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string; credentialsSentTo: string | null; tempPassword?: string }>("/operator/drivers/invite", formData, true),
   operatorWithdraw: () => request<{ amount: number; reference: string; status: TransferStatus }>("/operator/payout", { method: "POST", auth: true }),
   operatorPayoutStatus: (reference: string) => request<{ status: TransferStatus; amount: number; reference: string }>(`/operator/payout/${reference}/status`, { auth: true }),
 
   // ---- admin writes ----
   adminAddUser: (body: { firstName: string; lastName: string; phone: string; email: string; role: string; companyName?: string; modes?: string[] }) =>
-    request<{ id: string }>("/admin/users", { method: "POST", body, auth: true }),
+    request<{ id: string; credentialsSentTo: string }>("/admin/users", { method: "POST", body, auth: true }),
 
   // authed KYC document — returns an object URL + mime for inline preview.
   // Caller is responsible for revoking the URL when done.

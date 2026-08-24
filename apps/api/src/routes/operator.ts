@@ -13,7 +13,8 @@ import {
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { hashPassword } from "../lib/auth";
+import { hashPassword, generateTempPassword } from "../lib/auth";
+import { sendCredentialsEmail } from "../lib/mailer";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
 import { upload, requireFile } from "../lib/uploads";
@@ -391,11 +392,15 @@ operatorRouter.post(
     const idDocument = requireFile(req, "idDocument");
     const licenseDocument = requireFile(req, "licenseDocument");
 
-    const email = body.email && body.email.length > 0 ? body.email : `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
+    // Without an email the driver gets a synthetic, undeliverable address and
+    // the temp password is returned to the operator to hand over in person.
+    const hasEmail = !!body.email && body.email.length > 0;
+    const email = hasEmail ? body.email! : `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
     const existing = await prisma.user.findFirst({ where: { OR: [{ email }, { phone: body.phone }] } });
     if (existing) throw new HttpError(409, "Phone or email already registered");
 
-    const passwordHash = await hashPassword("password123");
+    const tempPassword = generateTempPassword();
+    const passwordHash = await hashPassword(tempPassword);
     const driver = await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", phoneVerified: false },
@@ -411,7 +416,11 @@ operatorRouter.post(
       });
       return d;
     });
-    res.status(201).json({ id: driver.id });
+    if (hasEmail) {
+      const op = await prisma.operator.findUnique({ where: { id: opId } });
+      sendCredentialsEmail({ email, firstName: body.firstName }, { tempPassword, roleLabel: "driver", createdBy: op?.companyName ?? "Your operator" });
+    }
+    res.status(201).json({ id: driver.id, credentialsSentTo: hasEmail ? email : null, tempPassword: hasEmail ? undefined : tempPassword });
   })
 );
 
