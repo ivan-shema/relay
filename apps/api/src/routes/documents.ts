@@ -1,9 +1,8 @@
-import path from "path";
 import { Router } from "express";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
-import { UPLOADS_DIR } from "../lib/uploads";
+import { sendStoredFile } from "../lib/storage";
 
 export const documentsRouter = Router();
 
@@ -29,8 +28,6 @@ documentsRouter.get(
       throw new HttpError(403, "You don't have access to this document");
     }
 
-    res.setHeader("Content-Type", doc.mimeType);
-    res.setHeader("Content-Disposition", `inline; filename="${doc.fileName.replace(/"/g, "")}"`);
-    res.sendFile(path.join(UPLOADS_DIR, doc.filePath));
+    await sendStoredFile(doc.filePath, res, { fileName: doc.fileName, mimeType: doc.mimeType });
   })
 );

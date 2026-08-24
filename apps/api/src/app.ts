@@ -18,6 +18,7 @@ import { documentsRouter } from "./routes/documents";
 import { ticketsRouter } from "./routes/tickets";
 import { webhooksRouter } from "./routes/webhooks";
 import { ridesRouter } from "./routes/rides";
+import { PUBLIC_UPLOADS_DIR } from "./lib/uploads";
 
 export function createApp() {
   const app = express();
@@ -27,6 +28,9 @@ export function createApp() {
   // the JSON parser (the router applies its own raw() parser).
   app.use("/webhooks", webhooksRouter);
   app.use(express.json());
+  // Local-disk fallback for public media (profile pictures). KYC documents
+  // live outside this directory and are never served statically.
+  app.use("/public", express.static(PUBLIC_UPLOADS_DIR, { index: false, maxAge: "1d" }));
 
   app.get("/health", (_req, res) => res.json({ ok: true, service: "relay-api" }));
 

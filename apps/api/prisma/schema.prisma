@@ -58,6 +58,7 @@ enum OperatorStatus {
   PENDING
   VERIFIED
   SUSPENDED
+  REJECTED
 }
 
 enum VehicleStatus {
@@ -112,6 +113,7 @@ model User {
   // Temp credentials were emailed to this address and not yet used; the first
   // sign-in with them (or an emailed reset code) proves the mailbox.
   credentialsEmailed Boolean @default(false)
+  avatarKey     String?  // storage key of the profile picture (lib/storage.ts)
   walletBalance Decimal  @default(0) @db.Decimal(10, 2)
   autoTopupEnabled Boolean @default(false)
   createdAt     DateTime @default(now())
@@ -140,6 +142,10 @@ model Operator {
   idNumber    String?
   modes       TransportMode[]
   status      OperatorStatus @default(PENDING)
+  // Set on admin review. A rejected application keeps the reason so the
+  // applicant can see why (and fix it when re-applying).
+  rejectionReason String?
+  reviewedAt      DateTime?
   ownerUserId String?        @unique
   ownerUser   User?          @relation(fields: [ownerUserId], references: [id])
   createdAt   DateTime       @default(now())

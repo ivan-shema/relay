@@ -18,6 +18,7 @@ import { sendCredentialsEmail } from "../lib/mailer";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
 import { upload, requireFile } from "../lib/uploads";
+import { storeFile, deleteFile, fromMulter } from "../lib/storage";
 import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
 import { notify } from "../lib/notify";
@@ -38,8 +39,22 @@ operatorRouter.get(
   "/application",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const op = await prisma.operator.findFirst({ where: { ownerUserId: req.auth!.sub } });
-    res.json(op ? { status: op.status, companyName: op.companyName } : null);
+    const op = await prisma.operator.findFirst({ where: { ownerUserId: req.auth!.sub }, include: { documents: true } });
+    // Full details so a rejected application can be edited in place.
+    res.json(
+      op
+        ? {
+            status: op.status,
+            companyName: op.companyName,
+            contactInfo: op.contactInfo,
+            idNumber: op.idNumber,
+            modes: op.modes,
+            rejectionReason: op.rejectionReason,
+            reviewedAt: op.reviewedAt?.toISOString() ?? null,
+            documents: op.documents.map((d) => ({ id: d.id, kind: d.kind, fileName: d.fileName, mimeType: d.mimeType })),
+          }
+        : null
+    );
   })
 );
 
@@ -54,31 +69,65 @@ operatorRouter.post(
   ]),
   asyncHandler(async (req, res) => {
     const data = operatorOnboardingSchema.parse(req.body);
-    const idDocument = requireFile(req, "idDocument");
-    const businessCertificate = requireFile(req, "businessCertificate");
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    const idDocument = files?.idDocument?.[0] ?? null;
+    const businessCertificate = files?.businessCertificate?.[0] ?? null;
 
-    const existing = await prisma.operator.findFirst({ where: { ownerUserId: req.auth!.sub } });
-    if (existing) throw new HttpError(409, "You already have an operator application on file");
+    // One application per account. A rejected one is edited in place: the same
+    // record goes back to PENDING with the reason cleared, details updated, and
+    // only the documents that were re-uploaded replaced — so the applicant fixes
+    // exactly what was flagged and the admin sees one history per company.
+    const existing = await prisma.operator.findFirst({ where: { ownerUserId: req.auth!.sub }, include: { documents: true } });
+    if (existing && existing.status !== "REJECTED") {
+      throw new HttpError(409, "You already have an operator application on file");
+    }
+    if (!existing && (!idDocument || !businessCertificate)) {
+      throw new HttpError(400, "Both your ID document and RDB business certificate are required");
+    }
 
-    const operator = await prisma.$transaction(async (tx) => {
-      const op = await tx.operator.create({
-        data: {
-          companyName: data.companyName,
-          contactInfo: data.contactInfo,
-          idNumber: data.idNumber,
-          modes: data.modes,
-          status: "PENDING",
-          ownerUserId: req.auth!.sub,
-        },
+    const details = { companyName: data.companyName, contactInfo: data.contactInfo, idNumber: data.idNumber, modes: data.modes };
+    const uploads = [
+      idDocument && { kind: "NATIONAL_ID" as const, file: idDocument },
+      businessCertificate && { kind: "BUSINESS_CERTIFICATE" as const, file: businessCertificate },
+    ].filter((u): u is { kind: "NATIONAL_ID" | "BUSINESS_CERTIFICATE"; file: Express.Multer.File } => !!u);
+
+    // Upload to storage first, then commit the rows. If the commit fails the
+    // fresh uploads are removed again so nothing is left orphaned in storage.
+    const stored = await Promise.all(
+      uploads.map(async (u) => ({
+        kind: u.kind,
+        fileName: u.file.originalname,
+        filePath: await storeFile(fromMulter(u.file), { folder: "kyc/operators", visibility: "private" }),
+        mimeType: u.file.mimetype,
+        size: u.file.size,
+      }))
+    );
+    const replacedKinds = new Set<string>(stored.map((s) => s.kind));
+
+    const operator = await prisma
+      .$transaction(async (tx) => {
+        const op = existing
+          ? await tx.operator.update({
+              where: { id: existing.id },
+              data: { ...details, status: "PENDING", rejectionReason: null, reviewedAt: null },
+            })
+          : await tx.operator.create({ data: { ...details, status: "PENDING", ownerUserId: req.auth!.sub } });
+        if (existing && stored.length) {
+          await tx.document.deleteMany({ where: { operatorId: op.id, kind: { in: stored.map((s) => s.kind) } } });
+        }
+        if (stored.length) await tx.document.createMany({ data: stored.map((s) => ({ ...s, operatorId: op.id })) });
+        return op;
+      })
+      .catch(async (e: unknown) => {
+        await Promise.all(stored.map((s) => deleteFile(s.filePath)));
+        throw e;
       });
-      await tx.document.createMany({
-        data: [
-          { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idDocument.filename, mimeType: idDocument.mimetype, size: idDocument.size, operatorId: op.id },
-          { kind: "BUSINESS_CERTIFICATE", fileName: businessCertificate.originalname, filePath: businessCertificate.filename, mimeType: businessCertificate.mimetype, size: businessCertificate.size, operatorId: op.id },
-        ],
-      });
-      return op;
-    });
+
+    // The replaced documents' rows are gone (committed above) — delete their
+    // files from storage too; nothing references them any more.
+    if (existing) {
+      await Promise.all(existing.documents.filter((d) => replacedKinds.has(d.kind)).map((d) => deleteFile(d.filePath)));
+    }
 
     res.status(201).json({ id: operator.id, status: operator.status });
   })
@@ -401,21 +450,31 @@ operatorRouter.post(
 
     const tempPassword = generateTempPassword();
     const passwordHash = await hashPassword(tempPassword);
-    const driver = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.create({
-        data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", credentialsEmailed: hasEmail },
+    // Upload the KYC files first; roll them back if the account rows fail.
+    const [idKey, licenseKey] = await Promise.all([
+      storeFile(fromMulter(idDocument), { folder: "kyc/drivers", visibility: "private" }),
+      storeFile(fromMulter(licenseDocument), { folder: "kyc/drivers", visibility: "private" }),
+    ]);
+    const driver = await prisma
+      .$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", credentialsEmailed: hasEmail },
+        });
+        const d = await tx.driver.create({
+          data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber, nationalId: body.idNumber },
+        });
+        await tx.document.createMany({
+          data: [
+            { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idKey, mimeType: idDocument.mimetype, size: idDocument.size, driverId: d.id },
+            { kind: "DRIVING_LICENSE", fileName: licenseDocument.originalname, filePath: licenseKey, mimeType: licenseDocument.mimetype, size: licenseDocument.size, driverId: d.id },
+          ],
+        });
+        return d;
+      })
+      .catch(async (e: unknown) => {
+        await Promise.all([deleteFile(idKey), deleteFile(licenseKey)]);
+        throw e;
       });
-      const d = await tx.driver.create({
-        data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber, nationalId: body.idNumber },
-      });
-      await tx.document.createMany({
-        data: [
-          { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idDocument.filename, mimeType: idDocument.mimetype, size: idDocument.size, driverId: d.id },
-          { kind: "DRIVING_LICENSE", fileName: licenseDocument.originalname, filePath: licenseDocument.filename, mimeType: licenseDocument.mimetype, size: licenseDocument.size, driverId: d.id },
-        ],
-      });
-      return d;
-    });
     if (hasEmail) {
       const op = await prisma.operator.findUnique({ where: { id: opId } });
       sendCredentialsEmail({ email, firstName: body.firstName }, { tempPassword, roleLabel: "driver", createdBy: op?.companyName ?? "Your operator" });

@@ -13,7 +13,8 @@ import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus, type PassengerReports } from "@/lib/api";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus, type PassengerReports, type OperatorApplicationStatus } from "@/lib/api";
+import { Avatar } from "@/components/avatar";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
@@ -42,7 +43,7 @@ type Tab = "plan" | "trips" | "orders" | "wallet" | "you";
 
 // Operator application status for the current passenger: undefined = still
 // loading, null = never applied, object = has an application on file.
-type OperatorStatus = { status: string; companyName: string } | null | undefined;
+type OperatorStatus = OperatorApplicationStatus | null | undefined;
 
 
 export default function PassengerApp() {
@@ -218,6 +219,7 @@ export default function PassengerApp() {
   if (onboardOpen) {
     return (
       <OperatorOnboarding
+        existing={operatorStatus?.status === "REJECTED" ? operatorStatus : null}
         onClose={(applied) => {
           setOnboardOpen(false);
           if (applied) loadOperatorStatus();
@@ -2127,7 +2129,6 @@ function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorS
   if (view === "saved") return <SavedPlacesView onBack={() => setView("menu")} />;
   if (view === "wallet") return <div className="rel-up"><ScreenHeader onBack={() => setView("menu")} title="Payment & wallet" /><WalletTab /></div>;
 
-  const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "?";
 
   return (
     <div style={{ maxWidth: 880, margin: "0 auto", padding: "0 4px 28px" }} className="rel-up">
@@ -2139,7 +2140,7 @@ function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorS
           <div style={{ position: "relative", overflow: "hidden", background: "#1b1714", borderRadius: 18, padding: "24px 20px", textAlign: "center" }}>
             <div style={{ position: "absolute", right: -70, top: -70, width: 200, height: 200, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.24),transparent 68%)" }} />
             <div style={{ position: "relative", zIndex: 1 }}>
-              <div style={{ width: 76, height: 76, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, color: "#fff", margin: "0 auto 14px", boxShadow: "0 0 0 4px rgba(255,255,255,.08),0 12px 26px -12px rgba(224,86,12,.8)" }}>{initials}</div>
+              <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}><Avatar user={user} size={76} editable onChanged={refreshUser} /></div>
               <div style={{ fontFamily: DISPLAY, fontSize: 19, fontWeight: 700, letterSpacing: "-.3px", color: "#fff" }}>{user ? `${user.firstName} ${user.lastName}` : "Guest"}</div>
               <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.email ?? "Not signed in"}</div>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "rgba(255,106,26,.16)", borderRadius: 20, padding: "5px 12px", marginTop: 12 }}>
@@ -2274,11 +2275,19 @@ function ActivityStat({ big, label }: { big: string; label: string }) {
 
 // Shared status text for the two operator entry points (Home card + Profile row).
 // Returns null while the status is still loading so nothing flashes in.
-function operatorCtaCopy(status: OperatorStatus): { title: string; body: string; actionable: boolean } | null {
+function operatorCtaCopy(status: OperatorStatus): { title: string; body: string; actionable: boolean; cta?: string } | null {
   if (status === undefined) return null;
   if (!status) return { title: "Run a transport business?", body: "Put your fleet on Relay and reach every rider on your route.", actionable: true };
   if (status.status === "PENDING") return { title: "Operator application under review", body: "Our team is verifying your documents. We'll let you know once you're approved.", actionable: false };
-  if (status.status === "SUSPENDED") return { title: "Application not approved", body: "Your operator application wasn't approved. Contact support if you think this is a mistake.", actionable: false };
+  if (status.status === "REJECTED") {
+    return {
+      title: "Application not approved",
+      body: `Reason: ${status.rejectionReason?.trim() || "no reason was recorded"}. Fix the issue and apply again — your new details replace the previous application.`,
+      actionable: true,
+      cta: "Apply again",
+    };
+  }
+  if (status.status === "SUSPENDED") return { title: "Operator access suspended", body: "Your operator account has been suspended. Contact support if you think this is a mistake.", actionable: false };
   return null; // VERIFIED — the account is already an operator, handled elsewhere
 }
 
@@ -2293,10 +2302,10 @@ function OperatorHomeCard({ status, onApply }: { status: OperatorStatus; onApply
         <div style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 700, color: "#fff", letterSpacing: "-.3px", marginBottom: 6 }}>{copy.title}</div>
         <p style={{ fontSize: 13, lineHeight: 1.55, color: "#cfc7bb", margin: "0 0 14px" }}>{copy.body}</p>
         {copy.actionable ? (
-          <button onClick={onApply} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Become an operator →</button>
+          <button onClick={onApply} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 12, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{copy.cta ?? "Become an operator"} →</button>
         ) : (
           <span style={{ display: "inline-block", background: "rgba(255,106,26,.16)", color: "#ff6a1a", borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" }}>
-            {status && status.status === "PENDING" ? "Pending review" : "Not approved"}
+            {status && status.status === "PENDING" ? "Pending review" : "Suspended"}
           </span>
         )}
       </div>
@@ -2314,8 +2323,8 @@ function OperatorProfileRow({ status, onApply }: { status: OperatorStatus; onApp
     >
       <span style={{ width: 32, height: 32, borderRadius: 9, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flex: "none" }}>▤</span>
       <span style={{ flex: 1, minWidth: 0 }}>
-        <span style={{ display: "block", fontWeight: 700 }}>{copy.actionable ? "Become an operator" : copy.title}</span>
-        <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>{copy.actionable ? "Apply to run your fleet on Relay" : copy.body}</span>
+        <span style={{ display: "block", fontWeight: 700 }}>{copy.actionable ? (copy.cta ?? "Become an operator") : copy.title}</span>
+        <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>{copy.actionable && !copy.cta ? "Apply to run your fleet on Relay" : copy.body}</span>
       </span>
       {copy.actionable
         ? <span style={{ color: "#cbc3b6", flex: "none" }}>›</span>
@@ -2333,16 +2342,21 @@ const ONBOARD_MODES: { value: TransportMode; label: string }[] = [
 // Full-page operator onboarding for a signed-in passenger: company details + KYC
 // documents (with live previews). Creates a PENDING application; the account
 // stays a passenger until an admin approves.
-function OperatorOnboarding({ onClose }: { onClose: (applied: boolean) => void }) {
+// `existing` = the caller's rejected application: the form opens pre-filled and
+// documents on file are kept unless a new one is picked.
+function OperatorOnboarding({ onClose, existing }: { onClose: (applied: boolean) => void; existing?: OperatorApplicationStatus | null }) {
   const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof operatorOnboardingSchema>>({
     resolver: zodResolver(operatorOnboardingSchema),
-    defaultValues: { companyName: "", contactInfo: "", idNumber: "", modes: [] },
+    defaultValues: existing
+      ? { companyName: existing.companyName, contactInfo: existing.contactInfo, idNumber: existing.idNumber ?? "", modes: existing.modes as TransportMode[] }
+      : { companyName: "", contactInfo: "", idNumber: "", modes: [] },
   });
   const modes = watch("modes") ?? [];
   const [idDocument, setIdDocument] = useState<File | null>(null);
   const [businessCertificate, setBusinessCertificate] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  const currentDoc = (kind: string) => existing?.documents.find((d) => d.kind === kind) ?? null;
 
   const toggleMode = (m: TransportMode) => {
     const next = modes.includes(m) ? modes.filter((x) => x !== m) : [...modes, m];
@@ -2350,7 +2364,7 @@ function OperatorOnboarding({ onClose }: { onClose: (applied: boolean) => void }
   };
 
   const submit = handleSubmit(async (v) => {
-    if (!idDocument || !businessCertificate) {
+    if ((!idDocument && !currentDoc("NATIONAL_ID")) || (!businessCertificate && !currentDoc("BUSINESS_CERTIFICATE"))) {
       setFileError("Upload your ID document and RDB business certificate (PDF or image, no GIFs).");
       return;
     }
@@ -2361,8 +2375,8 @@ function OperatorOnboarding({ onClose }: { onClose: (applied: boolean) => void }
       fd.append("contactInfo", v.contactInfo);
       fd.append("idNumber", v.idNumber);
       for (const m of v.modes) fd.append("modes", m);
-      fd.append("idDocument", idDocument);
-      fd.append("businessCertificate", businessCertificate);
+      if (idDocument) fd.append("idDocument", idDocument);
+      if (businessCertificate) fd.append("businessCertificate", businessCertificate);
       await api.applyOperator(fd);
       setSubmitted(true);
     } catch (e) {
@@ -2392,8 +2406,14 @@ function OperatorOnboarding({ onClose }: { onClose: (applied: boolean) => void }
           </div>
         ) : (
           <form onSubmit={submit} noValidate>
-            <div style={{ fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, letterSpacing: "-.7px" }}>Become an operator</div>
-            <p style={{ fontSize: 14, color: "#8c8378", fontWeight: 600, margin: "6px 0 24px" }}>Tell us about your business — our team reviews every application before your console unlocks.</p>
+            <div style={{ fontFamily: DISPLAY, fontSize: 28, fontWeight: 700, letterSpacing: "-.7px" }}>{existing ? "Update your application" : "Become an operator"}</div>
+            <p style={{ fontSize: 14, color: "#8c8378", fontWeight: 600, margin: "6px 0 24px" }}>{existing ? `Fix what was flagged for ${existing.companyName} and resubmit — everything else is kept as you entered it.` : "Tell us about your business — our team reviews every application before your console unlocks."}</p>
+            {existing?.rejectionReason && (
+              <div style={{ background: "#fff8f5", border: "1px solid #f0d4cc", borderRadius: 14, padding: "13px 16px", marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#c2553f", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 4 }}>Why it was not approved</div>
+                <div style={{ fontSize: 13.5, color: "#1b1714", fontWeight: 600, lineHeight: 1.5 }}>{existing.rejectionReason}</div>
+              </div>
+            )}
 
             {errors.root?.message && (
               <div style={{ background: "#fff0e6", border: "1px solid #ffd9c2", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 16 }}>{errors.root.message}</div>
@@ -2428,15 +2448,15 @@ function OperatorOnboarding({ onClose }: { onClose: (applied: boolean) => void }
 
             <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 22, marginBottom: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 4 }}>Verification documents</div>
-              <p style={{ fontSize: 12.5, color: "#a39a8d", fontWeight: 600, margin: "0 0 16px" }}>PDF, JPG, PNG or WebP · max 5 MB per file</p>
-              <FilePreview label="ID / passport document" file={idDocument} onPick={setIdDocument} />
+              <p style={{ fontSize: 12.5, color: "#a39a8d", fontWeight: 600, margin: "0 0 16px" }}>PDF, JPG, PNG or WebP · max 5 MB per file{existing ? " · files already on record are kept unless you replace them" : ""}</p>
+              <FilePreview label="ID / passport document" file={idDocument} onPick={setIdDocument} current={currentDoc("NATIONAL_ID")} />
               <div style={{ height: 14 }} />
-              <FilePreview label="RDB business certificate" file={businessCertificate} onPick={setBusinessCertificate} />
+              <FilePreview label="RDB business certificate" file={businessCertificate} onPick={setBusinessCertificate} current={currentDoc("BUSINESS_CERTIFICATE")} />
               {fileError && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginTop: 12 }}>{fileError}</div>}
             </div>
 
             <button type="submit" disabled={isSubmitting} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 14, padding: 15, fontSize: 15, fontWeight: 700, cursor: isSubmitting ? "default" : "pointer", opacity: isSubmitting ? 0.7 : 1, boxShadow: "0 12px 26px -10px rgba(255,106,26,.7)", fontFamily: "'Manrope', sans-serif" }}>
-              {isSubmitting ? "Submitting…" : "Submit application"}
+              {isSubmitting ? "Submitting…" : existing ? "Resubmit application" : "Submit application"}
             </button>
           </form>
         )}
@@ -2466,7 +2486,7 @@ function formatBytes(n: number): string {
 
 // Upload input WITH a live preview: image thumbnail for images, a document card
 // for PDFs. Manages the object-URL lifecycle so previews don't leak.
-function FilePreview({ label, file, onPick }: { label: string; file: File | null; onPick: (f: File | null) => void }) {
+function FilePreview({ label, file, onPick, current }: { label: string; file: File | null; onPick: (f: File | null) => void; current?: { fileName: string } | null }) {
   const [url, setUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -2481,10 +2501,10 @@ function FilePreview({ label, file, onPick }: { label: string; file: File | null
   if (!file) {
     return (
       <label style={{ display: "flex", alignItems: "center", gap: 12, border: "1px dashed #cbc3b6", borderRadius: 14, padding: "14px 16px", cursor: "pointer", background: "#faf8f4" }}>
-        <span style={{ width: 34, height: 34, borderRadius: 9, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flex: "none" }}>⇧</span>
+        <span style={{ width: 34, height: 34, borderRadius: 9, background: "#fff0e6", color: "#ff6a1a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flex: "none" }}>{current ? "✓" : "⇧"}</span>
         <span style={{ flex: 1, minWidth: 0 }}>
           <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, color: "#1b1714" }}>{label}</span>
-          <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600 }}>Tap to upload — PDF or image</span>
+          <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{current ? `On record: ${current.fileName} — tap to replace` : "Tap to upload — PDF or image"}</span>
         </span>
         <input type="file" accept={accept} style={{ display: "none" }} onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
       </label>
@@ -2623,9 +2643,7 @@ function PassengerSidebar({ tab, walletBalance, onChange }: { tab: Tab; walletBa
         {user ? (
           <>
             <div style={{ background: "#2a2520", borderRadius: 12, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 34, height: 34, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12.5, fontWeight: 800, color: "#fff", flex: "none" }}>
-                {`${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase()}
-              </div>
+              <Avatar user={user} size={34} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{`${user.firstName} ${user.lastName}`}</div>
                 <div style={{ fontSize: 10.5, color: "#9a9186" }}>Passenger</div>

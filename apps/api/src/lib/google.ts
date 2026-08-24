@@ -7,6 +7,7 @@ export interface GoogleIdentity {
   email: string;
   firstName: string;
   lastName: string;
+  picture?: string; // Google profile photo URL, if the account has one
 }
 
 const client = new OAuth2Client(env.googleClientId || undefined);
@@ -37,5 +38,6 @@ export async function verifyGoogleCredential(credential: string): Promise<Google
     email: payload.email.toLowerCase(),
     firstName: payload.given_name ?? first,
     lastName: payload.family_name ?? rest.join(" "),
+    picture: payload.picture,
   };
 }

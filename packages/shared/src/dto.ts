@@ -30,6 +30,7 @@ export interface AuthUser {
   phone: string;
   role: UserRole;
   walletBalance: number;
+  avatarUrl: string | null;
 }
 
 export interface AuthResponse {

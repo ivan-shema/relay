@@ -150,6 +150,17 @@ no credentials (toggle in `apps/api/.env`):
   Google already proved the email, Google accounts are marked `emailVerified`
   and skip the OTP step (an existing unverified account becomes ACTIVE on its
   first Google sign-in). Without a client ID the button is hidden.
+- **Media storage** (`CLOUDINARY_*` empty) — KYC documents and profile pictures
+  go to [Cloudinary](https://cloudinary.com) when `CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET`
+  are set (`apps/api/src/lib/storage.ts`); otherwise to local disk under
+  `apps/api/uploads/` (fine for dev, but hosts like Render wipe the disk on every
+  deploy). KYC files are uploaded as *authenticated* assets and only ever served
+  through the authorised `GET /documents/:id`, which fetches them server-side;
+  profile pictures are public CDN URLs with a face-centred square crop. Replaced
+  or removed files (a re-uploaded KYC document, a changed/removed profile
+  picture) are deleted from storage. On a Google sign-in, an account without a
+  picture gets a copy of its Google photo. Free Cloudinary accounts need
+  "Allow delivery of PDF and ZIP files" enabled under Settings → Security.
 - **Maps / GPS** — the live-tracking map uses the design's SVG with a simulated
   vehicle interpolated along the route polyline (`apps/api/src/lib/tracking.ts`),
   polled every 3s by the client. Swap in Google Maps + real GPS later.

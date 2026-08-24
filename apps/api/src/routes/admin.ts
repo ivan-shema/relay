@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
-import { formatRWF, createUserSchema } from "@relay/shared";
+import { formatRWF, createUserSchema, rejectOperatorSchema } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -221,6 +221,8 @@ function mapOperatorDetail(o: OperatorDetailPayload, revenue: number) {
     bg: t.bg,
     initial: o.companyName[0]?.toUpperCase() ?? "?",
     status: o.status,
+    rejectionReason: o.rejectionReason,
+    reviewedAt: o.reviewedAt?.toISOString() ?? null,
     date: fmtDate(o.createdAt),
     submittedAt: o.createdAt.toISOString(),
     applicant: o.ownerUser ? fullNameOf(o.ownerUser) : null,
@@ -285,7 +287,7 @@ adminRouter.post(
     const op = await prisma.operator.findUnique({ where: { id: req.params.id } });
     if (!op) throw new HttpError(404, "Operator not found");
     await prisma.$transaction([
-      prisma.operator.update({ where: { id: op.id }, data: { status: "VERIFIED" } }),
+      prisma.operator.update({ where: { id: op.id }, data: { status: "VERIFIED", reviewedAt: new Date(), rejectionReason: null } }),
       ...(op.ownerUserId ? [prisma.user.update({ where: { id: op.ownerUserId }, data: { role: "OPERATOR" } })] : []),
     ]);
     if (op.ownerUserId) {
@@ -295,15 +297,26 @@ adminRouter.post(
   })
 );
 
-// POST /admin/operators/:id/reject
+// POST /admin/operators/:id/reject — a reason is mandatory: it is stored on the
+// application, shown in the applicant's dashboard, and delivered as an in-app
+// notification + email so they know what to fix before applying again.
 adminRouter.post(
   "/operators/:id/reject",
   asyncHandler(async (req, res) => {
+    const { reason } = rejectOperatorSchema.parse(req.body);
     const op = await prisma.operator.findUnique({ where: { id: req.params.id } });
     if (!op) throw new HttpError(404, "Operator not found");
-    await prisma.operator.update({ where: { id: op.id }, data: { status: "SUSPENDED" } });
+    if (op.status !== "PENDING") throw new HttpError(409, "Only a pending application can be rejected");
+    await prisma.operator.update({
+      where: { id: op.id },
+      data: { status: "REJECTED", rejectionReason: reason, reviewedAt: new Date() },
+    });
     if (op.ownerUserId) {
-      await notify(op.ownerUserId, "Operator application rejected", `Your application for ${op.companyName} was not approved. Contact support for details.`);
+      await notify(
+        op.ownerUserId,
+        "Operator application not approved",
+        `Your application for ${op.companyName} was not approved.\n\nReason: ${reason}\n\nYou can fix the issue and apply again from your dashboard (Profile → Become an operator).`
+      );
     }
     res.json({ rejected: true });
   })

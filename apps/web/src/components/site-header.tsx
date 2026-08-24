@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Avatar } from "@/components/avatar";
 import { homePathForRole, useAuth } from "@/lib/auth-context";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
@@ -24,7 +25,7 @@ function Logo() {
   );
 }
 
-function UserMenu({ user, signOut }: { user: { firstName: string; lastName: string; role: string }; signOut: () => void }) {
+function UserMenu({ user, signOut }: { user: { firstName: string; lastName: string; role: string; avatarUrl?: string | null }; signOut: () => void }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -37,7 +38,6 @@ function UserMenu({ user, signOut }: { user: { firstName: string; lastName: stri
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const initials = `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase();
   const dashboardPath = homePathForRole(user.role as Parameters<typeof homePathForRole>[0]);
 
   return (
@@ -46,9 +46,7 @@ function UserMenu({ user, signOut }: { user: { firstName: string; lastName: stri
         onClick={() => setOpen((v) => !v)}
         style={{ display: "flex", alignItems: "center", gap: 9, background: "none", border: "1px solid #e3ddd1", borderRadius: 30, padding: "6px 14px 6px 6px", cursor: "pointer" }}
       >
-        <span style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800 }}>
-          {initials}
-        </span>
+        <Avatar user={user} size={28} />
         <span style={{ fontSize: 13.5, fontWeight: 700, color: "#1b1714" }}>{user.firstName}</span>
         <span style={{ fontSize: 10, color: "#a39a8d" }}>▾</span>
       </button>

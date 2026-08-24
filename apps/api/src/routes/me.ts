@@ -5,6 +5,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
+import { avatarUpload } from "../lib/uploads";
+import { storeFile, deleteFile, fromMulter, publicUrl } from "../lib/storage";
 import { hashPassword, verifyPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
 import { paypackEnabled, normalizeMomoNumber, requestCashin, fetchTransferOutcome } from "../lib/paypack";
@@ -49,8 +51,8 @@ function dec(v: Prisma.Decimal | number): number {
   return typeof v === "number" ? v : Number(v.toString());
 }
 
-function toAuthUser(u: { id: string; firstName: string; lastName: string; email: string; phone: string; role: string; walletBalance: Prisma.Decimal }) {
-  return { id: u.id, firstName: u.firstName, lastName: u.lastName, email: u.email, phone: u.phone, role: u.role, walletBalance: dec(u.walletBalance) };
+function toAuthUser(u: { id: string; firstName: string; lastName: string; email: string; phone: string; role: string; walletBalance: Prisma.Decimal; avatarKey?: string | null }) {
+  return { id: u.id, firstName: u.firstName, lastName: u.lastName, email: u.email, phone: u.phone, role: u.role, walletBalance: dec(u.walletBalance), avatarUrl: publicUrl(u.avatarKey) };
 }
 
 // PATCH /me/profile — update the caller's own name/email/phone (any role).
@@ -475,5 +477,40 @@ meRouter.get(
       ["date", "kind", "description", "mode", "seats", "amount_rwf", "status", "reference"],
       data.rows.map((r) => [r.date, r.kind, r.route, r.mode, r.seats ?? "", r.amount, r.status, r.reference])
     ));
+  })
+);
+
+// POST /me/avatar (multipart field "avatar") — set or replace the profile
+// picture. The new image is stored first and the row updated; only then is the
+// previous image deleted from storage, so a failure never leaves the account
+// pointing at nothing.
+meRouter.post(
+  "/avatar",
+  avatarUpload.single("avatar"),
+  asyncHandler(async (req, res) => {
+    const file = req.file;
+    if (!file) throw new HttpError(400, "Choose a JPEG, PNG or WebP image");
+    const user = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
+    if (!user) throw new HttpError(404, "User not found");
+
+    const key = await storeFile(fromMulter(file), { folder: "avatars", visibility: "public" });
+    const updated = await prisma.user.update({ where: { id: user.id }, data: { avatarKey: key } }).catch(async (e: unknown) => {
+      await deleteFile(key);
+      throw e;
+    });
+    await deleteFile(user.avatarKey);
+    res.json(toAuthUser(updated));
+  })
+);
+
+// DELETE /me/avatar — back to initials; the image is removed from storage.
+meRouter.delete(
+  "/avatar",
+  asyncHandler(async (req, res) => {
+    const user = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
+    if (!user) throw new HttpError(404, "User not found");
+    const updated = await prisma.user.update({ where: { id: user.id }, data: { avatarKey: null } });
+    await deleteFile(user.avatarKey);
+    res.json(toAuthUser(updated));
   })
 );

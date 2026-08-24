@@ -300,6 +300,7 @@ function ApprovalReviewPage({ id, onClose, onNavigate, onToast }: { id: string; 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [rejectReason, setRejectReason] = useState<string | null>(null);
   useEffect(() => { api.adminApprovals().then(setList).catch(() => setList([])); }, []);
 
   const idx = list ? list.findIndex((x) => x.id === id) : -1;
@@ -312,10 +313,15 @@ function ApprovalReviewPage({ id, onClose, onNavigate, onToast }: { id: string; 
   // jump to a different application, and failures surface instead of vanishing.
   const act = async (approve: boolean) => {
     if (!a) return;
+    const reason = rejectReason?.trim() ?? "";
+    if (!approve && reason.length < 10) {
+      setError("Give the applicant a clear reason (at least 10 characters).");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await (approve ? api.adminApprove(id) : api.adminReject(id));
+      await (approve ? api.adminApprove(id) : api.adminReject(id, reason));
       onToast({ kind: "success", msg: `${a.company} ${approve ? "approved & verified" : "application rejected"}.` });
       onClose(true);
     } catch {
@@ -380,13 +386,32 @@ function ApprovalReviewPage({ id, onClose, onNavigate, onToast }: { id: string; 
             </div>
           )}
 
+          {/* rejection reason — mandatory; the applicant sees it verbatim */}
+          {rejectReason !== null && (
+            <div style={{ background: "#fff8f5", border: "1px solid #f0d4cc", borderRadius: 16, padding: "16px 20px", marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#c2553f", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>Reason for rejection (sent to the applicant)</div>
+              <textarea
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                rows={3}
+                autoFocus
+                placeholder="e.g. The business certificate is expired — please upload a current RDB certificate and apply again."
+                style={{ width: "100%", border: "1px solid #e3ddd1", borderRadius: 12, padding: "12px 14px", fontSize: 13.5, fontFamily: "'Manrope', sans-serif", fontWeight: 600, color: "#1b1714", resize: "vertical", outline: "none", boxSizing: "border-box" }}
+              />
+              <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 6 }}>
+                Shown in their dashboard, as an in-app notification and by email. They can fix the issue and apply again.
+              </div>
+            </div>
+          )}
+
           {/* decision bar */}
           <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
             <div style={{ fontSize: 13, color: error ? "#c2553f" : "#6b6258", fontWeight: error ? 700 : 600 }}>
               {error ?? "Verify the ID and business certificate before approving — this unlocks the operator console."}
             </div>
             <div style={{ display: "flex", gap: 11 }}>
-              <button disabled={busy} onClick={() => act(false)} style={{ background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Reject</button>
+              {rejectReason !== null && <button disabled={busy} onClick={() => { setRejectReason(null); setError(null); }} style={{ background: "none", border: "none", color: "#8c8378", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Cancel</button>}
+              <button disabled={busy} onClick={() => (rejectReason === null ? setRejectReason("") : act(false))} style={{ background: "#fff", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{rejectReason === null ? "Reject" : "Confirm rejection"}</button>
               <button disabled={busy} onClick={() => act(true)} style={{ background: "#1f9d6b", border: "none", color: "#fff", borderRadius: 12, padding: "13px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 12px 26px -12px rgba(31,157,107,.7)" }}>{busy ? "Saving…" : "Approve & verify"}</button>
             </div>
           </div>
@@ -554,6 +579,7 @@ function OperatorDetailPage({ id, onBack, onReview, onToast }: { id: string; onB
             <div style={{ fontSize: 13, color: error ? "#c2553f" : "#6b6258", fontWeight: error ? 700 : 600 }}>
               {error ?? (
                 o.status === "PENDING" ? "This application is still awaiting review." :
+                o.status === "REJECTED" ? `Rejected${o.reviewedAt ? ` on ${new Date(o.reviewedAt).toLocaleDateString()}` : ""} — reason sent to the applicant: “${o.rejectionReason ?? "none recorded"}”` :
                 o.status === "VERIFIED" ? "Suspending removes this operator's console access immediately." :
                 "Reinstating restores this operator's console access."
               )}

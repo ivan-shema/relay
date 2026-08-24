@@ -1,43 +1,37 @@
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
 import multer from "multer";
 import { HttpError } from "./http";
 
-// KYC document uploads (ID / passport / driving licence / RDB business
-// certificate). Stored on local disk for dev — in production move to private
-// object storage with signed URLs. Served ONLY via the authenticated
-// GET /documents/:id route (never statically): these files contain PII.
+// Upload parsing (multer, in memory) for KYC documents and profile pictures.
+// Where the bytes end up — Cloudinary or local disk — is lib/storage.ts's job.
+// KYC files contain PII: they are served ONLY through the authenticated
+// GET /documents/:id route, never from a public URL.
 
 export const UPLOADS_DIR = path.resolve(__dirname, "../../uploads");
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+export const PUBLIC_UPLOADS_DIR = path.join(UPLOADS_DIR, "public");
+for (const dir of [UPLOADS_DIR, PUBLIC_UPLOADS_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
 
 // PDF and images only — explicitly no GIFs.
-const ALLOWED_MIME = new Set(["application/pdf", "image/jpeg", "image/png", "image/webp"]);
-const EXT_BY_MIME: Record<string, string> = {
-  "application/pdf": ".pdf",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/webp": ".webp",
-};
+const DOCUMENT_MIME = new Set(["application/pdf", "image/jpeg", "image/png", "image/webp"]);
+const IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-  filename: (_req, file, cb) => {
-    const ext = EXT_BY_MIME[file.mimetype] ?? path.extname(file.originalname).toLowerCase();
-    cb(null, `${crypto.randomBytes(16).toString("hex")}${ext}`);
-  },
-});
+function onlyMime(allowed: Set<string>, message: string): multer.Options["fileFilter"] {
+  return (_req, file, cb) => (allowed.has(file.mimetype) ? cb(null, true) : cb(new HttpError(400, message)));
+}
 
 export const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB per file
-  fileFilter: (_req, file, cb) => {
-    if (!ALLOWED_MIME.has(file.mimetype)) {
-      return cb(new HttpError(400, "Only PDF, JPEG, PNG or WebP files are allowed"));
-    }
-    cb(null, true);
-  },
+  fileFilter: onlyMime(DOCUMENT_MIME, "Only PDF, JPEG, PNG or WebP files are allowed"),
+});
+
+export const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 }, // 3 MB
+  fileFilter: onlyMime(IMAGE_MIME, "Profile pictures must be JPEG, PNG or WebP"),
 });
 
 // Pull a single named file out of a multer.fields() request, or throw 400.

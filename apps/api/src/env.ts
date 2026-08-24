@@ -45,4 +45,11 @@ export const env = {
   // Google sign-in: OAuth 2.0 Web client ID (the same one the web app embeds).
   // When unset, POST /auth/google returns 503 and the web hides the button.
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
+  // Media storage (KYC documents + profile pictures). All three unset → local
+  // disk under apps/api/uploads/ (dev only).
+  cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME ?? "",
+  cloudinaryApiKey: process.env.CLOUDINARY_API_KEY ?? "",
+  cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET ?? "",
+  // Public base URL of this API — only needed to build local-disk avatar URLs.
+  apiPublicUrl: (process.env.API_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 4000}`).replace(/[/]$/, ""),
 };

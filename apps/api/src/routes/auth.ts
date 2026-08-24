@@ -26,6 +26,8 @@ import {
 import { requireAuth } from "../middleware/auth";
 import { sendMail } from "../lib/mailer";
 import { verifyGoogleCredential, type GoogleIdentity } from "../lib/google";
+import { publicUrl, storeFile, deleteFile } from "../lib/storage";
+import type { User } from "@prisma/client";
 
 export const authRouter = Router();
 
@@ -37,6 +39,7 @@ function toAuthUser(u: {
   phone: string;
   role: AuthUser["role"];
   walletBalance: unknown;
+  avatarKey?: string | null;
 }): AuthUser {
   return {
     id: u.id,
@@ -46,6 +49,7 @@ function toAuthUser(u: {
     phone: u.phone,
     role: u.role,
     walletBalance: Number((u.walletBalance as { toString(): string }).toString()),
+    avatarUrl: publicUrl(u.avatarKey),
   };
 }
 
@@ -183,6 +187,32 @@ authRouter.post(
   })
 );
 
+// Google sign-in for an account without a profile picture: copy the Google
+// photo into our own storage. Not hot-linked — Google's photo URLs change and
+// expire — so afterwards it behaves like any uploaded avatar (replace/remove
+// deletes it). Best-effort: sign-in never fails because of a photo.
+const AVATAR_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
+async function importGooglePicture(user: User, picture: string | undefined): Promise<User> {
+  if (user.avatarKey || !picture) return user;
+  try {
+    const r = await fetch(picture.replace(/=s\d+(-c)?$/, "") + "=s256-c");
+    if (!r.ok) return user;
+    const mimeType = r.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+    if (!AVATAR_MIME.has(mimeType)) return user;
+    const key = await storeFile(
+      { buffer: Buffer.from(await r.arrayBuffer()), mimeType, originalName: "google-profile" },
+      { folder: "avatars", visibility: "public" }
+    );
+    return await prisma.user.update({ where: { id: user.id }, data: { avatarKey: key } }).catch(async (e: unknown) => {
+      await deleteFile(key);
+      throw e;
+    });
+  } catch (e) {
+    console.warn(`[google] could not import profile picture for user ${user.id}:`, e);
+    return user;
+  }
+}
+
 // Resolve the account a Google identity maps to: by Google subject first, then
 // by verified email — an existing password account with the same address is
 // linked on its first Google sign-in rather than duplicated. Either way the
@@ -211,7 +241,8 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const { credential } = googleSignInSchema.parse(req.body);
     const g = await verifyGoogleCredential(credential);
-    const user = await findGoogleUser(g);
+    const found = await findGoogleUser(g);
+    const user = found && (await importGooglePicture(found, g.picture));
     const body: GoogleSignInResponse = user
       ? { ...issueTokens(user), user: toAuthUser(user) }
       : { needsPhone: true, profile: { firstName: g.firstName, lastName: g.lastName, email: g.email } };
@@ -254,7 +285,8 @@ authRouter.post(
       },
     });
 
-    const body: AuthResponse = { ...issueTokens(user), user: toAuthUser(user) };
+    const withPhoto = await importGooglePicture(user, g.picture);
+    const body: AuthResponse = { ...issueTokens(withPhoto), user: toAuthUser(withPhoto) };
     res.status(201).json({ ...body, requiresVerification: false });
   })
 );

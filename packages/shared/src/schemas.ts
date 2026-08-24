@@ -273,3 +273,15 @@ export type TopUpInput = z.infer<typeof topUpSchema>;
 export type SavedPlaceInput = z.infer<typeof savedPlaceSchema>;
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+
+/* ---------------- Admin: operator review ---------------- */
+// A rejection must carry a reason: it is shown to the applicant verbatim
+// (dashboard, in-app notification and email), so it has to be a real sentence.
+export const rejectOperatorSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(10, "Give the applicant a clear reason (at least 10 characters)")
+    .max(1000, "Keep the reason under 1000 characters"),
+});
+export type RejectOperatorInput = z.infer<typeof rejectOperatorSchema>;

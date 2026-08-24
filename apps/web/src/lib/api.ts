@@ -278,7 +278,7 @@ export const api = {
   // company fields + ID doc + RDB certificate). Stays a passenger until approved.
   applyOperator: (formData: FormData) => requestMultipart<{ id: string; status: string }>("/operator/apply", formData, true),
   // The caller's own application status, or null if they haven't applied.
-  operatorApplication: () => request<{ status: string; companyName: string } | null>("/operator/application", { auth: true }),
+  operatorApplication: () => request<OperatorApplicationStatus | null>("/operator/application", { auth: true }),
   operatorMe: () => request<{ id: string; companyName: string; modes: string[]; status: string; contactInfo: string }>("/operator/me", { auth: true }),
   operatorOverview: () => request<OperatorOverview>("/operator/overview", { auth: true }),
   operatorVehicles: (page?: number) => request<Paginated<OperatorVehicle>>(`/operator/vehicles${pageQuery(page)}`, { auth: true }),
@@ -303,6 +303,13 @@ export const api = {
   meStats: () => request<MeStats>("/me/stats", { auth: true }),
   updateProfile: (body: { firstName: string; lastName: string; email: string; phone: string }) =>
     request<AuthUser>("/me/profile", { method: "PATCH", body, auth: true }),
+  // profile picture — the API deletes the previous image from storage itself
+  uploadAvatar: (file: File) => {
+    const fd = new FormData();
+    fd.append("avatar", file);
+    return requestMultipart<AuthUser>("/me/avatar", fd, true);
+  },
+  removeAvatar: () => request<AuthUser>("/me/avatar", { method: "DELETE", auth: true }),
   changePassword: (body: { currentPassword: string; newPassword: string; confirmPassword: string }) =>
     request<{ ok: boolean }>("/me/password", { method: "POST", body, auth: true }),
   notifications: (page?: number) => request<NotificationList>(`/me/notifications${pageQuery(page)}`, { auth: true }),
@@ -376,7 +383,7 @@ export const api = {
   adminReinstateOperator: (id: string) => request<{ status: string }>(`/admin/operators/${id}/reinstate`, { method: "POST", auth: true }),
   adminApprovals: () => request<AdminApproval[]>("/admin/approvals", { auth: true }),
   adminApprove: (id: string) => request<unknown>(`/admin/operators/${id}/approve`, { method: "POST", auth: true }),
-  adminReject: (id: string) => request<unknown>(`/admin/operators/${id}/reject`, { method: "POST", auth: true }),
+  adminReject: (id: string, reason: string) => request<unknown>(`/admin/operators/${id}/reject`, { method: "POST", body: { reason }, auth: true }),
   adminPayments: (page?: number) => request<AdminPayments>(`/admin/payments${pageQuery(page)}`, { auth: true }),
   // Reports — `q` is the range query from components/reports.tsx (rangeQuery)
   adminReports: (q = "?period=month") => request<AdminReports>(`/admin/reports${q}`, { auth: true }),
@@ -708,6 +715,8 @@ export interface AdminApproval {
   vehicles: string;
   date: string;
   submittedAt?: string;
+  rejectionReason?: string | null;
+  reviewedAt?: string | null;
   applicant?: string | null;
   email?: string | null;
   phone?: string | null;
@@ -723,6 +732,17 @@ export interface AdminUser {
   phone: string;
   joined: string;
   status: string;
+}
+// The signed-in passenger's own operator application (GET /operator/application).
+export interface OperatorApplicationStatus {
+  status: string;
+  companyName: string;
+  contactInfo: string;
+  idNumber: string | null;
+  modes: string[];
+  documents: KycDocument[];
+  rejectionReason: string | null;
+  reviewedAt: string | null;
 }
 export interface AdminOperator {
   id: string;
@@ -745,6 +765,8 @@ export interface AdminOperatorDetail {
   status: string;
   date: string;
   submittedAt?: string;
+  rejectionReason?: string | null;
+  reviewedAt?: string | null;
   applicant?: string | null;
   email?: string | null;
   phone?: string | null;

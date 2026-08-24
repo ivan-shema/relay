@@ -53,6 +53,7 @@ export const OperatorStatus = {
   PENDING: "PENDING",
   VERIFIED: "VERIFIED",
   SUSPENDED: "SUSPENDED",
+  REJECTED: "REJECTED",
 } as const;
 export type OperatorStatus = (typeof OperatorStatus)[keyof typeof OperatorStatus];
 

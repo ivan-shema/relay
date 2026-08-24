@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Avatar } from "@/components/avatar";
 import { useForm, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
@@ -174,7 +175,6 @@ export function ProfileSettingsPage({ role, onBack }: { role: string; onBack: ()
     }
   });
 
-  const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "?";
 
   return (
     <div className="rel-up">
@@ -186,7 +186,7 @@ export function ProfileSettingsPage({ role, onBack }: { role: string; onBack: ()
       <div style={{ background: "#1b1714", borderRadius: 24, padding: "28px 30px", color: "#fff", position: "relative", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ position: "absolute", right: -80, top: -80, width: 240, height: 240, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.24),transparent 68%)" }} />
         <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: 16 }}>
-          <div style={{ width: 58, height: 58, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, flex: "none", boxShadow: "0 0 0 4px rgba(255,255,255,.08)" }}>{initials}</div>
+          <Avatar user={user} size={58} editable onChanged={refreshUser} />
           <div style={{ minWidth: 0 }}>
             <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, letterSpacing: "-.4px" }}>{user ? `${user.firstName} ${user.lastName}` : "—"}</div>
             <div style={{ fontSize: 12.5, color: "#9a9186", fontWeight: 600, marginTop: 3 }}>{role} account · {user?.email}</div>
@@ -296,6 +296,7 @@ const STATUS_COLORS: Record<string, { c: string; b: string }> = {
   IDLE: { c: "#8c8378", b: "#f1ece2" },
   MAINTENANCE: { c: "#c2553f", b: "#fbeae6" },
   SUSPENDED: { c: "#c2553f", b: "#fbeae6" },
+  REJECTED: { c: "#c2553f", b: "#fbeae6" },
   VERIFIED: { c: "#1f9d6b", b: "#e7f6ee" },
   BOARDING: { c: "#ff6a1a", b: "#fff0e6" },
   RUNNING: { c: "#1f9d6b", b: "#e7f6ee" },
