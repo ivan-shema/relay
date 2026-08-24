@@ -11,6 +11,7 @@ import { notify } from "../lib/notify";
 import { fetchMerchantBalances } from "../lib/paypack";
 import { getMotoCommissionPct, setMotoCommissionPct } from "../lib/settings";
 import { z } from "zod";
+import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
 export const adminRouter = Router();
 
@@ -152,35 +153,6 @@ adminRouter.post(
       return u;
     });
     res.status(201).json({ id: user.id });
-  })
-);
-
-// GET /admin/reports/export — CSV of platform transactions
-adminRouter.get(
-  "/reports/export",
-  asyncHandler(async (_req, res) => {
-    const payments = await prisma.payment.findMany({
-      include: { booking: { include: { passenger: true, trip: { include: { operator: true, route: true } } } } },
-      orderBy: { createdAt: "desc" },
-    });
-    const header = "reference,date,passenger,operator,route,method,amount_rwf,status\n";
-    const rows = payments
-      .map((p) =>
-        [
-          p.reference,
-          p.createdAt.toISOString(),
-          JSON.stringify(fullNameOf(p.booking.passenger)),
-          JSON.stringify(p.booking.trip.operator.companyName),
-          JSON.stringify(p.booking.trip.route.name),
-          p.method,
-          Math.round(Number(p.amount)),
-          p.status,
-        ].join(",")
-      )
-      .join("\n");
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", 'attachment; filename="relay-report.csv"');
-    res.send(header + rows + "\n");
   })
 );
 
@@ -375,76 +347,250 @@ adminRouter.get(
   })
 );
 
-type ReportPeriod = "week" | "month" | "year" | "all";
+/* ---------------- Reports ----------------
+   One time window (?period=… or ?from=&to=), shared with the export so what
+   the admin sees on screen is exactly what they download. Gross volume is
+   bus/ride bookings (Payment PAID) + completed moto hails (escrow released);
+   the platform's own take is the bus fee share + the locked moto commission. */
 
-// Real revenue buckets for the selected window — granularity adapts to the
-// span so the chart stays readable (days for a week, weeks for a month,
-// months for a year/all-time).
-function reportBuckets(period: ReportPeriod, now: Date): { start: Date; end: Date; label: string }[] {
-  const buckets: { start: Date; end: Date; label: string }[] = [];
-  if (period === "week") {
-    for (let i = 6; i >= 0; i--) {
-      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
-      buckets.push({ start, end, label: start.toLocaleDateString("en-US", { weekday: "short" }) });
-    }
-  } else if (period === "month") {
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    for (let i = 0; i < 5; i++) {
-      const start = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1 + i * 7);
-      if (start > now) break;
-      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
-      buckets.push({ start, end, label: `Wk ${i + 1}` });
-    }
-  } else {
-    const monthsBack = period === "year" ? now.getMonth() + 1 : 12;
-    for (let i = monthsBack - 1; i >= 0; i--) {
-      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
-      buckets.push({ start, end, label: start.toLocaleDateString("en-US", { month: "short" }) });
-    }
+async function adminReportData(range: ReportRange) {
+  const { start, end } = range;
+  const [payments, rides, bookings] = await Promise.all([
+    prisma.payment.findMany({
+      where: { createdAt: { gte: start, lt: end } },
+      include: { booking: { include: { passenger: true, trip: { include: { operator: true, route: true } } } } },
+    }),
+    prisma.rideRequest.findMany({
+      where: { status: "COMPLETED", completedAt: { gte: start, lt: end } },
+      include: { passenger: true, acceptedDriver: { include: { user: true } } },
+    }),
+    prisma.booking.findMany({
+      where: { createdAt: { gte: start, lt: end } },
+      include: { trip: { select: { legs: true, operatorId: true } } },
+    }),
+  ]);
+
+  const paid = payments.filter((p) => p.status === "PAID");
+  const busRevenue = paid.reduce((s, p) => s + rdec(p.amount), 0);
+  const busFee = busRevenue * (BUS_PLATFORM_FEE_PCT / 100);
+  const motoGross = rides.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const motoCommission = rides.reduce((s, r) => s + rdec(r.commissionAmount), 0);
+  const grossVolume = busRevenue + motoGross;
+  const settledCount = paid.length + rides.length;
+
+  const multimodal = bookings.filter((b) => Array.isArray(b.trip.legs) && (b.trip.legs as unknown[]).length > 1).length;
+
+  // by mode — bookings use the trip's primary leg; every hail is MOTO
+  const modeAgg = new Map<string, { bookings: number; revenue: number }>();
+  for (const p of paid) {
+    const m = primaryMode(p.booking.trip.legs);
+    const e = modeAgg.get(m) ?? { bookings: 0, revenue: 0 };
+    e.bookings += 1; e.revenue += rdec(p.amount);
+    modeAgg.set(m, e);
   }
-  return buckets;
+  if (rides.length) {
+    const e = modeAgg.get("MOTO") ?? { bookings: 0, revenue: 0 };
+    e.bookings += rides.length; e.revenue += motoGross;
+    modeAgg.set("MOTO", e);
+  }
+  const MODE_LABEL: Record<string, string> = { BUS: "Bus", MOTO: "Moto-taxi", RIDE: "Shared ride" };
+  const byMode = [...modeAgg.entries()]
+    .map(([mode, v]) => ({ mode, label: MODE_LABEL[mode] ?? mode, bookings: v.bookings, revenue: round2(v.revenue), pct: grossVolume ? Math.round((v.revenue / grossVolume) * 100) : 0 }))
+    .sort((a, b) => b.revenue - a.revenue);
+
+  // by operator (bus/ride bookings only — moto hails are driver-direct)
+  const opAgg = new Map<string, { name: string; bookings: number; revenue: number }>();
+  for (const p of paid) {
+    const op = p.booking.trip.operator;
+    const e = opAgg.get(op.id) ?? { name: op.companyName, bookings: 0, revenue: 0 };
+    e.bookings += 1; e.revenue += rdec(p.amount);
+    opAgg.set(op.id, e);
+  }
+  const byOperator = [...opAgg.values()]
+    .map((o) => ({ name: o.name, bookings: o.bookings, revenue: round2(o.revenue), platformFee: round2(o.revenue * (BUS_PLATFORM_FEE_PCT / 100)), netToOperator: round2(o.revenue * (1 - BUS_PLATFORM_FEE_PCT / 100)) }))
+    .sort((a, b) => b.revenue - a.revenue);
+
+  // by payment method (moto hails are wallet-escrow)
+  const methodAgg = new Map<string, { count: number; amount: number }>();
+  for (const p of paid) {
+    const e = methodAgg.get(p.method) ?? { count: 0, amount: 0 };
+    e.count += 1; e.amount += rdec(p.amount);
+    methodAgg.set(p.method, e);
+  }
+  if (rides.length) {
+    const e = methodAgg.get("WALLET") ?? { count: 0, amount: 0 };
+    e.count += rides.length; e.amount += motoGross;
+    methodAgg.set("WALLET", e);
+  }
+  const byMethod = [...methodAgg.entries()].map(([method, v]) => ({ method, count: v.count, amount: round2(v.amount) })).sort((a, b) => b.amount - a.amount);
+
+  const statusAgg = new Map<string, number>();
+  for (const b of bookings) statusAgg.set(b.status, (statusAgg.get(b.status) ?? 0) + 1);
+  const bookingsByStatus = [...statusAgg.entries()].map(([status, count]) => ({ status, count })).sort((a, b) => b.count - a.count);
+
+  const passengers = new Set<string>([...paid.map((p) => p.booking.passengerId), ...rides.map((r) => r.passengerId)]);
+
+  const buckets = reportBuckets(range);
+  const revenueBars = bucketSums(buckets, [
+    ...paid.map((p) => ({ at: p.createdAt, value: rdec(p.amount) })),
+    ...rides.map((r) => ({ at: r.completedAt ?? r.createdAt, value: rdec(r.agreedFare) })),
+  ]);
+
+  const avgFare = settledCount ? round2(grossVolume / settledCount) : 0;
+  const multimodalPct = bookings.length ? Math.round((multimodal / bookings.length) * 100) : 0;
+
+  return {
+    period: range.period,
+    label: range.label,
+    from: range.start.toISOString(),
+    to: range.end.toISOString(),
+    kpis: {
+      grossVolume: round2(grossVolume),
+      busRevenue: round2(busRevenue),
+      motoGross: round2(motoGross),
+      platformTake: round2(busFee + motoCommission),
+      busFee: round2(busFee),
+      busFeePct: BUS_PLATFORM_FEE_PCT,
+      motoCommission: round2(motoCommission),
+      bookings: bookings.length,
+      paidBookings: paid.length,
+      rides: rides.length,
+      avgFare,
+      multimodalPct,
+      activePassengers: passengers.size,
+      cancelledBookings: bookings.filter((b) => b.status === "CANCELLED").length,
+    },
+    // legacy names still read by the dashboard cards
+    tripsThisMonth: bookings.length,
+    avgFare,
+    multimodalPct,
+    revenueBars,
+    byMode,
+    byOperator,
+    byMethod,
+    bookingsByStatus,
+  };
 }
 
-// GET /admin/reports?period=week|month|year|all — aggregate stats scoped to
-// a real time window (defaults to this month).
+// GET /admin/reports?period=week|month|year|all  |  ?from=YYYY-MM-DD&to=YYYY-MM-DD
 adminRouter.get(
   "/reports",
   asyncHandler(async (req, res) => {
-    const period: ReportPeriod = (["week", "month", "year", "all"] as const).includes(req.query.period as ReportPeriod)
-      ? (req.query.period as ReportPeriod)
-      : "month";
-    const now = new Date();
-    const rangeStart =
-      period === "week" ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6) :
-      period === "year" ? new Date(now.getFullYear(), 0, 1) :
-      period === "all" ? new Date(0) :
-      new Date(now.getFullYear(), now.getMonth(), 1);
+    res.json(await adminReportData(parseReportRange(req)));
+  })
+);
 
-    const [trips, paid, multimodalTrips] = await Promise.all([
-      prisma.booking.count({ where: { createdAt: { gte: rangeStart } } }),
-      prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: rangeStart } } }),
-      prisma.trip.findMany({ where: { createdAt: { gte: rangeStart } }, select: { legs: true } }),
+// GET /admin/reports/export?type=revenue|bookings|passengers|drivers&period|from&to
+// The four report types the "Generate report" builder offers, as CSV.
+const EXPORT_TYPES = ["revenue", "bookings", "passengers", "drivers"] as const;
+adminRouter.get(
+  "/reports/export",
+  asyncHandler(async (req, res) => {
+    const type = (EXPORT_TYPES as readonly string[]).includes(String(req.query.type)) ? (String(req.query.type) as (typeof EXPORT_TYPES)[number]) : "revenue";
+    const range = parseReportRange(req, "all");
+    const { start, end } = range;
+    const stamp = fileStamp(range);
+
+    if (type === "revenue") {
+      const [payments, rides] = await Promise.all([
+        prisma.payment.findMany({
+          where: { createdAt: { gte: start, lt: end } },
+          include: { booking: { include: { passenger: true, trip: { include: { operator: true, route: true } } } } },
+          orderBy: { createdAt: "desc" },
+        }),
+        prisma.rideRequest.findMany({
+          where: { status: "COMPLETED", completedAt: { gte: start, lt: end } },
+          include: { passenger: true, acceptedDriver: { include: { user: true } } },
+          orderBy: { completedAt: "desc" },
+        }),
+      ]);
+      type Row = [string, Date, string, string, string, string, string, number, number, number, string];
+      const rows: Row[] = [
+        ...payments.map((p): Row => {
+          const gross = rdec(p.amount);
+          const fee = p.status === "PAID" ? round2(gross * (BUS_PLATFORM_FEE_PCT / 100)) : 0;
+          return [p.reference, p.createdAt, "BOOKING", fullNameOf(p.booking.passenger), p.booking.trip.operator.companyName, p.booking.trip.route.name, p.method, gross, fee, round2(gross - fee), p.status];
+        }),
+        ...rides.map((r): Row => {
+          const gross = rdec(r.agreedFare);
+          const fee = rdec(r.commissionAmount);
+          return [r.id, r.completedAt ?? r.createdAt, "MOTO_HAIL", fullNameOf(r.passenger), r.acceptedDriver ? fullNameOf(r.acceptedDriver.user) : "—", `${r.originLabel} → ${r.destLabel}`, "WALLET", gross, fee, round2(gross - fee), "COMPLETED"];
+        }),
+      ].sort((a, b) => b[1].getTime() - a[1].getTime());
+      return sendCsv(res, `relay-revenue_${stamp}.csv`, toCsv(
+        ["reference", "date", "kind", "passenger", "operator_or_driver", "route", "method", "gross_rwf", "platform_fee_rwf", "net_rwf", "status"],
+        rows
+      ));
+    }
+
+    if (type === "bookings") {
+      const bookings = await prisma.booking.findMany({
+        where: { createdAt: { gte: start, lt: end } },
+        include: { passenger: true, payment: true, trip: { include: { operator: true, route: true, driver: { include: { user: true } }, vehicle: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+      return sendCsv(res, `relay-bookings_${stamp}.csv`, toCsv(
+        ["reference", "booked_at", "passenger", "operator", "route", "mode", "depart_at", "driver", "vehicle", "seats", "fare_rwf", "payment_status", "booking_status"],
+        bookings.map((b) => [
+          b.reference, b.createdAt, fullNameOf(b.passenger), b.trip.operator.companyName, b.trip.route.name, primaryMode(b.trip.legs), b.trip.departAt,
+          b.trip.driver ? fullNameOf(b.trip.driver.user) : "", b.trip.vehicle?.plateNumber ?? "", b.seats, rdec(b.fare), b.payment?.status ?? "NONE", b.status,
+        ])
+      ));
+    }
+
+    if (type === "passengers") {
+      const [users, bookings, rides] = await Promise.all([
+        prisma.user.findMany({ where: { role: "PASSENGER" }, orderBy: { createdAt: "desc" } }),
+        prisma.booking.findMany({ where: { createdAt: { gte: start, lt: end } }, include: { payment: true } }),
+        prisma.rideRequest.findMany({ where: { status: "COMPLETED", completedAt: { gte: start, lt: end } } }),
+      ]);
+      const agg = new Map<string, { bookings: number; rides: number; spend: number; last: Date | null }>();
+      const bump = (id: string, kind: "bookings" | "rides", amount: number, at: Date) => {
+        const e = agg.get(id) ?? { bookings: 0, rides: 0, spend: 0, last: null };
+        e[kind] += 1; e.spend += amount;
+        if (!e.last || at > e.last) e.last = at;
+        agg.set(id, e);
+      };
+      for (const b of bookings) bump(b.passengerId, "bookings", b.payment?.status === "PAID" ? rdec(b.payment.amount) : 0, b.createdAt);
+      for (const r of rides) bump(r.passengerId, "rides", rdec(r.agreedFare), r.completedAt ?? r.createdAt);
+      return sendCsv(res, `relay-passengers_${stamp}.csv`, toCsv(
+        ["passenger", "email", "phone", "joined", "bookings", "moto_rides", "spend_rwf", "last_activity", "wallet_balance_rwf"],
+        users.map((u) => {
+          const e = agg.get(u.id);
+          return [fullNameOf(u), u.email, u.phone, u.createdAt, e?.bookings ?? 0, e?.rides ?? 0, round2(e?.spend ?? 0), e?.last ?? "", rdec(u.walletBalance)];
+        })
+      ));
+    }
+
+    // drivers
+    const [drivers, bookings, rides, ratings] = await Promise.all([
+      prisma.driver.findMany({ include: { user: true, operator: true, vehicle: true } }),
+      prisma.booking.findMany({ where: { createdAt: { gte: start, lt: end }, trip: { driverId: { not: null } } }, include: { payment: true, trip: { select: { driverId: true } } } }),
+      prisma.rideRequest.findMany({ where: { completedAt: { gte: start, lt: end }, status: "COMPLETED" } }),
+      prisma.rating.findMany({ where: { createdAt: { gte: start, lt: end } }, include: { booking: { include: { trip: { select: { driverId: true } } } } } }),
     ]);
-    const revenue = paid.reduce((s, p) => s + dec(p.amount), 0);
-    const avgFare = paid.length ? revenue / paid.length : 0;
-    const multimodal = multimodalTrips.filter((t) => Array.isArray(t.legs) && (t.legs as unknown[]).length > 1).length;
-    const multimodalPct = multimodalTrips.length ? Math.round((multimodal / multimodalTrips.length) * 100) : 0;
-
-    const buckets = reportBuckets(period, now);
-    const revenueBars = buckets.map((b) => ({
-      m: b.label,
-      value: paid.filter((p) => p.createdAt >= b.start && p.createdAt < b.end).reduce((s, p) => s + dec(p.amount), 0),
-    }));
-
-    res.json({
-      period,
-      tripsThisMonth: trips,
-      avgFare: Number(avgFare.toFixed(2)),
-      multimodalPct,
-      revenueBars,
-    });
+    const dAgg = new Map<string, { trips: number; completed: number; rides: number; gross: number; commission: number; scores: number[] }>();
+    const get = (id: string) => { const e = dAgg.get(id) ?? { trips: 0, completed: 0, rides: 0, gross: 0, commission: 0, scores: [] }; dAgg.set(id, e); return e; };
+    for (const b of bookings) {
+      const e = get(b.trip.driverId!);
+      e.trips += 1;
+      if (b.status === "COMPLETED") e.completed += 1;
+      if (b.payment?.status === "PAID") e.gross += rdec(b.payment.amount);
+    }
+    for (const r of rides) {
+      if (!r.acceptedDriverId) continue;
+      const e = get(r.acceptedDriverId);
+      e.rides += 1; e.gross += rdec(r.agreedFare); e.commission += rdec(r.commissionAmount);
+    }
+    for (const rt of ratings) if (rt.booking.trip.driverId) get(rt.booking.trip.driverId).scores.push(rt.score);
+    return sendCsv(res, `relay-drivers_${stamp}.csv`, toCsv(
+      ["driver", "phone", "operator", "vehicle", "type", "status", "bookings_on_trips", "completed_bookings", "moto_rides", "gross_rwf", "moto_commission_rwf", "period_rating", "overall_rating"],
+      drivers.map((d) => {
+        const e = dAgg.get(d.id);
+        const pr = e && e.scores.length ? round2(e.scores.reduce((s, x) => s + x, 0) / e.scores.length) : "";
+        return [fullNameOf(d.user), d.user.phone, d.operator?.companyName ?? "Independent", d.vehicle?.plateNumber ?? "", d.vehicle?.type ?? "", d.suspended ? "SUSPENDED" : d.online ? "ONLINE" : "OFFLINE", e?.trips ?? 0, e?.completed ?? 0, e?.rides ?? 0, round2(e?.gross ?? 0), round2(e?.commission ?? 0), pr, d.ratingAvg];
+      })
+    ));
   })
 );
 
@@ -541,7 +687,7 @@ adminRouter.post(
       const driverShare = new Prisma.Decimal(fare).minus(commission);
       await tx.rideRequest.update({
         where: { id: ride.id },
-        data: { status: "COMPLETED", commissionPct: pct, commissionAmount: commission },
+        data: { status: "COMPLETED", commissionPct: pct, commissionAmount: commission, completedAt: new Date() },
       });
       await tx.user.update({
         where: { id: driver.userId },

@@ -20,6 +20,7 @@ import { upload, requireFile } from "../lib/uploads";
 import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
 import { notify } from "../lib/notify";
+import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
 export const operatorRouter = Router();
 
@@ -764,5 +765,150 @@ operatorRouter.get(
         nextPayout: Number(withdrawable.toFixed(2)),
       },
     });
+  })
+);
+
+/* ---------------- Reports ----------------
+   The company's own numbers for a time window: revenue and the platform fee
+   taken from it, bookings and cancellations, occupancy of the trips that ran,
+   and the route / driver breakdowns — plus a CSV of every booking in the
+   window so finance can reconcile against payouts. */
+
+async function operatorReportData(opId: string, range: ReportRange) {
+  const { start, end } = range;
+  const [bookings, trips, ratings] = await Promise.all([
+    prisma.booking.findMany({
+      where: { createdAt: { gte: start, lt: end }, trip: { operatorId: opId } },
+      include: { payment: true, trip: { include: { route: true, driver: { include: { user: true } } } } },
+    }),
+    prisma.trip.findMany({
+      where: { operatorId: opId, departAt: { gte: start, lt: end } },
+      include: { route: true, bookings: { select: { seats: true, status: true } } },
+    }),
+    prisma.rating.findMany({ where: { createdAt: { gte: start, lt: end }, booking: { trip: { operatorId: opId } } } }),
+  ]);
+
+  const paidOf = (b: (typeof bookings)[number]) => (b.payment?.status === "PAID" ? rdec(b.payment.amount) : 0);
+  const revenue = bookings.reduce((s, b) => s + paidOf(b), 0);
+  const platformFee = revenue * (BUS_PLATFORM_FEE_PCT / 100);
+  const paidBookings = bookings.filter((b) => b.payment?.status === "PAID");
+  const cancelled = bookings.filter((b) => b.status === "CANCELLED").length;
+  const seatsSold = trips.reduce((s, t) => s + t.bookings.filter((b) => b.status !== "CANCELLED").reduce((x, b) => x + b.seats, 0), 0);
+  const capacity = trips.reduce((s, t) => s + t.capacity, 0);
+  const avgRating = ratings.length ? round2(ratings.reduce((s, r) => s + r.score, 0) / ratings.length) : null;
+
+  const routeAgg = new Map<string, { route: string; trips: number; bookings: number; seats: number; revenue: number; capacity: number }>();
+  for (const t of trips) {
+    const e = routeAgg.get(t.routeId) ?? { route: t.route.name, trips: 0, bookings: 0, seats: 0, revenue: 0, capacity: 0 };
+    e.trips += 1; e.capacity += t.capacity;
+    e.seats += t.bookings.filter((b) => b.status !== "CANCELLED").reduce((x, b) => x + b.seats, 0);
+    routeAgg.set(t.routeId, e);
+  }
+  for (const b of bookings) {
+    const e = routeAgg.get(b.trip.routeId) ?? { route: b.trip.route.name, trips: 0, bookings: 0, seats: 0, revenue: 0, capacity: 0 };
+    e.bookings += 1; e.revenue += paidOf(b);
+    routeAgg.set(b.trip.routeId, e);
+  }
+  const byRoute = [...routeAgg.values()]
+    .map((r) => ({ ...r, revenue: round2(r.revenue), occupancyPct: r.capacity ? Math.min(100, Math.round((r.seats / r.capacity) * 100)) : 0 }))
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 10);
+
+  const driverAgg = new Map<string, { driver: string; bookings: number; completed: number; revenue: number; scores: number[] }>();
+  for (const b of bookings) {
+    const d = b.trip.driver;
+    if (!d) continue;
+    const e = driverAgg.get(d.id) ?? { driver: fullNameOf(d.user), bookings: 0, completed: 0, revenue: 0, scores: [] };
+    e.bookings += 1; e.revenue += paidOf(b);
+    if (b.status === "COMPLETED") e.completed += 1;
+    driverAgg.set(d.id, e);
+  }
+  const ratingByBooking = new Map(ratings.map((r) => [r.bookingId, r.score]));
+  for (const b of bookings) {
+    const score = ratingByBooking.get(b.id);
+    if (score !== undefined && b.trip.driverId) driverAgg.get(b.trip.driverId)?.scores.push(score);
+  }
+  const byDriver = [...driverAgg.values()]
+    .map((d) => ({ driver: d.driver, bookings: d.bookings, completed: d.completed, revenue: round2(d.revenue), rating: d.scores.length ? round2(d.scores.reduce((s, x) => s + x, 0) / d.scores.length) : null }))
+    .sort((a, b) => b.revenue - a.revenue);
+
+  const MODE_LABEL: Record<string, string> = { BUS: "Bus", MOTO: "Moto-taxi", RIDE: "Shared ride" };
+  const modeAgg = new Map<string, { bookings: number; revenue: number }>();
+  for (const b of bookings) {
+    const m = primaryMode(b.trip.legs);
+    const e = modeAgg.get(m) ?? { bookings: 0, revenue: 0 };
+    e.bookings += 1; e.revenue += paidOf(b);
+    modeAgg.set(m, e);
+  }
+  const byMode = [...modeAgg.entries()].map(([mode, v]) => ({ mode, label: MODE_LABEL[mode] ?? mode, bookings: v.bookings, revenue: round2(v.revenue), pct: revenue ? Math.round((v.revenue / revenue) * 100) : 0 })).sort((a, b) => b.revenue - a.revenue);
+
+  const statusAgg = new Map<string, number>();
+  for (const b of bookings) statusAgg.set(b.status, (statusAgg.get(b.status) ?? 0) + 1);
+  const byStatus = [...statusAgg.entries()].map(([status, count]) => ({ status, count })).sort((a, b) => b.count - a.count);
+
+  const revenueBars = bucketSums(reportBuckets(range), paidBookings.map((b) => ({ at: b.payment!.createdAt, value: rdec(b.payment!.amount) })));
+
+  return {
+    period: range.period,
+    label: range.label,
+    from: range.start.toISOString(),
+    to: range.end.toISOString(),
+    kpis: {
+      revenue: round2(revenue),
+      platformFee: round2(platformFee),
+      platformFeePct: BUS_PLATFORM_FEE_PCT,
+      net: round2(revenue - platformFee),
+      bookings: bookings.length,
+      paidBookings: paidBookings.length,
+      cancelled,
+      cancelRate: bookings.length ? Math.round((cancelled / bookings.length) * 100) : 0,
+      tripsRun: trips.length,
+      seatsSold,
+      capacity,
+      occupancyPct: capacity ? Math.min(100, Math.round((seatsSold / capacity) * 100)) : 0,
+      avgFare: paidBookings.length ? round2(revenue / paidBookings.length) : 0,
+      avgRating,
+      ratingsCount: ratings.length,
+    },
+    revenueBars,
+    byRoute,
+    byDriver,
+    byMode,
+    byStatus,
+  };
+}
+
+// GET /operator/reports?period=…  |  ?from=&to=
+operatorRouter.get(
+  "/reports",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    res.json(await operatorReportData(opId, parseReportRange(req)));
+  })
+);
+
+// GET /operator/reports/export — every booking in the window, as CSV
+operatorRouter.get(
+  "/reports/export",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const range = parseReportRange(req, "month");
+    const bookings = await prisma.booking.findMany({
+      where: { createdAt: { gte: range.start, lt: range.end }, trip: { operatorId: opId } },
+      include: { passenger: true, payment: true, rating: true, trip: { include: { route: true, driver: { include: { user: true } }, vehicle: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+    sendCsv(res, `bookings_${fileStamp(range)}.csv`, toCsv(
+      ["reference", "booked_at", "passenger", "phone", "route", "mode", "depart_at", "driver", "vehicle", "seats", "fare_rwf", "platform_fee_rwf", "net_rwf", "payment_method", "payment_status", "booking_status", "rating"],
+      bookings.map((b) => {
+        const paid = b.payment?.status === "PAID" ? rdec(b.payment.amount) : 0;
+        const fee = round2(paid * (BUS_PLATFORM_FEE_PCT / 100));
+        return [
+          b.reference, b.createdAt, fullNameOf(b.passenger), b.passenger.phone, b.trip.route.name, primaryMode(b.trip.legs), b.trip.departAt,
+          b.trip.driver ? fullNameOf(b.trip.driver.user) : "", b.trip.vehicle?.plateNumber ?? "", b.seats, rdec(b.fare), fee, round2(paid - fee),
+          b.payment?.method ?? "", b.payment?.status ?? "NONE", b.status, b.rating?.score ?? "",
+        ];
+      })
+    ));
   })
 );

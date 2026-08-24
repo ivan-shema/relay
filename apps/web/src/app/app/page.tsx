@@ -13,10 +13,11 @@ import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus } from "@/lib/api";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus, type PassengerReports } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
+import { PeriodPicker, ExportButtons, downloadAuthed, exportReportPdf, rangeQuery, isRangeReady, fmtMoney, fmtReportDate, type ReportRangeValue } from "@/components/reports";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
@@ -2056,6 +2057,7 @@ function WalletTab({ insights }: { insights?: Insights | null }) {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <StatementCard />
           <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 20 }}>
             <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 15 }}>Payment methods</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2748,4 +2750,103 @@ function fmtDate(iso: string): string {
 }
 function fmtDateTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+// Spending statement: what the rider spent in a window, by mode and route,
+// wallet money in/out, and a downloadable CSV/PDF statement.
+function StatementCard() {
+  const [range, setRange] = useState<ReportRangeValue>({ period: "month" });
+  const [data, setData] = useState<PassengerReports | null>(null);
+  const [busy, setBusy] = useState(false);
+  const q = rangeQuery(range);
+
+  useEffect(() => {
+    if (!isRangeReady(range)) return;
+    let active = true;
+    api.myReports(q).then((d) => active && setData(d)).catch(() => undefined);
+    return () => { active = false; };
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const exportCsv = async () => {
+    setBusy(true);
+    try { await downloadAuthed(api.myReportExportUrl(q), "relay-statement.csv"); }
+    catch (e) { window.alert(e instanceof Error ? e.message : "Export failed"); }
+    finally { setBusy(false); }
+  };
+  const exportPdf = async () => {
+    if (!data) return;
+    setBusy(true);
+    try {
+      const n = (v: number) => Math.round(v).toLocaleString("en-US");
+      await exportReportPdf({
+        title: "Account statement",
+        subtitle: data.label,
+        fileName: `relay-statement_${data.from.slice(0, 10)}.pdf`,
+        kpis: [
+          { label: "Spent on trips", value: fmtMoney(data.kpis.spend) },
+          { label: "Trips · moto rides", value: `${data.kpis.paidBookings} · ${data.kpis.rides}` },
+          { label: "Wallet money in", value: fmtMoney(data.kpis.moneyIn) },
+          { label: "Refunds received", value: fmtMoney(data.kpis.refunds) },
+        ],
+        sections: [
+          { title: "Spend by mode", columns: ["Mode", "Trips", "Amount (RWF)", "Share"], rows: data.byMode.map((m) => [m.label, m.trips, n(m.amount), `${m.pct}%`]), align: ["l", "r", "r", "r"] },
+          { title: "Most travelled", columns: ["Route", "Trips", "Amount (RWF)"], rows: data.topRoutes.map((r) => [r.route, r.trips, n(r.amount)]), align: ["l", "r", "r"] },
+          { title: `Statement (${data.rows.length} lines)`, columns: ["Date", "Kind", "Description", "Amount (RWF)", "Status"], rows: data.rows.map((r) => [fmtReportDate(r.date), r.kind, r.route, (r.amount > 0 ? "+" : "") + n(r.amount), r.status]), align: ["l", "l", "l", "r", "l"] },
+        ],
+      });
+    } catch (e) { window.alert(e instanceof Error ? e.message : "PDF export failed"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em" }}>Statement</span>
+        <PeriodPicker value={range} onChange={setRange} />
+      </div>
+      {!data ? (
+        <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>Loading…</div>
+      ) : (
+        <>
+          <div style={{ fontFamily: DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: "-.6px" }}>{formatRWF(data.kpis.spend)}</div>
+          <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginBottom: 10 }}>
+            spent on {data.kpis.paidBookings + data.kpis.rides} trips · {data.label}
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 5, height: 46, marginBottom: 12 }}>
+            {data.spendBars.map((b, i) => {
+              const max = Math.max(1, ...data.spendBars.map((x) => x.value));
+              return <div key={i} title={`${b.m}: ${formatRWF(b.value)}`} style={{ flex: 1, height: `${Math.max(4, (b.value / max) * 100)}%`, background: b.value > 0 ? "#ff6a1a" : "#f1ece2", borderRadius: 3 }} />;
+            })}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+            {[
+              ["Money in", formatRWF(data.kpis.moneyIn), "#1f9d6b"],
+              ["Money out", formatRWF(data.kpis.moneyOut), "#1b1714"],
+              ["Refunds", formatRWF(data.kpis.refunds), "#1f9d6b"],
+              ["Avg per trip", formatRWF(data.kpis.avgPerTrip), "#1b1714"],
+            ].map(([l, v, c]) => (
+              <div key={l} style={{ background: "#faf8f4", borderRadius: 12, padding: "9px 11px" }}>
+                <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 700 }}>{l}</div>
+                <div style={{ fontFamily: MONO, fontSize: 13.5, fontWeight: 700, color: c }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          {data.topRoutes.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 }}>Most travelled</div>
+              {data.topRoutes.slice(0, 3).map((r) => (
+                <div key={r.route} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, padding: "6px 0", borderTop: "1px solid #f1ece2" }}>
+                  <span style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.route}</span>
+                  <span style={{ fontFamily: MONO, fontWeight: 700, color: "#8c8378", flex: "none" }}>{r.trips}× · {formatRWF(r.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <ExportButtons onCsv={exportCsv} onPdf={exportPdf} busy={busy} />
+          </div>
+        </>
+      )}
+    </div>
+  );
 }

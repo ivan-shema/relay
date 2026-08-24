@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { formatRWF } from "@relay/shared";
-import { api, ApiError, type DriverMe, type DriverRequest, type DriverTrip, type DriverMotoRequest } from "@/lib/api";
+import { api, ApiError, type DriverMe, type DriverRequest, type DriverTrip, type DriverMotoRequest, type DriverReports } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { StatusPill, TicketVerifyForm, ProfileSettingsPage } from "@/components/console";
+import { StatusPill, TicketVerifyForm, ProfileSettingsPage, BarChart } from "@/components/console";
+import { PeriodPicker, ExportButtons, downloadAuthed, exportReportPdf, rangeQuery, isRangeReady, fmtMoney, fmtReportDate, type ReportRangeValue } from "@/components/reports";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
@@ -200,23 +201,7 @@ export default function DriverConsole() {
                 <span style={{ fontSize: 12, fontWeight: 700 }}>Your location · live</span>
               </div>
             </div>
-            <div style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "18px 20px" }}>
-              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>This week</div>
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 54, margin: "14px 0 16px" }}>
-                {[40, 65, 50, 85, 70, 95, 55].map((h, i) => (
-                  <div key={i} style={{ flex: 1, height: `${h}%`, background: h >= 85 ? "#ff6a1a" : "#f1ece2", borderRadius: 3 }} />
-                ))}
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}>
-                <span style={{ color: "#8c8378" }}>Trips completed</span>
-                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{s.tripsWeek}</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}>
-                <span style={{ color: "#8c8378" }}>Earnings</span>
-                <span style={{ fontFamily: MONO, fontWeight: 700, color: "#1f9d6b" }}>{formatRWF(s.earningsWeek)}</span>
-              </div>
-              <button onClick={cashOut} style={{ width: "100%", marginTop: 12, background: "#1b1714", color: "#fff", border: "none", borderRadius: 12, padding: 13, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Cash out to MoMo</button>
-            </div>
+            <EarningsReportSection onCashOut={cashOut} />
           </div>
         </div>
         )}
@@ -451,6 +436,101 @@ function Tile({ label, value, dark }: { label: string; value: string; dark?: boo
     <div style={{ background: dark ? "#1b1714" : "#fff", border: dark ? "none" : "1px solid #ece6db", borderRadius: 16, padding: 16, color: dark ? "#fff" : "#1b1714" }}>
       <div style={{ fontSize: 11.5, color: dark ? "#cfc7bb" : "#8c8378", fontWeight: 600 }}>{label}</div>
       <div style={{ fontFamily: MONO, fontSize: 23, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+}
+
+// Earnings statement for a time window: scheduled-trip fares plus moto hails
+// net of the locked commission, a real bar chart, the last lines, and CSV/PDF
+// export. Replaces the old placeholder "This week" bars.
+function EarningsReportSection({ onCashOut }: { onCashOut: () => void }) {
+  const [range, setRange] = useState<ReportRangeValue>({ period: "week" });
+  const [data, setData] = useState<DriverReports | null>(null);
+  const [busy, setBusy] = useState(false);
+  const q = rangeQuery(range);
+
+  useEffect(() => {
+    if (!isRangeReady(range)) return;
+    let active = true;
+    api.driverReports(q).then((d) => active && setData(d)).catch(() => undefined);
+    return () => { active = false; };
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const exportCsv = async () => {
+    setBusy(true);
+    try { await downloadAuthed(api.driverReportExportUrl(q), "earnings.csv"); }
+    catch (e) { window.alert(e instanceof Error ? e.message : "Export failed"); }
+    finally { setBusy(false); }
+  };
+  const exportPdf = async () => {
+    if (!data) return;
+    setBusy(true);
+    try {
+      await exportReportPdf({
+        title: "Earnings statement",
+        subtitle: data.label,
+        fileName: `earnings_${data.from.slice(0, 10)}.pdf`,
+        kpis: [
+          { label: "Net earnings", value: fmtMoney(data.kpis.net) },
+          { label: "Gross", value: fmtMoney(data.kpis.gross) },
+          { label: "Relay fee (moto)", value: fmtMoney(data.kpis.motoCommission) },
+          { label: "Trips · moto rides", value: `${data.kpis.tripsCompleted} · ${data.kpis.rides}` },
+        ],
+        sections: [
+          { title: "Earnings by period", columns: ["Period", "Net (RWF)"], rows: data.earningsBars.map((b) => [b.m, Math.round(b.value).toLocaleString("en-US")]), align: ["l", "r"] },
+          { title: `Statement (${data.rows.length} lines)`, columns: ["Date", "Kind", "Route", "Passenger", "Gross", "Fee", "Net", "Status"], rows: data.rows.map((r) => [fmtReportDate(r.date), r.kind, r.route, r.passenger, Math.round(r.gross).toLocaleString("en-US"), Math.round(r.fee).toLocaleString("en-US"), Math.round(r.net).toLocaleString("en-US"), r.status]), align: ["l", "l", "l", "l", "r", "r", "r", "l"] },
+        ],
+      });
+    } catch (e) { window.alert(e instanceof Error ? e.message : "PDF export failed"); }
+    finally { setBusy(false); }
+  };
+
+  const line = (label: string, value: React.ReactNode, color?: string) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}>
+      <span style={{ color: "#8c8378" }}>{label}</span>
+      <span style={{ fontFamily: MONO, fontWeight: 700, color }}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: "18px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>Earnings</div>
+        <PeriodPicker value={range} onChange={setRange} />
+      </div>
+      {!data ? (
+        <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "10px 0" }}>Loading…</div>
+      ) : (
+        <>
+          <div style={{ fontFamily: DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: "-.6px", color: "#1f9d6b" }}>{formatRWF(data.kpis.net)}</div>
+          <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginBottom: 6 }}>net earned · {data.label}</div>
+          <BarChart bars={data.earningsBars} height={64} />
+          <div style={{ marginTop: 12 }}>
+            {line("Gross fares", formatRWF(data.kpis.gross))}
+            {data.kpis.motoCommission > 0 && line("Relay fee on moto hails", `− ${formatRWF(data.kpis.motoCommission)}`, "#c2553f")}
+            {line("Trips completed", String(data.kpis.tripsCompleted))}
+            {line("Moto rides completed", `${data.kpis.rides}${data.kpis.ridesCancelled ? ` (${data.kpis.ridesCancelled} cancelled)` : ""}`)}
+            {data.kpis.disputes > 0 && line("Pickup disputes", String(data.kpis.disputes), "#c2553f")}
+            {line("Rating in period", data.kpis.avgRating !== null ? `★ ${data.kpis.avgRating.toFixed(1)} (${data.kpis.ratingsCount})` : "—")}
+          </div>
+          {data.rows.length > 0 && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #f1ece2" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 }}>Latest lines</div>
+              {data.rows.slice(0, 6).map((r) => (
+                <div key={r.reference} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", fontSize: 12.5 }}>
+                  <span style={{ fontSize: 9.5, fontWeight: 800, borderRadius: 6, padding: "2px 6px", background: r.kind === "MOTO" ? "#fff0e6" : "#e9f0ff", color: r.kind === "MOTO" ? "#ff6a1a" : "#2f6bff", flex: "none" }}>{r.kind}</span>
+                  <span style={{ flex: 1, minWidth: 0, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.route}</span>
+                  <span style={{ fontFamily: MONO, fontWeight: 700, color: r.net > 0 ? "#1f9d6b" : "#8c8378", flex: "none" }}>{formatRWF(r.net)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+            <ExportButtons onCsv={exportCsv} onPdf={exportPdf} busy={busy} />
+          </div>
+        </>
+      )}
+      <button onClick={onCashOut} style={{ width: "100%", marginTop: 12, background: "#1b1714", color: "#fff", border: "none", borderRadius: 12, padding: 13, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Cash out to MoMo</button>
     </div>
   );
 }

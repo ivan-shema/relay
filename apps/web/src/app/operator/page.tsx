@@ -13,6 +13,7 @@ import {
   type OperatorDriverTrip,
   type OperatorBookingRow,
   type OperatorPayments,
+  type OperatorReports,
 } from "@/lib/api";
 import {
   formatRWF,
@@ -28,7 +29,8 @@ import {
   type InviteDriverInput,
 } from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
-import { ConsoleShell, ProfileSettingsPage, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, TicketVerifyForm, type NavItem } from "@/components/console";
+import { ConsoleShell, ProfileSettingsPage, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, TicketVerifyForm, BarChart, type NavItem } from "@/components/console";
+import { PeriodPicker, ExportButtons, StatTile, ReportTable, downloadAuthed, exportReportPdf, rangeQuery, isRangeReady, fmtMoney, type ReportRangeValue } from "@/components/reports";
 import { NotificationBell } from "@/components/notification-bell";
 
 const MONO = "'JetBrains Mono', monospace";
@@ -42,6 +44,7 @@ const NAV: NavItem[] = [
   { key: "drivers", label: "Drivers", icon: "☻" },
   { key: "bookings", label: "Bookings", icon: "≡" },
   { key: "payments", label: "Payments", icon: "◈" },
+  { key: "reports", label: "Reports", icon: "▧" },
 ];
 
 const TITLES: Record<string, string> = {
@@ -53,6 +56,7 @@ const TITLES: Record<string, string> = {
   drivers: "Drivers",
   bookings: "Bookings",
   payments: "Payments & payouts",
+  reports: "Reports & analytics",
 };
 
 export default function OperatorConsole() {
@@ -102,8 +106,7 @@ export default function OperatorConsole() {
         title={profileOpen ? "Profile & settings" : TITLES[tab]}
         subtitle={profileOpen ? "Your account" : `${company} · live`}
         actions={profileOpen ? undefined : <>
-          <button style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 11, padding: "10px 15px", fontSize: 13, fontWeight: 700, fontFamily: "'Manrope', sans-serif", cursor: "pointer" }}>Last 24h ▾</button>
-          <PrimaryButton>Export report</PrimaryButton>
+          {tab !== "reports" && <PrimaryButton onClick={() => { setProfileOpen(false); setSelectedDriver(null); setTab("reports"); }}>Reports</PrimaryButton>}
           <NotificationBell />
         </>}
       >
@@ -118,6 +121,7 @@ export default function OperatorConsole() {
             {tab === "drivers" && <DriversTab selected={selectedDriver} onSelect={setSelectedDriver} />}
             {tab === "bookings" && <BookingsTab />}
             {tab === "payments" && <PaymentsTab />}
+            {tab === "reports" && <ReportsTab />}
           </>
         )}
       </ConsoleShell>
@@ -763,6 +767,113 @@ function PaymentsTab() {
 }
 
 /* helpers */
+// Company reports for one time window: revenue and Relay's fee, bookings and
+// cancellations, occupancy of the trips that ran, route and driver
+// performance — exportable as CSV (every booking) or PDF (this summary).
+function ReportsTab() {
+  const [range, setRange] = useState<ReportRangeValue>({ period: "month" });
+  const [data, setData] = useState<OperatorReports | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const q = rangeQuery(range);
+
+  useEffect(() => {
+    if (!isRangeReady(range)) return;
+    let active = true;
+    setData(null);
+    setError(null);
+    api.operatorReports(q).then((d) => active && setData(d)).catch((e) => active && setError(e instanceof Error ? e.message : "Could not load the report"));
+    return () => { active = false; };
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const n = (v: number) => Math.round(v).toLocaleString("en-US");
+  const exportCsv = async () => {
+    setBusy(true);
+    try { await downloadAuthed(api.operatorReportExportUrl(q), "bookings.csv"); }
+    catch (e) { window.alert(e instanceof Error ? e.message : "Export failed"); }
+    finally { setBusy(false); }
+  };
+  const exportPdf = async () => {
+    if (!data) return;
+    setBusy(true);
+    try {
+      await exportReportPdf({
+        title: "Operator report",
+        subtitle: data.label,
+        fileName: `operator-report_${data.from.slice(0, 10)}.pdf`,
+        kpis: [
+          { label: "Revenue (gross)", value: fmtMoney(data.kpis.revenue) },
+          { label: `Net after ${data.kpis.platformFeePct}% Relay fee`, value: fmtMoney(data.kpis.net) },
+          { label: "Bookings", value: `${data.kpis.bookings} (${data.kpis.cancelled} cancelled)` },
+          { label: "Occupancy", value: `${data.kpis.occupancyPct}%` },
+        ],
+        sections: [
+          { title: "Revenue by period", columns: ["Period", "Revenue (RWF)"], rows: data.revenueBars.map((b) => [b.m, n(b.value)]), align: ["l", "r"] },
+          { title: "Route performance", columns: ["Route", "Trips", "Bookings", "Seats", "Occupancy", "Revenue (RWF)"], rows: data.byRoute.map((r) => [r.route, r.trips, r.bookings, r.seats, `${r.occupancyPct}%`, n(r.revenue)]), align: ["l", "r", "r", "r", "r", "r"] },
+          { title: "Driver performance", columns: ["Driver", "Bookings", "Completed", "Revenue (RWF)", "Rating"], rows: data.byDriver.map((d) => [d.driver, d.bookings, d.completed, n(d.revenue), d.rating ?? "—"]), align: ["l", "r", "r", "r", "r"] },
+          { title: "By transport mode", columns: ["Mode", "Bookings", "Revenue (RWF)", "Share"], rows: data.byMode.map((m) => [m.label, m.bookings, n(m.revenue), `${m.pct}%`]), align: ["l", "r", "r", "r"] },
+        ],
+      });
+    } catch (e) { window.alert(e instanceof Error ? e.message : "PDF export failed"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <PeriodPicker value={range} onChange={setRange} />
+        <ExportButtons onCsv={exportCsv} onPdf={exportPdf} busy={busy || !data} />
+      </div>
+      {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{error}</div>}
+      {!data ? (!error && <Loading />) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 16 }}>
+            <StatTile label="Revenue (gross)" value={formatRWF(data.kpis.revenue)} sub={`${data.kpis.paidBookings} paid bookings · avg ${formatRWF(data.kpis.avgFare)}`} />
+            <StatTile label={`Net after ${data.kpis.platformFeePct}% Relay fee`} value={formatRWF(data.kpis.net)} sub={`fee ${formatRWF(data.kpis.platformFee)}`} accent="#1f9d6b" />
+            <StatTile label="Bookings" value={String(data.kpis.bookings)} sub={`${data.kpis.cancelled} cancelled (${data.kpis.cancelRate}%)`} />
+            <StatTile label="Occupancy" value={`${data.kpis.occupancyPct}%`} sub={`${data.kpis.seatsSold} of ${data.kpis.capacity} seats · ${data.kpis.tripsRun} trips ran`} />
+            <StatTile label="Passenger rating" value={data.kpis.avgRating !== null ? `★ ${data.kpis.avgRating.toFixed(1)}` : "—"} sub={`${data.kpis.ratingsCount} ratings`} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.55fr 1fr", gap: 16, marginBottom: 16 }} className="op-two">
+            <Card>
+              <CardTitle right={<span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>{data.label}</span>}>Revenue</CardTitle>
+              <BarChart bars={data.revenueBars} height={150} />
+            </Card>
+            <Card>
+              <CardTitle>By transport mode</CardTitle>
+              <ReportTable columns={["Mode", "Bookings", "Revenue", "Share"]} align={["l", "r", "r", "r"]}
+                rows={data.byMode.map((m) => [m.label, m.bookings, formatRWF(m.revenue), `${m.pct}%`])} />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 14, paddingTop: 12, borderTop: "1px solid #f1ece2" }}>
+                {data.byStatus.map((s) => (
+                  <span key={s.status} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <StatusPill status={s.status} /><span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 700 }}>{s.count}</span>
+                  </span>
+                ))}
+              </div>
+            </Card>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16 }} className="op-two">
+            <Card>
+              <CardTitle>Route performance</CardTitle>
+              <ReportTable columns={["Route", "Trips", "Bookings", "Occupancy", "Revenue"]} align={["l", "r", "r", "l", "r"]}
+                rows={data.byRoute.map((r) => [
+                  r.route, r.trips, r.bookings,
+                  <span key="occ" style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 110 }}><span style={{ flex: 1 }}><ProgressBar pct={r.occupancyPct} /></span><span style={{ fontFamily: MONO, fontSize: 12 }}>{r.occupancyPct}%</span></span>,
+                  formatRWF(r.revenue),
+                ])} />
+            </Card>
+            <Card>
+              <CardTitle>Driver performance</CardTitle>
+              <ReportTable columns={["Driver", "Bookings", "Done", "Revenue", "Rating"]} align={["l", "r", "r", "r", "r"]}
+                rows={data.byDriver.map((d) => [d.driver, d.bookings, d.completed, formatRWF(d.revenue), d.rating !== null ? `★ ${d.rating.toFixed(1)}` : "—"])} />
+            </Card>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function Loading() {
   return <div style={{ padding: 40, textAlign: "center", color: "#a39a8d", fontWeight: 600 }}>Loading…</div>;
 }

@@ -10,6 +10,7 @@ import { normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOu
 import { settlePayout } from "../lib/settlement";
 import { getMotoCommissionPct } from "../lib/settings";
 import { autoResolveStaleDispute } from "./rides";
+import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
 export const driverRouter = Router();
 
@@ -41,22 +42,25 @@ driverRouter.get(
     const driver = await getDriver(req.auth!.sub);
 
     const today = startOfToday();
-    const paidToday = await prisma.payment.findMany({
-      where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { driverId: driver.id } } },
-    });
-    const earningsToday = paidToday.reduce((s, p) => s + dec(p.amount), 0);
-
-    const tripsToday = await prisma.booking.count({
-      where: { status: "COMPLETED", createdAt: { gte: today }, trip: { driverId: driver.id } },
-    });
-
-    const weekPaid = await prisma.payment.findMany({
-      where: { status: "PAID", createdAt: { gte: new Date(Date.now() - 7 * 864e5) }, booking: { trip: { driverId: driver.id } } },
-    });
-    const earningsWeek = weekPaid.reduce((s, p) => s + dec(p.amount), 0);
-    const tripsWeek = await prisma.booking.count({
-      where: { status: "COMPLETED", createdAt: { gte: new Date(Date.now() - 7 * 864e5) }, trip: { driverId: driver.id } },
-    });
+    const weekAgo = new Date(Date.now() - 7 * 864e5);
+    const [paidToday, tripsTodayBus, weekPaid, tripsWeekBus, weekRides] = await Promise.all([
+      prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { driverId: driver.id } } } }),
+      prisma.booking.count({ where: { status: "COMPLETED", createdAt: { gte: today }, trip: { driverId: driver.id } } }),
+      prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: weekAgo }, booking: { trip: { driverId: driver.id } } } }),
+      prisma.booking.count({ where: { status: "COMPLETED", createdAt: { gte: weekAgo }, trip: { driverId: driver.id } } }),
+      // Moto hails completed this week — what actually landed in the wallet
+      // (fare minus the commission locked on each ride).
+      prisma.rideRequest.findMany({
+        where: { acceptedDriverId: driver.id, status: "COMPLETED", completedAt: { gte: weekAgo } },
+        select: { agreedFare: true, commissionAmount: true, completedAt: true },
+      }),
+    ]);
+    const rideNet = (r: (typeof weekRides)[number]) => rdec(r.agreedFare) - rdec(r.commissionAmount);
+    const todayRides = weekRides.filter((r) => r.completedAt && r.completedAt >= today);
+    const earningsToday = paidToday.reduce((s, p) => s + dec(p.amount), 0) + todayRides.reduce((s, r) => s + rideNet(r), 0);
+    const tripsToday = tripsTodayBus + todayRides.length;
+    const earningsWeek = weekPaid.reduce((s, p) => s + dec(p.amount), 0) + weekRides.reduce((s, r) => s + rideNet(r), 0);
+    const tripsWeek = tripsWeekBus + weekRides.length;
 
     res.json({
       id: driver.id,
@@ -520,5 +524,101 @@ driverRouter.get(
         status: b.status,
       }))
     );
+  })
+);
+
+/* ---------------- Earnings report ----------------
+   A driver's statement for a time window. Two income streams are combined:
+   fares collected on scheduled trips they drove (bus / shared ride bookings,
+   PAID) and on-demand moto hails they completed (agreed fare minus the
+   commission locked on the ride). Every line is exportable as CSV. */
+
+interface DriverStatementRow {
+  date: Date;
+  kind: "TRIP" | "MOTO";
+  route: string;
+  passenger: string;
+  gross: number;
+  fee: number;
+  net: number;
+  status: string;
+  reference: string;
+}
+
+async function driverReportData(driverId: string, range: ReportRange) {
+  const { start, end } = range;
+  const [bookings, rides, cancelledRides, disputed, ratings] = await Promise.all([
+    prisma.booking.findMany({
+      where: { createdAt: { gte: start, lt: end }, trip: { driverId } },
+      include: { passenger: true, payment: true, trip: { include: { route: true } } },
+    }),
+    prisma.rideRequest.findMany({
+      where: { acceptedDriverId: driverId, status: "COMPLETED", completedAt: { gte: start, lt: end } },
+      include: { passenger: true },
+    }),
+    prisma.rideRequest.count({ where: { acceptedDriverId: driverId, status: "CANCELLED", createdAt: { gte: start, lt: end } } }),
+    prisma.rideRequest.count({ where: { acceptedDriverId: driverId, disputedAt: { gte: start, lt: end } } }),
+    prisma.rating.findMany({ where: { createdAt: { gte: start, lt: end }, booking: { trip: { driverId } } } }),
+  ]);
+
+  const rows: DriverStatementRow[] = [
+    ...bookings.map((b): DriverStatementRow => {
+      const gross = b.payment?.status === "PAID" ? rdec(b.payment.amount) : 0;
+      return { date: b.createdAt, kind: "TRIP", route: b.trip.route.name, passenger: fullNameOf(b.passenger), gross, fee: 0, net: gross, status: b.status, reference: b.reference };
+    }),
+    ...rides.map((r): DriverStatementRow => {
+      const gross = rdec(r.agreedFare);
+      const fee = rdec(r.commissionAmount);
+      return { date: r.completedAt ?? r.createdAt, kind: "MOTO", route: `${r.originLabel} → ${r.destLabel}`, passenger: fullNameOf(r.passenger), gross, fee, net: round2(gross - fee), status: "COMPLETED", reference: r.id };
+    }),
+  ].sort((a, b) => b.date.getTime() - a.date.getTime());
+
+  const gross = rows.reduce((s, r) => s + r.gross, 0);
+  const fee = rows.reduce((s, r) => s + r.fee, 0);
+  const tripsCompleted = bookings.filter((b) => b.status === "COMPLETED").length;
+
+  return {
+    period: range.period,
+    label: range.label,
+    from: range.start.toISOString(),
+    to: range.end.toISOString(),
+    kpis: {
+      gross: round2(gross),
+      motoCommission: round2(fee),
+      net: round2(gross - fee),
+      bookings: bookings.length,
+      tripsCompleted,
+      rides: rides.length,
+      ridesCancelled: cancelledRides,
+      disputes: disputed,
+      avgRating: ratings.length ? round2(ratings.reduce((s, r) => s + r.score, 0) / ratings.length) : null,
+      ratingsCount: ratings.length,
+    },
+    earningsBars: bucketSums(reportBuckets(range), rows.map((r) => ({ at: r.date, value: r.net }))),
+    rows: rows.slice(0, 300).map((r) => ({ ...r, date: r.date.toISOString() })),
+    truncated: rows.length > 300,
+  };
+}
+
+// GET /driver/reports?period=…  |  ?from=&to=
+driverRouter.get(
+  "/reports",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    res.json(await driverReportData(driver.id, parseReportRange(req)));
+  })
+);
+
+// GET /driver/reports/export — the statement lines as CSV
+driverRouter.get(
+  "/reports/export",
+  asyncHandler(async (req, res) => {
+    const driver = await getDriver(req.auth!.sub);
+    const range = parseReportRange(req, "month");
+    const data = await driverReportData(driver.id, range);
+    sendCsv(res, `earnings_${fileStamp(range)}.csv`, toCsv(
+      ["date", "kind", "route", "passenger", "gross_rwf", "relay_fee_rwf", "net_rwf", "status", "reference"],
+      data.rows.map((r) => [r.date, r.kind, r.route, r.passenger, r.gross, r.fee, r.net, r.status, r.reference])
+    ));
   })
 );

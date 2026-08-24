@@ -347,7 +347,7 @@ export const api = {
     window.open(url, "_blank");
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   },
-  adminReportCsvUrl: () => `${BASE}/admin/reports/export`,
+  adminReportCsvUrl: () => `${BASE}/admin/reports/export?type=revenue&period=all`,
 
   // ---- admin ----
   adminOverview: () => request<AdminOverview>("/admin/overview", { auth: true }),
@@ -366,7 +366,15 @@ export const api = {
   adminApprove: (id: string) => request<unknown>(`/admin/operators/${id}/approve`, { method: "POST", auth: true }),
   adminReject: (id: string) => request<unknown>(`/admin/operators/${id}/reject`, { method: "POST", auth: true }),
   adminPayments: (page?: number) => request<AdminPayments>(`/admin/payments${pageQuery(page)}`, { auth: true }),
-  adminReports: (period?: AdminReports["period"]) => request<AdminReports>(`/admin/reports${period ? `?period=${period}` : ""}`, { auth: true }),
+  // Reports — `q` is the range query from components/reports.tsx (rangeQuery)
+  adminReports: (q = "?period=month") => request<AdminReports>(`/admin/reports${q}`, { auth: true }),
+  adminReportExportUrl: (type: AdminReportType, q = "?period=all") => `${BASE}/admin/reports/export${q}&type=${type}`,
+  operatorReports: (q = "?period=month") => request<OperatorReports>(`/operator/reports${q}`, { auth: true }),
+  operatorReportExportUrl: (q = "?period=month") => `${BASE}/operator/reports/export${q}`,
+  driverReports: (q = "?period=month") => request<DriverReports>(`/driver/reports${q}`, { auth: true }),
+  driverReportExportUrl: (q = "?period=month") => `${BASE}/driver/reports/export${q}`,
+  myReports: (q = "?period=month") => request<PassengerReports>(`/me/reports${q}`, { auth: true }),
+  myReportExportUrl: (q = "?period=month") => `${BASE}/me/reports/export${q}`,
   adminResolveComplaint: (id: string) => request<unknown>(`/admin/complaints/${id}/resolve`, { method: "POST", auth: true }),
   adminSettings: () => request<{ motoCommissionPct: number }>("/admin/settings", { auth: true }),
   adminUpdateSettings: (body: { motoCommissionPct: number }) =>
@@ -740,10 +748,58 @@ export interface AdminPayments {
   transactions: Paginated<{ id: string; user: string; operator: string; method: string; amount: number; status: string }>;
   summary: { total: number; mobileMoney: number; wallet: number; qrCard: number };
 }
-export interface AdminReports {
-  period: "week" | "month" | "year" | "all";
+export type AdminReportType = "revenue" | "bookings" | "passengers" | "drivers";
+export interface ReportRangeMeta {
+  period: "week" | "month" | "year" | "all" | "custom";
+  label: string;
+  from: string;
+  to: string;
+}
+export interface AdminReports extends ReportRangeMeta {
+  kpis: {
+    grossVolume: number; busRevenue: number; motoGross: number; platformTake: number; busFee: number; busFeePct: number; motoCommission: number;
+    bookings: number; paidBookings: number; rides: number; avgFare: number; multimodalPct: number; activePassengers: number; cancelledBookings: number;
+  };
   tripsThisMonth: number;
   avgFare: number;
   multimodalPct: number;
   revenueBars: { m: string; value: number }[];
+  byMode: { mode: string; label: string; bookings: number; revenue: number; pct: number }[];
+  byOperator: { name: string; bookings: number; revenue: number; platformFee: number; netToOperator: number }[];
+  byMethod: { method: string; count: number; amount: number }[];
+  bookingsByStatus: { status: string; count: number }[];
+}
+export interface OperatorReports extends ReportRangeMeta {
+  kpis: {
+    revenue: number; platformFee: number; platformFeePct: number; net: number; bookings: number; paidBookings: number; cancelled: number; cancelRate: number;
+    tripsRun: number; seatsSold: number; capacity: number; occupancyPct: number; avgFare: number; avgRating: number | null; ratingsCount: number;
+  };
+  revenueBars: { m: string; value: number }[];
+  byRoute: { route: string; trips: number; bookings: number; seats: number; revenue: number; capacity: number; occupancyPct: number }[];
+  byDriver: { driver: string; bookings: number; completed: number; revenue: number; rating: number | null }[];
+  byMode: { mode: string; label: string; bookings: number; revenue: number; pct: number }[];
+  byStatus: { status: string; count: number }[];
+}
+export interface DriverReportRow {
+  date: string; kind: "TRIP" | "MOTO"; route: string; passenger: string; gross: number; fee: number; net: number; status: string; reference: string;
+}
+export interface DriverReports extends ReportRangeMeta {
+  kpis: {
+    gross: number; motoCommission: number; net: number; bookings: number; tripsCompleted: number; rides: number; ridesCancelled: number; disputes: number;
+    avgRating: number | null; ratingsCount: number;
+  };
+  earningsBars: { m: string; value: number }[];
+  rows: DriverReportRow[];
+  truncated: boolean;
+}
+export interface PassengerReportRow {
+  date: string; kind: "BOOKING" | "MOTO" | "WALLET"; route: string; mode: string; seats: number | null; amount: number; status: string; reference: string;
+}
+export interface PassengerReports extends ReportRangeMeta {
+  kpis: { spend: number; bookings: number; paidBookings: number; rides: number; cancelled: number; avgPerTrip: number; moneyIn: number; moneyOut: number; refunds: number };
+  spendBars: { m: string; value: number }[];
+  byMode: { mode: string; label: string; trips: number; amount: number; pct: number }[];
+  topRoutes: { route: string; trips: number; amount: number }[];
+  rows: PassengerReportRow[];
+  truncated: boolean;
 }

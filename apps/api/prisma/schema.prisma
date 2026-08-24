@@ -241,6 +241,9 @@ model RideRequest {
   commissionPct    Float?
   commissionAmount Decimal?          @db.Decimal(10, 2)
   refundedAt       DateTime?
+  // set when the escrow is released to the driver (passenger confirmation or
+  // admin dispute verdict) — anchors earnings/commission reports
+  completedAt      DateTime?
   // Client-generated key for the escrow payment: a retry of the same attempt
   // replays the funded state instead of deducting the wallet again.
   payIdempotencyKey String?          @unique

@@ -13,23 +13,12 @@ import {
   type AdminReports,
   type KycDocument,
   type AdminRideDispute,
+  type AdminReportType,
 } from "@/lib/api";
 import { formatRWF, createUserSchema, type CreateUserInput } from "@relay/shared";
-import { tokenStore } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { PeriodPicker, ExportButtons, StatTile, ReportTable, downloadAuthed, fetchAuthedCsv, exportReportPdf, rangeQuery, isRangeReady, fmtMoney, type ReportRangeValue, type PdfSection } from "@/components/reports";
 import { ConsoleShell, ProfileSettingsPage, KpiGrid, StatusPill, Card, CardTitle, BarChart, PrimaryButton, FormModal, Pagination, usePaged, type NavItem } from "@/components/console";
-
-async function downloadReport() {
-  const res = await fetch(api.adminReportCsvUrl(), { headers: { Authorization: `Bearer ${tokenStore.access}` } });
-  if (!res.ok) { window.alert("Could not generate report"); return; }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "relay-report.csv";
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
@@ -118,7 +107,7 @@ export default function AdminConsole() {
             onToast={setToast}
           />
         ) : reportOpen ? (
-          <GenerateReport onClose={() => setReportOpen(false)} />
+          <GenerateReport onClose={() => setReportOpen(false)} onToast={setToast} />
         ) : (
           <>
             {tab === "dashboard" && <Dashboard onReview={setReviewId} onReviewAll={() => setTab("approvals")} />}
@@ -126,7 +115,7 @@ export default function AdminConsole() {
             {tab === "operators" && <OperatorsTab onView={setOperatorDetailId} />}
             {tab === "approvals" && <ApprovalsTab onReview={setReviewId} />}
             {tab === "payments" && <PaymentsTab />}
-            {tab === "reports" && <ReportsTab />}
+            {tab === "reports" && <ReportsTab onToast={setToast} />}
             {tab === "complaints" && <ComplaintsTab />}
             {tab === "disputes" && <DisputesTab onToast={setToast} />}
             {tab === "settings" && <SettingsTab onToast={setToast} />}
@@ -668,52 +657,109 @@ function PaymentsTab() {
   );
 }
 
-const REPORT_PERIODS: { value: AdminReports["period"]; label: string; tripsLabel: string }[] = [
-  { value: "week", label: "Last 7 days", tripsLabel: "Trips (7 days)" },
-  { value: "month", label: "This month", tripsLabel: "Trips this month" },
-  { value: "year", label: "This year", tripsLabel: "Trips this year" },
-  { value: "all", label: "All time", tripsLabel: "Trips (all time)" },
-];
-
-function ReportsTab() {
-  const [period, setPeriod] = useState<AdminReports["period"]>("month");
+// Platform-wide reports for one time window (presets or custom dates). The
+// same range feeds the on-screen numbers, the CSV, and the PDF, so what the
+// admin sees is exactly what they download.
+function ReportsTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
+  const [range, setRange] = useState<ReportRangeValue>({ period: "month" });
   const [data, setData] = useState<AdminReports | null>(null);
+  const [busy, setBusy] = useState(false);
+  const q = rangeQuery(range);
 
   useEffect(() => {
+    if (!isRangeReady(range)) return;
     let active = true;
     setData(null);
-    api.adminReports(period).then((d) => active && setData(d)).catch(() => undefined);
+    api.adminReports(q).then((d) => active && setData(d)).catch((e) => onToast({ kind: "error", msg: e instanceof Error ? e.message : "Could not load the report" }));
     return () => { active = false; };
-  }, [period]);
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const meta = REPORT_PERIODS.find((p) => p.value === period) ?? REPORT_PERIODS[1];
+  const exportCsv = async () => {
+    setBusy(true);
+    try { await downloadAuthed(api.adminReportExportUrl("revenue", q), "relay-revenue.csv"); }
+    catch (e) { onToast({ kind: "error", msg: e instanceof Error ? e.message : "Export failed" }); }
+    finally { setBusy(false); }
+  };
+  const exportPdf = async () => {
+    if (!data) return;
+    setBusy(true);
+    try {
+      await exportReportPdf({
+        title: "Platform report",
+        subtitle: data.label,
+        fileName: `relay-platform-report_${data.from.slice(0, 10)}.pdf`,
+        kpis: [
+          { label: "Gross volume", value: fmtMoney(data.kpis.grossVolume) },
+          { label: "Relay take", value: fmtMoney(data.kpis.platformTake) },
+          { label: "Bookings + moto rides", value: `${data.kpis.bookings} + ${data.kpis.rides}` },
+          { label: "Active passengers", value: String(data.kpis.activePassengers) },
+        ],
+        sections: [
+          { title: "Gross volume by period", columns: ["Period", "Gross (RWF)"], rows: data.revenueBars.map((b) => [b.m, Math.round(b.value).toLocaleString("en-US")]), align: ["l", "r"] },
+          { title: "By transport mode", columns: ["Mode", "Bookings", "Revenue (RWF)", "Share"], rows: data.byMode.map((m) => [m.label, m.bookings, Math.round(m.revenue).toLocaleString("en-US"), `${m.pct}%`]), align: ["l", "r", "r", "r"] },
+          { title: "Operators", columns: ["Operator", "Bookings", "Gross (RWF)", `Relay fee (${data.kpis.busFeePct}%)`, "Net to operator"], rows: data.byOperator.map((o) => [o.name, o.bookings, Math.round(o.revenue).toLocaleString("en-US"), Math.round(o.platformFee).toLocaleString("en-US"), Math.round(o.netToOperator).toLocaleString("en-US")]), align: ["l", "r", "r", "r", "r"] },
+          { title: "Payment methods", columns: ["Method", "Transactions", "Amount (RWF)"], rows: data.byMethod.map((m) => [m.method, m.count, Math.round(m.amount).toLocaleString("en-US")]), align: ["l", "r", "r"] },
+        ],
+      });
+    } catch (e) { onToast({ kind: "error", msg: e instanceof Error ? e.message : "PDF export failed" }); }
+    finally { setBusy(false); }
+  };
 
-  if (!data) return <Loading />;
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16 }} className="op-two">
-      <Card>
-        <CardTitle
-          right={
-            <select
-              value={period}
-              onChange={(e) => setPeriod(e.target.value as AdminReports["period"])}
-              style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 10, padding: "7px 11px", fontSize: 12.5, fontWeight: 700, fontFamily: "'Manrope', sans-serif", cursor: "pointer", color: "#1b1714" }}
-            >
-              {REPORT_PERIODS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </select>
-          }
-        >
-          Platform revenue
-        </CardTitle>
-        <BarChart bars={data.revenueBars} height={150} />
-      </Card>
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <StatCard label={meta.tripsLabel} value={data.tripsThisMonth.toLocaleString()} />
-        <StatCard label="Avg fare" value={formatRWF(data.avgFare)} />
-        <StatCard label="Multimodal trips" value={`${data.multimodalPct}%`} />
-        <button onClick={downloadReport} style={{ background: "#1b1714", color: "#fff", border: "none", borderRadius: 13, padding: 14, fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Download full report</button>
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <PeriodPicker value={range} onChange={setRange} />
+        <ExportButtons onCsv={exportCsv} onPdf={exportPdf} busy={busy || !data} />
       </div>
-    </div>
+      {!data ? <Loading /> : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 16 }}>
+            <StatTile label="Gross volume" value={formatRWF(data.kpis.grossVolume)} sub={`${formatRWF(data.kpis.busRevenue)} bookings · ${formatRWF(data.kpis.motoGross)} moto`} />
+            <StatTile label="Relay take" value={formatRWF(data.kpis.platformTake)} sub={`${data.kpis.busFeePct}% booking fee + moto commission`} accent="#1f9d6b" />
+            <StatTile label="Bookings · moto rides" value={`${data.kpis.bookings} · ${data.kpis.rides}`} sub={`${data.kpis.paidBookings} paid · ${data.kpis.cancelledBookings} cancelled`} />
+            <StatTile label="Active passengers" value={String(data.kpis.activePassengers)} sub={`avg fare ${formatRWF(data.kpis.avgFare)}`} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16, marginBottom: 16 }} className="op-two">
+            <Card>
+              <CardTitle right={<span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>{data.label}</span>}>Gross volume</CardTitle>
+              <BarChart bars={data.revenueBars} height={150} />
+            </Card>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <StatCard label="Moto commission earned" value={formatRWF(data.kpis.motoCommission)} />
+              <StatCard label="Multimodal trips" value={`${data.kpis.multimodalPct}%`} />
+              <Card>
+                <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginBottom: 8 }}>Bookings by status</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {data.bookingsByStatus.length === 0 && <span style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600 }}>None in this period</span>}
+                  {data.bookingsByStatus.map((s) => (
+                    <span key={s.status} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <StatusPill status={s.status} /><span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 700 }}>{s.count}</span>
+                    </span>
+                  ))}
+                </div>
+              </Card>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16, marginBottom: 16 }} className="op-two">
+            <Card>
+              <CardTitle>By transport mode</CardTitle>
+              <ReportTable columns={["Mode", "Bookings", "Revenue", "Share"]} align={["l", "r", "r", "r"]}
+                rows={data.byMode.map((m) => [m.label, m.bookings, formatRWF(m.revenue), `${m.pct}%`])} />
+            </Card>
+            <Card>
+              <CardTitle right={<span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>{data.byOperator.length} with revenue</span>}>Operators</CardTitle>
+              <ReportTable columns={["Operator", "Bookings", "Gross", `Relay fee`, "Net"]} align={["l", "r", "r", "r", "r"]}
+                rows={data.byOperator.map((o) => [o.name, o.bookings, formatRWF(o.revenue), formatRWF(o.platformFee), formatRWF(o.netToOperator)])} />
+            </Card>
+          </div>
+          <Card>
+            <CardTitle>Payment methods</CardTitle>
+            <ReportTable columns={["Method", "Transactions", "Amount"]} align={["l", "r", "r"]}
+              rows={data.byMethod.map((m) => [m.method.replace("_", " "), m.count, formatRWF(m.amount)])} />
+          </Card>
+        </>
+      )}
+    </>
   );
 }
 
@@ -889,15 +935,85 @@ function ComplaintsTab() {
   );
 }
 
-function GenerateReport({ onClose }: { onClose: () => void }) {
-  const [type, setType] = useState(0);
-  const [format, setFormat] = useState(0);
-  const types = [
-    { t: "Revenue & payouts", d: "Gross, fees and net settlement per operator" },
-    { t: "Bookings & trips", d: "Volumes by mode, route and status" },
-    { t: "Passenger activity", d: "Active riders, retention and frequency" },
-    { t: "Driver performance", d: "Trips, ratings and acceptance rates" },
-  ];
+// "Generate report": pick a report type, a real date range, the breakdowns to
+// include, and a format. CSV streams the server export; PDF combines the
+// window's summary numbers with the same export's rows.
+const REPORT_TYPES: { key: AdminReportType; t: string; d: string }[] = [
+  { key: "revenue", t: "Revenue & payouts", d: "Every settled booking and moto hail, with Relay's fee and the net to operator / driver" },
+  { key: "bookings", t: "Bookings & trips", d: "Every booking in the window: route, mode, driver, vehicle, payment and status" },
+  { key: "passengers", t: "Passenger activity", d: "Per passenger: bookings, moto rides, spend, last activity and wallet balance" },
+  { key: "drivers", t: "Driver performance", d: "Per driver: bookings, completed trips, moto rides, gross, commission and ratings" },
+];
+
+function GenerateReport({ onClose, onToast }: { onClose: () => void; onToast: (t: ToastMsg) => void }) {
+  const [type, setType] = useState<AdminReportType>("revenue");
+  const [format, setFormat] = useState<"pdf" | "csv">("pdf");
+  const [range, setRange] = useState<ReportRangeValue>({ period: "month" });
+  const [include, setInclude] = useState({ byOperator: true, byMode: true, byMethod: false });
+  const [preview, setPreview] = useState<AdminReports | null>(null);
+  const [busy, setBusy] = useState(false);
+  const q = rangeQuery(range);
+
+  useEffect(() => {
+    if (!isRangeReady(range)) return;
+    let active = true;
+    setPreview(null);
+    api.adminReports(q).then((d) => active && setPreview(d)).catch(() => undefined);
+    return () => { active = false; };
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const meta = REPORT_TYPES.find((r) => r.key === type)!;
+  const n = (v: number) => Math.round(v).toLocaleString("en-US");
+
+  const generate = async () => {
+    if (!preview) return;
+    setBusy(true);
+    try {
+      const url = api.adminReportExportUrl(type, q);
+      if (format === "csv") {
+        await downloadAuthed(url, `relay-${type}.csv`);
+      } else {
+        const csv = await fetchAuthedCsv(url);
+        const k = preview.kpis;
+        const kpis =
+          type === "revenue" ? [{ label: "Gross volume", value: fmtMoney(k.grossVolume) }, { label: "Relay take", value: fmtMoney(k.platformTake) }, { label: "Booking revenue", value: fmtMoney(k.busRevenue) }, { label: "Moto hails", value: fmtMoney(k.motoGross) }]
+          : type === "bookings" ? [{ label: "Bookings", value: String(k.bookings) }, { label: "Paid", value: String(k.paidBookings) }, { label: "Cancelled", value: String(k.cancelledBookings) }, { label: "Multimodal", value: `${k.multimodalPct}%` }]
+          : type === "passengers" ? [{ label: "Active passengers", value: String(k.activePassengers) }, { label: "Bookings", value: String(k.bookings) }, { label: "Moto rides", value: String(k.rides) }, { label: "Avg fare", value: fmtMoney(k.avgFare) }]
+          : [{ label: "Bookings", value: String(k.bookings) }, { label: "Moto rides", value: String(k.rides) }, { label: "Gross volume", value: fmtMoney(k.grossVolume) }, { label: "Moto commission", value: fmtMoney(k.motoCommission) }];
+        const sections: PdfSection[] = [];
+        if (include.byOperator) sections.push({ title: "By operator", columns: ["Operator", "Bookings", "Gross (RWF)", "Relay fee", "Net"], rows: preview.byOperator.map((o) => [o.name, o.bookings, n(o.revenue), n(o.platformFee), n(o.netToOperator)]), align: ["l", "r", "r", "r", "r"] });
+        if (include.byMode) sections.push({ title: "By transport mode", columns: ["Mode", "Bookings", "Revenue (RWF)", "Share"], rows: preview.byMode.map((m) => [m.label, m.bookings, n(m.revenue), `${m.pct}%`]), align: ["l", "r", "r", "r"] });
+        if (include.byMethod) sections.push({ title: "By payment method", columns: ["Method", "Transactions", "Amount (RWF)"], rows: preview.byMethod.map((m) => [m.method, m.count, n(m.amount)]), align: ["l", "r", "r"] });
+        // the detail rows — keep the PDF readable by capping columns and rows
+        const MAX_ROWS = 400;
+        const keepCols = csv.header.map((_, i) => i).filter((i) => i < 8);
+        const numeric = (h: string) => /_rwf$|^seats$|^bookings|rides$|rating$|completed|_on_trips$/.test(h);
+        sections.push({
+          title: `${meta.t} — detail${csv.rows.length > MAX_ROWS ? ` (first ${MAX_ROWS} of ${csv.rows.length}; full list in the CSV)` : ` (${csv.rows.length} rows)`}`,
+          columns: keepCols.map((i) => csv.header[i].replace(/_/g, " ")),
+          rows: csv.rows.slice(0, MAX_ROWS).map((r) => keepCols.map((i) => (/_at$|^date$|joined|last_activity/.test(csv.header[i]) && r[i] ? new Date(r[i]).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : r[i] ?? ""))),
+          align: keepCols.map((i) => (numeric(csv.header[i]) ? "r" : "l")),
+        });
+        await exportReportPdf({ title: meta.t, subtitle: preview.label, fileName: `relay-${type}_${preview.from.slice(0, 10)}.pdf`, kpis, sections });
+      }
+      onToast({ kind: "success", msg: `${meta.t} (${format.toUpperCase()}) downloaded.` });
+      onClose();
+    } catch (e) {
+      onToast({ kind: "error", msg: e instanceof Error ? e.message : "Could not generate the report" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (key: keyof typeof include, label: string) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
+      <span style={{ fontSize: 13.5, fontWeight: 600 }}>{label}</span>
+      <button onClick={() => setInclude((s) => ({ ...s, [key]: !s[key] }))} style={{ width: 42, height: 24, borderRadius: 20, background: include[key] ? "#ff6a1a" : "#e3ddd1", position: "relative", border: "none", cursor: "pointer" }}>
+        <div style={{ position: "absolute", top: 3, left: include[key] ? 21 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+      </button>
+    </div>
+  );
+
   return (
     <div>
       <button onClick={onClose} style={{ display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 700, marginBottom: 20 }}>← Back</button>
@@ -906,11 +1022,11 @@ function GenerateReport({ onClose }: { onClose: () => void }) {
           <Card>
             <StepLabel>1 · Report type</StepLabel>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {types.map((r, i) => {
-                const sel = i === type;
+              {REPORT_TYPES.map((r) => {
+                const sel = r.key === type;
                 return (
-                  <button key={r.t} onClick={() => setType(i)} style={{ display: "flex", alignItems: "center", gap: 12, textAlign: "left", background: sel ? "#fff6f0" : "#fff", border: `1px solid ${sel ? "#ff6a1a" : "#e3ddd1"}`, borderRadius: 13, padding: "13px 15px", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
-                    <span style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${sel ? "#ff6a1a" : "#cbc3b6"}`, display: "flex", alignItems: "center", justifyContent: "center", color: "#ff6a1a", fontSize: 11 }}>{sel ? "✓" : ""}</span>
+                  <button key={r.key} onClick={() => setType(r.key)} style={{ display: "flex", alignItems: "center", gap: 12, textAlign: "left", background: sel ? "#fff6f0" : "#fff", border: `1px solid ${sel ? "#ff6a1a" : "#e3ddd1"}`, borderRadius: 13, padding: "13px 15px", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+                    <span style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${sel ? "#ff6a1a" : "#cbc3b6"}`, display: "flex", alignItems: "center", justifyContent: "center", color: "#ff6a1a", fontSize: 11, flex: "none" }}>{sel ? "✓" : ""}</span>
                     <span style={{ flex: 1 }}>
                       <span style={{ display: "block", fontSize: 14.5, fontWeight: 700 }}>{r.t}</span>
                       <span style={{ display: "block", fontSize: 12, color: "#8c8378", marginTop: 2 }}>{r.d}</span>
@@ -922,39 +1038,38 @@ function GenerateReport({ onClose }: { onClose: () => void }) {
           </Card>
           <Card>
             <StepLabel>2 · Date range</StepLabel>
-            <div style={{ display: "flex", gap: 12 }}>
-              <DateBox label="From" value="01 Jun 2026" />
-              <DateBox label="To" value="30 Jun 2026" />
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-              {["Last 7 days", "This month", "This quarter"].map((c, i) => (
-                <span key={c} style={{ fontSize: 12, fontWeight: 700, background: i === 1 ? "#fff0e6" : "#f4f1ea", color: i === 1 ? "#ff6a1a" : "#1b1714", borderRadius: 8, padding: "7px 12px", cursor: "pointer" }}>{c}</span>
-              ))}
+            <PeriodPicker value={range} onChange={setRange} />
+            <div style={{ fontSize: 12, color: "#a39a8d", fontWeight: 600, marginTop: 10 }}>
+              {preview ? `${preview.label} · ${preview.kpis.bookings} bookings · ${preview.kpis.rides} moto rides` : isRangeReady(range) ? "Loading…" : "Pick both dates"}
             </div>
           </Card>
           <Card>
-            <StepLabel>3 · Breakdown</StepLabel>
-            <Toggle label="By operator" on />
-            <Toggle label="By transport mode" on />
-            <Toggle label="By payment method" />
+            <StepLabel>3 · Breakdowns (PDF summary tables)</StepLabel>
+            {toggle("byOperator", "By operator")}
+            {toggle("byMode", "By transport mode")}
+            {toggle("byMethod", "By payment method")}
+            <div style={{ fontSize: 12, color: "#a39a8d", fontWeight: 600, marginTop: 6 }}>The CSV always contains the full line-by-line detail.</div>
           </Card>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ background: "#1b1714", borderRadius: 18, padding: 20, color: "#fff" }}>
             <div style={{ fontSize: 13, color: "#cfc7bb", fontWeight: 600, marginBottom: 14 }}>Report summary</div>
-            <SplitRow label="Type" value={types[type].t} />
-            <SplitRow label="Range" value="Jun 1–30" mono />
-            <SplitRow label="Operators" value="4 included" />
-            <SplitRow label="Format" value={["PDF", "CSV", "Excel"][format]} />
+            <SplitRow label="Type" value={meta.t} />
+            <SplitRow label="Range" value={preview?.label ?? "…"} mono />
+            <SplitRow label="Operators" value={preview ? `${preview.byOperator.length} with activity` : "…"} />
+            <SplitRow label="Gross volume" value={preview ? formatRWF(preview.kpis.grossVolume) : "…"} mono />
+            <SplitRow label="Format" value={format.toUpperCase()} />
           </div>
           <Card>
             <StepLabel>Format</StepLabel>
             <div style={{ display: "flex", gap: 9, marginBottom: 16 }}>
-              {["PDF", "CSV", "Excel"].map((f, i) => (
-                <button key={f} onClick={() => setFormat(i)} style={{ flex: 1, textAlign: "center", fontSize: 13, fontWeight: 700, background: i === format ? "#1b1714" : "#fff", color: i === format ? "#fff" : "#1b1714", border: i === format ? "none" : "1px solid #e3ddd1", borderRadius: 10, padding: 10, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{f}</button>
+              {(["pdf", "csv"] as const).map((f) => (
+                <button key={f} onClick={() => setFormat(f)} style={{ flex: 1, textAlign: "center", fontSize: 13, fontWeight: 700, background: f === format ? "#1b1714" : "#fff", color: f === format ? "#fff" : "#1b1714", border: f === format ? "none" : "1px solid #e3ddd1", borderRadius: 10, padding: 10, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{f.toUpperCase()}</button>
               ))}
             </div>
-            <button onClick={async () => { await downloadReport(); onClose(); }} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 13, padding: 14, fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 12px 26px -10px rgba(255,106,26,.7)" }}>Generate &amp; download</button>
+            <button onClick={generate} disabled={busy || !preview} style={{ width: "100%", background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 13, padding: 14, fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", boxShadow: "0 12px 26px -10px rgba(255,106,26,.7)", opacity: busy || !preview ? 0.7 : 1 }}>
+              {busy ? "Generating…" : "Generate & download"}
+            </button>
             <button onClick={onClose} style={{ width: "100%", background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "#a39a8d", cursor: "pointer", fontFamily: "'Manrope', sans-serif", marginTop: 12 }}>Cancel</button>
           </Card>
         </div>
@@ -1036,23 +1151,4 @@ function SplitRow({ label, value, mono }: { label: string; value: string; mono?:
 }
 function StepLabel({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 13 }}>{children}</div>;
-}
-function DateBox({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ flex: 1 }}>
-      <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginBottom: 6 }}>{label}</div>
-      <div style={{ border: "1px solid #e3ddd1", borderRadius: 12, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, fontFamily: MONO }}>{value}</div>
-    </div>
-  );
-}
-function Toggle({ label, on }: { label: string; on?: boolean }) {
-  const [state, setState] = useState(!!on);
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
-      <span style={{ fontSize: 13.5, fontWeight: 600 }}>{label}</span>
-      <button onClick={() => setState((s) => !s)} style={{ width: 42, height: 24, borderRadius: 20, background: state ? "#ff6a1a" : "#e3ddd1", position: "relative", border: "none", cursor: "pointer" }}>
-        <div style={{ position: "absolute", top: 3, left: state ? 21 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
-      </button>
-    </div>
-  );
 }

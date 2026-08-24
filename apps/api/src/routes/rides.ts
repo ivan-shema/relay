@@ -483,7 +483,7 @@ ridesRouter.post(
 
       await tx.rideRequest.update({
         where: { id: ride.id },
-        data: { status: "COMPLETED", commissionPct: pct, commissionAmount: commission },
+        data: { status: "COMPLETED", commissionPct: pct, commissionAmount: commission, completedAt: new Date() },
       });
       await tx.user.update({
         where: { id: driver.userId },
