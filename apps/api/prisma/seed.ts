@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { PrismaClient, type TransportMode } from "@prisma/client";
+import { PrismaClient, Prisma, type TransportMode } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
@@ -39,77 +39,72 @@ function makeTicketCode(): string {
   return code;
 }
 
-async function main() {
-  console.log("Seeding Relay database…");
+/* ---------- Idempotent helpers ----------
+   The seed is non-destructive: fixed demo entities are looked up by a natural
+   key (email, company name, plate, place/route name) and only created when
+   missing, so re-running it never touches data added since. There is
+   deliberately no wipe/reset: the seed never deletes anything. */
 
-  // wipe (dev only) in FK-safe order
-  await prisma.rideOffer.deleteMany();
-  await prisma.rideRequest.deleteMany();
-  await prisma.document.deleteMany();
-  await prisma.payout.deleteMany();
-  await prisma.walletTransaction.deleteMany();
-  await prisma.savedPlace.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.rating.deleteMany();
-  await prisma.ticket.deleteMany();
-  await prisma.booking.deleteMany();
-  await prisma.trip.deleteMany();
-  await prisma.route.deleteMany();
-  await prisma.vehicle.deleteMany();
-  await prisma.driver.deleteMany();
-  await prisma.plannedTrip.deleteMany();
-  await prisma.notification.deleteMany();
-  await prisma.otp.deleteMany();
-  await prisma.complaint.deleteMany();
-  await prisma.operator.deleteMany();
-  await prisma.place.deleteMany();
-  await prisma.user.deleteMany();
+async function ensureUser(data: Prisma.UserCreateInput) {
+  return prisma.user.upsert({ where: { email: data.email }, update: {}, create: data });
+}
+async function ensureOperator(data: Prisma.OperatorUncheckedCreateInput) {
+  const found = await prisma.operator.findFirst({ where: { companyName: data.companyName } });
+  return found ?? prisma.operator.create({ data });
+}
+async function ensureDriver(data: Prisma.DriverUncheckedCreateInput) {
+  return prisma.driver.upsert({ where: { userId: data.userId }, update: {}, create: data });
+}
+async function ensureVehicle(data: Prisma.VehicleUncheckedCreateInput) {
+  return prisma.vehicle.upsert({ where: { plateNumber: data.plateNumber }, update: {}, create: data });
+}
+async function ensurePlace(data: Prisma.PlaceCreateInput) {
+  const found = await prisma.place.findFirst({ where: { name: data.name } });
+  return found ?? prisma.place.create({ data });
+}
+async function ensureRoute(args: { data: Prisma.RouteUncheckedCreateInput }) {
+  const found = await prisma.route.findFirst({ where: { name: args.data.name } });
+  return found ?? prisma.route.create(args);
+}
+
+async function main() {
+  console.log("Seeding Relay database (non-destructive — only missing demo data is added)…");
+
+  // "Fresh" = the demo dataset is not there yet. The time-relative demo content
+  // further down (live trips, booking history, notifications…) is generated
+  // only then, so a re-run never duplicates it or disturbs real data.
+  const fresh = !(await prisma.user.findUnique({ where: { email: "admin@relay.app" } }));
 
   const pw = await bcrypt.hash("password123", 10);
 
   // ---------- Users ----------
-  const amara = await prisma.user.create({
-    data: { firstName: "Amara", lastName: "Niyonsaba", email: "amara@relay.app", phone: "+250781104821", passwordHash: pw, role: "PASSENGER", emailVerified: true, walletBalance: 12400 },
-  });
+  const amara = await ensureUser({ firstName: "Amara", lastName: "Niyonsaba", email: "amara@relay.app", phone: "+250781104821", passwordHash: pw, role: "PASSENGER", emailVerified: true, walletBalance: 12400 });
   const passengers = [amara];
   for (const [i, name] of [["Bea", "Kamikazi"], ["Chris", "Mugisha"], ["Diane", "Uwase"], ["Eric", "Tuyishime"], ["Faith", "Rukundo"]].entries()) {
     passengers.push(
-      await prisma.user.create({
-        data: { firstName: name[0], lastName: name[1], email: `passenger${i + 2}@relay.app`, phone: `+2507820000${10 + i}`, passwordHash: pw, role: "PASSENGER", emailVerified: true, walletBalance: 4000 + i * 1500 },
-      })
+      await ensureUser({ firstName: name[0], lastName: name[1], email: `passenger${i + 2}@relay.app`, phone: `+2507820000${10 + i}`, passwordHash: pw, role: "PASSENGER", emailVerified: true, walletBalance: 4000 + i * 1500 })
     );
   }
 
-  const driverUser = await prisma.user.create({
-    data: { firstName: "Jean", lastName: "Pierre", email: "jean@relay.app", phone: "+250788000001", passwordHash: pw, role: "DRIVER", emailVerified: true },
-  });
-
-  const operatorUser = await prisma.user.create({
-    data: { firstName: "Kigali Bus", lastName: "Admin", email: "ops@kigalibus.app", phone: "+250788000002", passwordHash: pw, role: "OPERATOR", emailVerified: true },
-  });
-
-  await prisma.user.create({
-    data: { firstName: "Relay", lastName: "Admin", email: "admin@relay.app", phone: "+250788000003", passwordHash: pw, role: "ADMIN", emailVerified: true },
-  });
+  const driverUser = await ensureUser({ firstName: "Jean", lastName: "Pierre", email: "jean@relay.app", phone: "+250788000001", passwordHash: pw, role: "DRIVER", emailVerified: true });
+  const operatorUser = await ensureUser({ firstName: "Kigali Bus", lastName: "Admin", email: "ops@kigalibus.app", phone: "+250788000002", passwordHash: pw, role: "OPERATOR", emailVerified: true });
+  await ensureUser({ firstName: "Relay", lastName: "Admin", email: "admin@relay.app", phone: "+250788000003", passwordHash: pw, role: "ADMIN", emailVerified: true });
 
   // ---------- Operators ----------
-  const kigaliBus = await prisma.operator.create({
-    data: { companyName: "Kigali Bus Co.", contactInfo: "+250 78 •• 0042", modes: ["BUS", "MOTO"], status: "VERIFIED", ownerUserId: operatorUser.id },
-  });
-  const volcano = await prisma.operator.create({
-    data: { companyName: "Volcano Shuttle", contactInfo: "+250 78 •• 1180", modes: ["BUS"], status: "VERIFIED" },
-  });
+  const kigaliBus = await ensureOperator({ companyName: "Kigali Bus Co.", contactInfo: "+250 78 •• 0042", modes: ["BUS", "MOTO"], status: "VERIFIED", ownerUserId: operatorUser.id });
+  await ensureOperator({ companyName: "Volcano Shuttle", contactInfo: "+250 78 •• 1180", modes: ["BUS"], status: "VERIFIED" });
+
   // Pending applications — full applicants + KYC documents so the admin
-  // review panel has real content to show.
+  // review panel has real content to show. Documents are only written when
+  // the application was just created (a reviewed/edited one keeps its own).
   const pendingApps = [
     { company: "Twiga Moto", first: "Chantal", last: "Mukamana", email: "chantal@twigamoto.rw", phone: "+250788330011", contact: "+250 78 833 0011", modes: ["MOTO"] as TransportMode[], idNumber: "1198770055443322" },
     { company: "RideLink Pool", first: "Olivier", last: "Habyarimana", email: "olivier@ridelink.rw", phone: "+250788778822", contact: "+250 78 877 8822", modes: ["RIDE"] as TransportMode[], idNumber: "1199088077665544" },
   ];
-  const pendingOps: { id: string }[] = [];
   for (const [i, app] of pendingApps.entries()) {
-    const owner = await prisma.user.create({
-      data: { firstName: app.first, lastName: app.last, email: app.email, phone: app.phone, passwordHash: pw, role: "OPERATOR", emailVerified: true },
-    });
+    const owner = await ensureUser({ firstName: app.first, lastName: app.last, email: app.email, phone: app.phone, passwordHash: pw, role: "OPERATOR", emailVerified: true });
+    const existingOp = await prisma.operator.findUnique({ where: { ownerUserId: owner.id } });
+    if (existingOp) continue;
     const op = await prisma.operator.create({
       data: { companyName: app.company, contactInfo: app.contact, idNumber: app.idNumber, modes: app.modes, status: "PENDING", ownerUserId: owner.id },
     });
@@ -121,19 +116,12 @@ async function main() {
         { kind: "BUSINESS_CERTIFICATE", fileName: `${app.company}-rdb-certificate.png`, filePath: certFile, mimeType: "image/png", size: SAMPLE_PNG.length, operatorId: op.id },
       ],
     });
-    pendingOps.push(op);
   }
-  const twiga = pendingOps[0];
-  const rideLink = pendingOps[1];
 
   // ---------- Drivers + vehicles ----------
   // primary demo driver
-  const jean = await prisma.driver.create({
-    data: { userId: driverUser.id, operatorId: kigaliBus.id, licenseNumber: "RW-DRV-22841", nationalId: "1199080012345678", ratingAvg: 4.9, online: true },
-  });
-  const jeanVehicle = await prisma.vehicle.create({
-    data: { operatorId: kigaliBus.id, driverId: jean.id, type: "BUS", plateNumber: "RAD 412 K", capacity: 33, label: "Bus 12", model: "Coaster HD", status: "ACTIVE" },
-  });
+  const jean = await ensureDriver({ userId: driverUser.id, operatorId: kigaliBus.id, licenseNumber: "RW-DRV-22841", nationalId: "1199080012345678", ratingAvg: 4.9, online: true });
+  const jeanVehicle = await ensureVehicle({ operatorId: kigaliBus.id, driverId: jean.id, type: "BUS", plateNumber: "RAD 412 K", capacity: 33, label: "Bus 12", model: "Coaster HD", status: "ACTIVE" });
 
   // extra drivers for the operator console
   const extraDrivers: { driverId: string; vehicleId: string; name: string }[] = [];
@@ -144,21 +132,13 @@ async function main() {
     { first: "Ivan", last: "Sibomana", plate: "RAB 220 D", type: "BUS", cap: 28, model: "Rosa", rating: 4.8, online: true },
   ];
   for (const [i, d] of driverSpec.entries()) {
-    const u = await prisma.user.create({
-      data: { firstName: d.first, lastName: d.last, email: `driver${i + 2}@relay.app`, phone: `+2507880010${10 + i}`, passwordHash: pw, role: "DRIVER", emailVerified: true },
-    });
-    const dr = await prisma.driver.create({
-      data: { userId: u.id, operatorId: kigaliBus.id, licenseNumber: `RW-DRV-${1000 + i}`, nationalId: `11990800${20000000 + i}`, ratingAvg: d.rating, online: d.online },
-    });
-    const v = await prisma.vehicle.create({
-      data: { operatorId: kigaliBus.id, driverId: dr.id, type: d.type, plateNumber: d.plate, capacity: d.cap, label: `${d.type} ${d.plate.slice(-3)}`, model: d.model, status: d.online ? "ACTIVE" : "IDLE" },
-    });
+    const u = await ensureUser({ firstName: d.first, lastName: d.last, email: `driver${i + 2}@relay.app`, phone: `+2507880010${10 + i}`, passwordHash: pw, role: "DRIVER", emailVerified: true });
+    const dr = await ensureDriver({ userId: u.id, operatorId: kigaliBus.id, licenseNumber: `RW-DRV-${1000 + i}`, nationalId: `11990800${20000000 + i}`, ratingAvg: d.rating, online: d.online });
+    const v = await ensureVehicle({ operatorId: kigaliBus.id, driverId: dr.id, type: d.type, plateNumber: d.plate, capacity: d.cap, label: `${d.type} ${d.plate.slice(-3)}`, model: d.model, status: d.online ? "ACTIVE" : "IDLE" });
     extraDrivers.push({ driverId: dr.id, vehicleId: v.id, name: `${d.first} ${d.last}` });
   }
   // one maintenance vehicle with no driver
-  await prisma.vehicle.create({
-    data: { operatorId: kigaliBus.id, type: "BUS", plateNumber: "RAE 090 M", capacity: 33, label: "Bus 20", model: "Coaster", status: "MAINTENANCE" },
-  });
+  await ensureVehicle({ operatorId: kigaliBus.id, type: "BUS", plateNumber: "RAE 090 M", capacity: 33, label: "Bus 20", model: "Coaster", status: "MAINTENANCE" });
 
   // ---------- Places ----------
   const placeData = [
@@ -171,20 +151,26 @@ async function main() {
     { name: "City Centre", area: "Nyarugenge", lat: -1.9441, lng: 30.0619, isPopular: true },
   ];
   const places: Record<string, { id: string }> = {};
-  for (const p of placeData) places[p.name] = await prisma.place.create({ data: p });
+  for (const p of placeData) places[p.name] = await ensurePlace(p);
 
   const poly = (pts: [number, number][]) => pts;
 
   // ---------- Routes ----------
-  const routeKabeza = await prisma.route.create({
+  const routeKabeza = await ensureRoute({
     data: { name: "Kabeza → Central Market", originId: places["Kabeza"].id, destinationId: places["Central Market"].id, distanceKm: 7.4, polyline: poly([[30.1284, -1.9536], [30.1127, -1.9578], [30.0934, -1.9412], [30.0588, -1.9486]]) },
   });
-  const routeRemera = await prisma.route.create({
+  const routeRemera = await ensureRoute({
     data: { name: "Remera → City Centre", originId: places["Remera Hub"].id, destinationId: places["City Centre"].id, distanceKm: 5.2, polyline: poly([[30.1127, -1.9578], [30.0934, -1.9412], [30.0619, -1.9441]]) },
   });
-  const routeNyabugogo = await prisma.route.create({
+  const routeNyabugogo = await ensureRoute({
     data: { name: "Nyabugogo → Kimironko", originId: places["Nyabugogo Terminal"].id, destinationId: places["Kimironko"].id, distanceKm: 9.1, polyline: poly([[30.0444, -1.9395], [30.0619, -1.9441], [30.0934, -1.9412], [30.1255, -1.9447]]) },
   });
+
+  if (!fresh) {
+    console.log("Demo accounts, operators, fleet, places and routes are in place; existing data was kept.");
+    console.log("Live trips and booking history are only generated on a fresh database, so nothing here is duplicated or removed.");
+    return;
+  }
 
   // ---------- Live trips on Kabeza (assigned to Jean) ----------
   const busMotoLegs = [{ mode: "BUS" }, { mode: "MOTO" }];
