@@ -105,8 +105,13 @@ model User {
   email         String   @unique
   phone         String   @unique
   passwordHash  String
+  googleId      String?  @unique // Google account subject (set on Google sign-in / link)
   role          UserRole @default(PASSENGER)
-  phoneVerified Boolean  @default(false)
+  phoneVerified Boolean  @default(false) // legacy (phone OTP removed); kept for a future SMS flow
+  emailVerified Boolean  @default(false) // activates the account: emailed OTP, Google sign-in, or first use of emailed credentials
+  // Temp credentials were emailed to this address and not yet used; the first
+  // sign-in with them (or an emailed reset code) proves the mailbox.
+  credentialsEmailed Boolean @default(false)
   walletBalance Decimal  @default(0) @db.Decimal(10, 2)
   autoTopupEnabled Boolean @default(false)
   createdAt     DateTime @default(now())
@@ -440,9 +445,10 @@ model Otp {
   userId    String
   user      User     @relation(fields: [userId], references: [id])
   code      String
-  purpose   String // "VERIFY_PHONE" | "RESET_PASSWORD"
+  purpose   String // "VERIFY_EMAIL" | "RESET_PASSWORD"
   expiresAt DateTime
   consumed  Boolean  @default(false)
+  attempts  Int      @default(0) // wrong guesses; the code retires after OTP_MAX_ATTEMPTS
   createdAt DateTime @default(now())
 }
 

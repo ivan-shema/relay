@@ -120,7 +120,8 @@ adminRouter.get(
           role: u.role,
           phone: u.phone,
           joined: fmtDate(u.createdAt),
-          status: u.phoneVerified ? "ACTIVE" : "PENDING",
+          // Activated by email OTP or Google sign-in.
+          status: u.emailVerified ? "ACTIVE" : "PENDING",
         })),
         total,
         p
@@ -143,7 +144,7 @@ adminRouter.post(
     const passwordHash = await hashPassword(tempPassword);
     const user = await prisma.$transaction(async (tx) => {
       const u = await tx.user.create({
-        data: { firstName: body.firstName, lastName: body.lastName, email: body.email, phone: body.phone, role: body.role, passwordHash, phoneVerified: true },
+        data: { firstName: body.firstName, lastName: body.lastName, email: body.email, phone: body.phone, role: body.role, passwordHash, credentialsEmailed: true },
       });
       if (body.role === "DRIVER") {
         await tx.driver.create({ data: { userId: u.id, licenseNumber: "PENDING" } });

@@ -38,6 +38,15 @@ export interface AuthResponse {
   user: AuthUser;
 }
 
+// POST /auth/google — either a full session (account exists / was linked by
+// email) or a request to finish signup with a phone number.
+export interface GoogleProfile {
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+export type GoogleSignInResponse = AuthResponse | { needsPhone: true; profile: GoogleProfile };
+
 export interface VerifyOtpInput {
   userId: string;
   code: string;

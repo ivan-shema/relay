@@ -108,15 +108,23 @@ Open http://localhost:3000.
 | Admin     | `admin@relay.app`   |
 
 The landing page lets you **browse trips without an account**; signing in is only
-required at booking. Register a new account to exercise the OTP verify flow.
+required at booking. Register a new account to exercise the email OTP verify flow.
 
 ## Mock integrations
 
 Per the project plan, external providers are stubbed so everything runs offline with
 no credentials (toggle in `apps/api/.env`):
 
-- **OTP / SMS** (`MOCK_OTP=true`) — codes are logged to the API console; the code
-  `000000` always passes (verify + password reset).
+- **OTP by email (no mock)** — registration and password-reset codes are random
+  6-digit codes emailed to the account address through the same mailer as
+  notifications; without SMTP the email (code included) is logged to the API
+  console, which is how you read it in local dev. There is deliberately no
+  fixed/bypass code: a code expires after 10 minutes, retires after 5 wrong
+  guesses, and re-sends are throttled to one per minute. Verifying marks the
+  account `emailVerified` (ACTIVE in the admin list). Accounts created by an
+  admin or an operator invite are **not** verified at creation — their temp
+  password is emailed, and the first sign-in with it (or completing an emailed
+  reset code) is what verifies the address.
 - **Payments are REAL (no mock)** — the Relay wallet is the only spending rail.
   Booking fares and moto-ride escrow are deducted from the wallet balance;
   money enters the wallet via Paypack deposits and leaves via Paypack payouts
@@ -131,6 +139,17 @@ no credentials (toggle in `apps/api/.env`):
   webhook (configure the URL + `PAYPACK_WEBHOOK_SECRET` in the Paypack
   dashboard) or, in local dev, by the client's status poll against the Paypack
   events API. The admin dashboard shows the live Paypack merchant balances.
+- **Google sign-in** (`GOOGLE_CLIENT_ID` empty) — "Continue with Google" on the
+  auth page uses Google Identity Services; the API verifies the ID token with
+  `google-auth-library` (`apps/api/src/lib/google.ts`). Create an OAuth 2.0
+  *Web application* client in Google Cloud, add `http://localhost:3000` as an
+  authorized JavaScript origin, and put the client ID in both
+  `apps/api/.env` (`GOOGLE_CLIENT_ID`) and `apps/web/.env.local`
+  (`NEXT_PUBLIC_GOOGLE_CLIENT_ID`). Existing accounts are matched by email;
+  new Google users get a passenger account after adding a phone number. Because
+  Google already proved the email, Google accounts are marked `emailVerified`
+  and skip the OTP step (an existing unverified account becomes ACTIVE on its
+  first Google sign-in). Without a client ID the button is hidden.
 - **Maps / GPS** — the live-tracking map uses the design's SVG with a simulated
   vehicle interpolated along the route polyline (`apps/api/src/lib/tracking.ts`),
   polled every 3s by the client. Swap in Google Maps + real GPS later.
@@ -144,7 +163,7 @@ no credentials (toggle in `apps/api/.env`):
 ## What the passenger slice does end-to-end
 
 1. **Landing** (`/`) — pixel-faithful marketing page, browse without auth.
-2. **Auth** (`/auth`) — login, register (Passenger/Driver/Operator), OTP verify,
+2. **Auth** (`/auth`) — login, register (Passenger/Driver/Operator), email OTP verify,
    forgot/reset password. Real JWTs persisted in `localStorage`.
 3. **Plan → Search** — origin/destination with live place suggestions from the API.
 4. **Available trips** — real seeded departures with live seats, fares, surge, ETAs.
