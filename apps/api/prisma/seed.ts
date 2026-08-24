@@ -43,6 +43,8 @@ async function main() {
   console.log("Seeding Relay database…");
 
   // wipe (dev only) in FK-safe order
+  await prisma.rideOffer.deleteMany();
+  await prisma.rideRequest.deleteMany();
   await prisma.document.deleteMany();
   await prisma.payout.deleteMany();
   await prisma.walletTransaction.deleteMany();
