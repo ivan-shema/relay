@@ -18,7 +18,8 @@
     "db:gen": "npm run prisma:generate --workspace @relay/api",
     "db:studio": "npm run studio --workspace @relay/api",
     "db:seed": "npm run seed --workspace @relay/api",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "postinstall": "npm run build --workspace @relay/shared"
   },
   "engines": {
     "node": ">=20"
