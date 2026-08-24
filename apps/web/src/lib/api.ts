@@ -1,6 +1,7 @@
 import type {
   AuthResponse,
   AuthUser,
+  GoogleSignInResponse,
   BookingDetail,
   PaymentDetail,
   PaymentMethod,
@@ -161,6 +162,9 @@ export const api = {
   verifyOtp: (body: { userId: string; code: string }) =>
     request<{ verified: boolean; user: AuthUser }>("/auth/verify-otp", { method: "POST", body }),
 
+  resendOtp: (userId: string) =>
+    request<{ sent: boolean }>("/auth/resend-otp", { method: "POST", body: { userId } }),
+
   forgotPassword: (body: { identifier: string }) =>
     request<{ sent: boolean; userId: string | null }>("/auth/forgot-password", {
       method: "POST",
@@ -171,6 +175,14 @@ export const api = {
     request<{ reset: boolean }>("/auth/reset-password", { method: "POST", body }),
 
   me: () => request<AuthUser>("/auth/me", { auth: true }),
+
+  // Google sign-in — `credential` is the Google Identity Services ID token.
+  // Unknown accounts get `needsPhone` back and finish via googleComplete.
+  googleSignIn: (credential: string) =>
+    request<GoogleSignInResponse>("/auth/google", { method: "POST", body: { credential } }),
+
+  googleComplete: (body: { credential: string; firstName: string; lastName: string; phone: string }) =>
+    request<RegisterResp>("/auth/google/complete", { method: "POST", body }),
 
   // places & trips
   places: (q?: string) => request<Place[]>(`/places${q ? `?q=${encodeURIComponent(q)}` : ""}`),

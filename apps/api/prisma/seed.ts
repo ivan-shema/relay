@@ -67,27 +67,27 @@ async function main() {
 
   // ---------- Users ----------
   const amara = await prisma.user.create({
-    data: { firstName: "Amara", lastName: "Niyonsaba", email: "amara@relay.app", phone: "+250781104821", passwordHash: pw, role: "PASSENGER", phoneVerified: true, walletBalance: 12400 },
+    data: { firstName: "Amara", lastName: "Niyonsaba", email: "amara@relay.app", phone: "+250781104821", passwordHash: pw, role: "PASSENGER", emailVerified: true, walletBalance: 12400 },
   });
   const passengers = [amara];
   for (const [i, name] of [["Bea", "Kamikazi"], ["Chris", "Mugisha"], ["Diane", "Uwase"], ["Eric", "Tuyishime"], ["Faith", "Rukundo"]].entries()) {
     passengers.push(
       await prisma.user.create({
-        data: { firstName: name[0], lastName: name[1], email: `passenger${i + 2}@relay.app`, phone: `+2507820000${10 + i}`, passwordHash: pw, role: "PASSENGER", phoneVerified: true, walletBalance: 4000 + i * 1500 },
+        data: { firstName: name[0], lastName: name[1], email: `passenger${i + 2}@relay.app`, phone: `+2507820000${10 + i}`, passwordHash: pw, role: "PASSENGER", emailVerified: true, walletBalance: 4000 + i * 1500 },
       })
     );
   }
 
   const driverUser = await prisma.user.create({
-    data: { firstName: "Jean", lastName: "Pierre", email: "jean@relay.app", phone: "+250788000001", passwordHash: pw, role: "DRIVER", phoneVerified: true },
+    data: { firstName: "Jean", lastName: "Pierre", email: "jean@relay.app", phone: "+250788000001", passwordHash: pw, role: "DRIVER", emailVerified: true },
   });
 
   const operatorUser = await prisma.user.create({
-    data: { firstName: "Kigali Bus", lastName: "Admin", email: "ops@kigalibus.app", phone: "+250788000002", passwordHash: pw, role: "OPERATOR", phoneVerified: true },
+    data: { firstName: "Kigali Bus", lastName: "Admin", email: "ops@kigalibus.app", phone: "+250788000002", passwordHash: pw, role: "OPERATOR", emailVerified: true },
   });
 
   await prisma.user.create({
-    data: { firstName: "Relay", lastName: "Admin", email: "admin@relay.app", phone: "+250788000003", passwordHash: pw, role: "ADMIN", phoneVerified: true },
+    data: { firstName: "Relay", lastName: "Admin", email: "admin@relay.app", phone: "+250788000003", passwordHash: pw, role: "ADMIN", emailVerified: true },
   });
 
   // ---------- Operators ----------
@@ -106,7 +106,7 @@ async function main() {
   const pendingOps: { id: string }[] = [];
   for (const [i, app] of pendingApps.entries()) {
     const owner = await prisma.user.create({
-      data: { firstName: app.first, lastName: app.last, email: app.email, phone: app.phone, passwordHash: pw, role: "OPERATOR", phoneVerified: true },
+      data: { firstName: app.first, lastName: app.last, email: app.email, phone: app.phone, passwordHash: pw, role: "OPERATOR", emailVerified: true },
     });
     const op = await prisma.operator.create({
       data: { companyName: app.company, contactInfo: app.contact, idNumber: app.idNumber, modes: app.modes, status: "PENDING", ownerUserId: owner.id },
@@ -143,7 +143,7 @@ async function main() {
   ];
   for (const [i, d] of driverSpec.entries()) {
     const u = await prisma.user.create({
-      data: { firstName: d.first, lastName: d.last, email: `driver${i + 2}@relay.app`, phone: `+2507880010${10 + i}`, passwordHash: pw, role: "DRIVER", phoneVerified: true },
+      data: { firstName: d.first, lastName: d.last, email: `driver${i + 2}@relay.app`, phone: `+2507880010${10 + i}`, passwordHash: pw, role: "DRIVER", emailVerified: true },
     });
     const dr = await prisma.driver.create({
       data: { userId: u.id, operatorId: kigaliBus.id, licenseNumber: `RW-DRV-${1000 + i}`, nationalId: `11990800${20000000 + i}`, ratingAvg: d.rating, online: d.online },

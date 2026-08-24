@@ -64,6 +64,22 @@ export const registerSchema = z.object({
   password: z.string().min(8, "At least 8 characters"),
 });
 
+/* ---------------- Google sign-in ---------------- */
+// `credential` is the ID token Google Identity Services hands the browser.
+export const googleSignInSchema = z.object({
+  credential: z.string().min(20, "Missing Google credential"),
+});
+
+// First-time Google users still need a Rwandan phone (wallet, OTP, driver
+// contact), collected on a follow-up screen. Names are pre-filled from Google
+// but editable. The form schema is reused by the web client.
+export const googleProfileSchema = z.object({
+  firstName: z.string().min(2, "Enter your first name"),
+  lastName: z.string().min(2, "Enter your last name"),
+  phone: phoneSchema,
+});
+export const googleCompleteSchema = googleProfileSchema.merge(googleSignInSchema);
+
 // Normalizes FormData's string-or-array into TransportMode[] (multipart bodies
 // deliver repeated fields as string | string[]).
 const modesField = z

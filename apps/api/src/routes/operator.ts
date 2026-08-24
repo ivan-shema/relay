@@ -403,7 +403,7 @@ operatorRouter.post(
     const passwordHash = await hashPassword(tempPassword);
     const driver = await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
-        data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", phoneVerified: false },
+        data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", credentialsEmailed: hasEmail },
       });
       const d = await tx.driver.create({
         data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber, nationalId: body.idNumber },

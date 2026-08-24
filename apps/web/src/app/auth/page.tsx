@@ -5,15 +5,23 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import type { AuthUser, UserRole } from "@relay/shared";
-import { loginSchema, registerSchema, forgotSchema, otpFormSchema, newPasswordSchema } from "@relay/shared";
+import type { AuthResponse, AuthUser, GoogleProfile, UserRole } from "@relay/shared";
+import { loginSchema, registerSchema, forgotSchema, otpFormSchema, newPasswordSchema, googleProfileSchema } from "@relay/shared";
 import { api, ApiError } from "@/lib/api";
 import { useAuth, homePathForRole } from "@/lib/auth-context";
+import { GoogleButton, googleEnabled } from "@/components/google-button";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
 
-type Screen = "login" | "register" | "verify" | "forgot" | "sent" | "newpass";
+type Screen = "login" | "register" | "verify" | "forgot" | "sent" | "newpass" | "google-phone";
+
+// A first-time Google user mid-signup: the credential is replayed to
+// /auth/google/complete once they've added a phone number.
+interface PendingGoogle {
+  credential: string;
+  profile: GoogleProfile;
+}
 
 export default function AuthPage() {
   return (
@@ -32,6 +40,8 @@ function AuthInner() {
   const [screen, setScreen] = useState<Screen>(mode === "register" ? "register" : "login");
   const [pendingUserId, setPendingUserId] = useState<string | null>(null);
   const [resetCode, setResetCode] = useState("");
+  const [pendingGoogle, setPendingGoogle] = useState<PendingGoogle | null>(null);
+  const [googleError, setGoogleError] = useState<string | null>(null);
 
   const goHome = (u: AuthUser | UserRole) => router.push(homePathForRole(typeof u === "string" ? u : u.role));
 
@@ -41,19 +51,59 @@ function AuthInner() {
     else goHome(role);
   };
 
+  // Shared by the login and register forms: Google either signs an existing
+  // (or email-linked) account straight in, or asks for a phone number first.
+  const onGoogleCredential = async (credential: string) => {
+    setGoogleError(null);
+    try {
+      const resp = await api.googleSignIn(credential);
+      if ("needsPhone" in resp) {
+        setPendingGoogle({ credential, profile: resp.profile });
+        setScreen("google-phone");
+      } else {
+        setSession(resp);
+        goHome(resp.user);
+      }
+    } catch (e) {
+      setGoogleError(e instanceof ApiError ? e.message : "Google sign-in failed");
+    }
+  };
+
+  const switchScreen = (s: Screen) => {
+    setGoogleError(null);
+    setScreen(s);
+  };
+
   return (
     <div className="rel-auth-page" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 32 }}>
       <div className="rel-auth-card" style={{ width: "100%", maxWidth: 960, background: "#fff", border: "1px solid #e3ddd1", borderRadius: 24, overflow: "hidden", display: "flex", boxShadow: "0 40px 90px -40px rgba(27,23,20,.45)", minHeight: 600 }}>
         <BrandPanel />
         <div className="rel-auth-form" style={{ flex: 1, padding: "42px 46px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
           {screen === "login" && (
-            <LoginForm signIn={signIn} onForgot={() => setScreen("forgot")} onRegister={() => setScreen("register")} onDone={goHome} />
+            <LoginForm
+              signIn={signIn}
+              onForgot={() => switchScreen("forgot")}
+              onRegister={() => switchScreen("register")}
+              onDone={goHome}
+              onGoogle={onGoogleCredential}
+              googleError={googleError}
+            />
           )}
           {screen === "register" && (
             <RegisterForm
               setSession={setSession}
-              onLogin={() => setScreen("login")}
+              onLogin={() => switchScreen("login")}
               onRegistered={onRegistered}
+              onGoogle={onGoogleCredential}
+              googleError={googleError}
+            />
+          )}
+          {screen === "google-phone" && pendingGoogle && (
+            <GooglePhoneForm
+              pending={pendingGoogle}
+              setSession={setSession}
+              onRegistered={onRegistered}
+              onBack={() => { setPendingGoogle(null); switchScreen("login"); }}
             />
           )}
           {screen === "verify" && <VerifyForm userId={pendingUserId} onBack={() => setScreen("register")} onDone={goHome} />}
@@ -68,7 +118,12 @@ function AuthInner() {
 
 /* ---------------- forms ---------------- */
 
-function LoginForm({ signIn, onForgot, onRegister, onDone }: { signIn: (id: string, pw: string) => Promise<AuthUser>; onForgot: () => void; onRegister: () => void; onDone: (u: AuthUser) => void }) {
+interface GoogleProps {
+  onGoogle: (credential: string) => void;
+  googleError: string | null;
+}
+
+function LoginForm({ signIn, onForgot, onRegister, onDone, onGoogle, googleError }: { signIn: (id: string, pw: string) => Promise<AuthUser>; onForgot: () => void; onRegister: () => void; onDone: (u: AuthUser) => void } & GoogleProps) {
   const { register, handleSubmit, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof loginSchema>>({
     resolver: zodResolver(loginSchema),
     defaultValues: { identifier: "amara@relay.app", password: "password123" },
@@ -84,7 +139,7 @@ function LoginForm({ signIn, onForgot, onRegister, onDone }: { signIn: (id: stri
     <Panel>
       <form onSubmit={submit} noValidate>
         <Title sub="Sign in to continue to Relay">Welcome back</Title>
-        <ErrorBanner message={errors.root?.message} />
+        <ErrorBanner message={errors.root?.message ?? googleError ?? undefined} />
         <Label>Email or phone</Label>
         <TextField reg={register("identifier")} error={errors.identifier?.message} placeholder="amara@relay.app" />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "16px 0 7px" }}>
@@ -93,8 +148,7 @@ function LoginForm({ signIn, onForgot, onRegister, onDone }: { signIn: (id: stri
         </div>
         <PasswordField reg={register("password")} error={errors.password?.message} />
         <PrimaryButton busy={isSubmitting}>Sign in</PrimaryButton>
-        <Divider />
-        <GoogleButton />
+        <GoogleSection onGoogle={onGoogle} text="signin_with" />
         <Switcher prompt="New to Relay?" actionLabel="Create account" onClick={onRegister} />
       </form>
     </Panel>
@@ -104,7 +158,7 @@ function LoginForm({ signIn, onForgot, onRegister, onDone }: { signIn: (id: stri
 // Public registration — everyone signs up as a passenger. Drivers are invited by
 // their operator; running a transport business is an application you make from
 // the passenger dashboard after signing up (Profile → Become an operator).
-function RegisterForm({ setSession, onLogin, onRegistered }: { setSession: (r: import("@relay/shared").AuthResponse) => void; onLogin: () => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void }) {
+function RegisterForm({ setSession, onLogin, onRegistered, onGoogle, googleError }: { setSession: (r: AuthResponse) => void; onLogin: () => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void } & GoogleProps) {
   const { register, handleSubmit, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof registerSchema>>({
     resolver: zodResolver(registerSchema),
     defaultValues: { firstName: "", lastName: "", email: "", phone: "", password: "" },
@@ -122,7 +176,7 @@ function RegisterForm({ setSession, onLogin, onRegistered }: { setSession: (r: i
     <Panel width={400}>
       <form onSubmit={submit} noValidate>
         <Title sub="Join Relay in under a minute">Create your account</Title>
-        <ErrorBanner message={errors.root?.message} />
+        <ErrorBanner message={errors.root?.message ?? googleError ?? undefined} />
         <div style={{ display: "flex", gap: 12 }}>
           <div style={{ flex: 1 }}>
             <Label>First name</Label>
@@ -143,10 +197,52 @@ function RegisterForm({ setSession, onLogin, onRegistered }: { setSession: (r: i
         <Label>Password</Label>
         <PasswordField reg={register("password")} error={errors.password?.message} />
         <PrimaryButton busy={isSubmitting}>Create account</PrimaryButton>
+        <GoogleSection onGoogle={onGoogle} text="signup_with" />
         <Switcher prompt="Already have an account?" actionLabel="Sign in" onClick={onLogin} />
         <div style={{ textAlign: "center", fontSize: 11.5, color: "#a39a8d", fontWeight: 600, marginTop: 12 }}>
           Run a transport business? Sign up, then apply from Profile → Become an operator.
         </div>
+      </form>
+    </Panel>
+  );
+}
+
+// Finishes a first-time Google signup: Google gave us a verified email and a
+// name, but Relay needs a Rwandan phone (wallet / MoMo, driver contact).
+function GooglePhoneForm({ pending, setSession, onRegistered, onBack }: { pending: PendingGoogle; setSession: (r: AuthResponse) => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void; onBack: () => void }) {
+  const { register, handleSubmit, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof googleProfileSchema>>({
+    resolver: zodResolver(googleProfileSchema),
+    defaultValues: { firstName: pending.profile.firstName, lastName: pending.profile.lastName, phone: "" },
+  });
+  const submit = handleSubmit(async (v) => {
+    try {
+      const resp = await api.googleComplete({ ...v, credential: pending.credential });
+      setSession(resp);
+      onRegistered(resp.user.id, resp.user.role, !!resp.requiresVerification);
+    } catch (e) {
+      setError("root", { message: e instanceof ApiError ? e.message : "Could not create account" });
+    }
+  });
+  return (
+    <Panel width={400}>
+      <form onSubmit={submit} noValidate>
+        <Title sub={`Signed in with Google as ${pending.profile.email}. Add your phone number to finish.`}>Almost there</Title>
+        <ErrorBanner message={errors.root?.message} />
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <Label>First name</Label>
+            <TextField reg={register("firstName")} error={errors.firstName?.message} placeholder="Amara" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <Label>Last name</Label>
+            <TextField reg={register("lastName")} error={errors.lastName?.message} placeholder="Niyonsaba" />
+          </div>
+        </div>
+        <div style={{ height: 14 }} />
+        <Label>Phone number</Label>
+        <TextField reg={register("phone")} error={errors.phone?.message} placeholder="+250 78 000 4821" mono />
+        <PrimaryButton busy={isSubmitting}>Finish signing up</PrimaryButton>
+        <BackBtn onClick={onBack} full>← Use a different account</BackBtn>
       </form>
     </Panel>
   );
@@ -166,14 +262,24 @@ function VerifyForm({ userId, onBack, onDone }: { userId: string | null; onBack:
       setError("code", { message: e instanceof ApiError ? e.message : "Invalid code" });
     }
   });
+  const [resendNote, setResendNote] = useState<string | null>(null);
+  const resend = async () => {
+    if (!userId) return;
+    try {
+      await api.resendOtp(userId);
+      setResendNote("A new code is on its way — check your inbox and spam folder.");
+    } catch (e) {
+      setResendNote(e instanceof ApiError ? e.message : "Could not resend the code");
+    }
+  };
   return (
     <Panel center>
       <form onSubmit={submit} noValidate>
         <IconBadge>✉</IconBadge>
-        <Title center sub="We sent a 6-digit code to your phone">Verify your number</Title>
+        <Title center sub="We emailed a 6-digit code to your address">Verify your email</Title>
         <OtpField reg={register("code")} value={watch("code")} error={errors.code?.message || errors.root?.message} />
         <PrimaryButton busy={isSubmitting}>Verify &amp; continue</PrimaryButton>
-        <Hint>Didn&apos;t get it? <b style={{ color: "#ff6a1a" }}>Mock mode — use 000000</b></Hint>
+        <Hint>{resendNote ?? <>Didn&apos;t get it? Check your spam folder, or <LinkBtn onClick={resend}>resend the code</LinkBtn></>}</Hint>
         <BackBtn onClick={onBack}>← Back</BackBtn>
       </form>
     </Panel>
@@ -196,7 +302,7 @@ function ForgotForm({ onLogin, onSent }: { onLogin: () => void; onSent: (userId:
   return (
     <Panel>
       <form onSubmit={submit} noValidate>
-        <Title sub="Enter your email or phone and we'll send you a reset code.">Reset password</Title>
+        <Title sub="Enter your email or phone and we'll email you a reset code.">Reset password</Title>
         <ErrorBanner message={errors.root?.message} />
         <Label>Email or phone</Label>
         <TextField reg={register("identifier")} error={errors.identifier?.message} placeholder="amara@relay.app" />
@@ -219,10 +325,10 @@ function SentForm({ onVerified, onLogin }: { onVerified: (code: string) => void;
         <IconBadge>
           <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
         </IconBadge>
-        <Title center sub="Enter the 6-digit code we sent you.">Enter reset code</Title>
+        <Title center sub="Enter the 6-digit code we emailed you.">Enter reset code</Title>
         <OtpField reg={register("code")} value={watch("code")} error={errors.code?.message} />
         <PrimaryButton busy={false}>Verify code</PrimaryButton>
-        <Hint>Mock mode — use <b style={{ color: "#ff6a1a" }}>000000</b></Hint>
+        <Hint>Codes expire after 10 minutes. Didn&apos;t get one? Go back and request it again.</Hint>
         <BackBtn onClick={onLogin}>← Back to sign in</BackBtn>
       </form>
     </Panel>
@@ -407,12 +513,15 @@ function Divider() {
   );
 }
 
-function GoogleButton() {
+// "or" divider + Google's rendered button. Collapses entirely when
+// NEXT_PUBLIC_GOOGLE_CLIENT_ID isn't set so the forms don't show a dead button.
+function GoogleSection({ onGoogle, text }: { onGoogle: (credential: string) => void; text: "signin_with" | "signup_with" }) {
+  if (!googleEnabled) return null;
   return (
-    <button type="button" style={{ width: "100%", background: "#fff", border: "1px solid #e3ddd1", borderRadius: 12, padding: 12, fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
-      <svg width="17" height="17" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5a5.6 5.6 0 0 1-2.4 3.6v3h3.9c2.3-2.1 3.5-5.2 3.5-8.8z" /><path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-2.9l-3.9-3c-1 .7-2.4 1.2-4.1 1.2-3.1 0-5.8-2.1-6.8-5H1.2v3.1A12 12 0 0 0 12 24z" /><path fill="#FBBC05" d="M5.2 14.3a7.2 7.2 0 0 1 0-4.6V6.6H1.2a12 12 0 0 0 0 10.8l4-3.1z" /><path fill="#EA4335" d="M12 4.8c1.8 0 3.3.6 4.6 1.8l3.4-3.4A12 12 0 0 0 12 0 12 12 0 0 0 1.2 6.6l4 3.1c1-2.9 3.7-4.9 6.8-4.9z" /></svg>
-      Continue with Google
-    </button>
+    <>
+      <Divider />
+      <GoogleButton onCredential={onGoogle} text={text} />
+    </>
   );
 }
 

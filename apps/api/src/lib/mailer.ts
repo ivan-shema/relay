@@ -2,7 +2,8 @@ import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../env";
 
 // Notification emails. With SMTP_HOST configured this sends real mail; without
-// it, messages are logged to the API console (mock mode, like MOCK_OTP).
+// it, messages are logged to the API console (mock mode) — OTP codes included,
+// which is how local dev reads them.
 
 export const mailEnabled = env.smtpHost.length > 0;
 
