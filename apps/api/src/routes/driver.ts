@@ -9,6 +9,7 @@ import { notify } from "../lib/notify";
 import { normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
 import { getMotoCommissionPct } from "../lib/settings";
+import { motoIneligibleReason } from "../lib/moto";
 import { autoResolveStaleDispute } from "./rides";
 import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
@@ -141,13 +142,16 @@ driverRouter.get(
   "/moto-requests",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
+    // Why hailing is off for this driver (wrong vehicle, operator not verified /
+    // not offering MOTO…) — surfaced in the console instead of a silent empty list.
+    const hailingReason = motoIneligibleReason(driver);
     // Current platform rate — for previewing the payout on rides that don't
     // have a locked rate yet. Once a price is agreed, the rate is snapshotted
     // on the ride (commissionPct) and later admin changes don't touch it.
     const platformCommissionPct = await getMotoCommissionPct();
     let [open, current] = await Promise.all([
       prisma.rideRequest.findMany({
-        where: { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: driver.id }] },
+        where: hailingReason ? { id: "__none__" } : { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: driver.id }] },
         include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
         orderBy: { createdAt: "desc" },
         take: 20,
@@ -196,7 +200,7 @@ driverRouter.get(
         netPayout: fare === null || commission === null ? null : Math.round((fare - commission) * 100) / 100,
       };
     };
-    res.json({ open: open.map(map), current: current ? map(current) : null, platformCommissionPct });
+    res.json({ open: open.map(map), current: current ? map(current) : null, platformCommissionPct, hailing: { enabled: !hailingReason, reason: hailingReason } });
   })
 );
 
@@ -208,7 +212,8 @@ driverRouter.post(
   "/moto-requests/:id/accept",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
-    if (driver.suspended) throw new HttpError(403, "Your account is suspended");
+    const ineligible = motoIneligibleReason(driver);
+    if (ineligible) throw new HttpError(403, ineligible);
 
     const busy = await prisma.rideRequest.findFirst({
       where: { status: { in: [...DRIVER_ACTIVE_RIDE_STATUSES] }, acceptedDriverId: driver.id },
@@ -274,7 +279,8 @@ driverRouter.post(
   asyncHandler(async (req, res) => {
     const { amount } = z.object({ amount: z.coerce.number().positive().max(100_000) }).parse(req.body);
     const driver = await getDriver(req.auth!.sub);
-    if (driver.suspended) throw new HttpError(403, "Your account is suspended");
+    const ineligible = motoIneligibleReason(driver);
+    if (ineligible) throw new HttpError(403, ineligible);
 
     const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
     if (!ride || ride.status !== "OPEN") throw new HttpError(409, "This ride is no longer open");

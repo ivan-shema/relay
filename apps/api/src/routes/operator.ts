@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import {
@@ -22,6 +23,7 @@ import { storeFile, deleteFile, fromMulter } from "../lib/storage";
 import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
 import { notify } from "../lib/notify";
+import { motoDriverWhere } from "../lib/moto";
 import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
 export const operatorRouter = Router();
@@ -386,6 +388,14 @@ operatorRouter.post(
     const body = createDepartureSchema.parse(req.body);
     const route = await prisma.route.findUnique({ where: { id: body.routeId }, include: { origin: true, destination: true } });
     if (!route) throw new HttpError(400, "Invalid route");
+    // A chosen vehicle must be ours and match the mode; a moto never carries
+    // more than one passenger, so its capacity wins over whatever was typed.
+    if (body.vehicleId) {
+      const vehicle = await prisma.vehicle.findFirst({ where: { id: body.vehicleId, operatorId: opId } });
+      if (!vehicle) throw new HttpError(400, "That vehicle is not in your fleet");
+      if (vehicle.type !== body.mode) throw new HttpError(400, `That vehicle is a ${vehicle.type.toLowerCase()}, not a ${body.mode.toLowerCase()}`);
+      if (body.capacity > vehicle.capacity) throw new HttpError(400, `That vehicle only seats ${vehicle.capacity}`);
+    }
     const departAt = new Date(Date.now() + body.departInMinutes * 60_000);
     const trip = await prisma.trip.create({
       data: {
@@ -978,5 +988,133 @@ operatorRouter.get(
         ];
       })
     ));
+  })
+);
+
+
+/* -------- Moto hail dispatch --------
+   Hails are accepted by the driver who will actually ride (price, pickup and
+   completion all run through them), but the operator that offers MOTO sees
+   every open hail its fleet could take, its drivers' live rides, and can
+   assign an open hail to one of its online motos. Assignment targets the
+   request at that driver (they still confirm) and notifies them. */
+
+const OPERATOR_ACTIVE_RIDE_STATUSES = ["ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
+
+async function motoFleet(opId: string) {
+  const drivers = await prisma.driver.findMany({
+    where: { operatorId: opId, vehicle: { is: { type: "MOTO" } } },
+    include: { user: true, vehicle: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const ids = drivers.map((d) => d.id);
+  const active = ids.length
+    ? await prisma.rideRequest.findMany({
+        where: { acceptedDriverId: { in: ids }, status: { in: [...OPERATOR_ACTIVE_RIDE_STATUSES] } },
+        include: { passenger: true, acceptedDriver: { include: { user: true, vehicle: true } } },
+        orderBy: { acceptedAt: "desc" },
+      })
+    : [];
+  const busy = new Set(active.map((r) => r.acceptedDriverId));
+  return { drivers, ids, active, busy };
+}
+
+function hailFare(r: { agreedFare: Prisma.Decimal | null; offerFare: Prisma.Decimal | null }): number | null {
+  const v = r.agreedFare ?? r.offerFare;
+  return v === null ? null : rdec(v);
+}
+
+// GET /operator/moto-hails — dispatch board for a MOTO operator.
+operatorRouter.get(
+  "/moto-hails",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const op = await prisma.operator.findUnique({ where: { id: opId } });
+    const enabled = !!op && op.modes.includes("MOTO");
+    if (!enabled) {
+      res.json({ enabled: false, open: [], active: [], drivers: [] });
+      return;
+    }
+    const { drivers, ids, active, busy } = await motoFleet(opId);
+    const open = await prisma.rideRequest.findMany({
+      where: { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: { in: ids } }] },
+      include: {
+        passenger: true,
+        targetDriver: { include: { user: true } },
+        offers: { where: { status: "PENDING", driverId: { in: ids } }, include: { driver: { include: { user: true } } } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+    res.json({
+      enabled: true,
+      open: open.map((r) => ({
+        id: r.id,
+        from: r.originLabel,
+        to: r.destLabel,
+        passenger: fullNameOf(r.passenger),
+        fare: hailFare(r),
+        prepaid: Boolean(r.paidAt),
+        departAt: r.departAt?.toISOString() ?? null,
+        requestedAt: r.createdAt.toISOString(),
+        // set when the hail is already aimed at one of OUR drivers
+        assignedTo: r.targetDriver ? { id: r.targetDriver.id, name: fullNameOf(r.targetDriver.user) } : null,
+        offers: r.offers.map((o) => ({ driverName: fullNameOf(o.driver.user), amount: rdec(o.amount) })),
+      })),
+      active: active.map((r) => ({
+        id: r.id,
+        from: r.originLabel,
+        to: r.destLabel,
+        passenger: fullNameOf(r.passenger),
+        fare: hailFare(r),
+        status: r.status,
+        driver: r.acceptedDriver ? { id: r.acceptedDriver.id, name: fullNameOf(r.acceptedDriver.user), plate: r.acceptedDriver.vehicle?.plateNumber ?? "—" } : null,
+        acceptedAt: r.acceptedAt?.toISOString() ?? null,
+      })),
+      drivers: drivers.map((d) => ({
+        id: d.id,
+        name: fullNameOf(d.user),
+        plate: d.vehicle?.plateNumber ?? "—",
+        online: d.online,
+        suspended: d.suspended,
+        busy: busy.has(d.id),
+        // can be handed a hail right now
+        available: d.online && !d.suspended && !busy.has(d.id),
+      })),
+    });
+  })
+);
+
+// POST /operator/moto-hails/:id/assign { driverId } — aim an open hail at one
+// of my available motos. The driver still accepts in their console.
+operatorRouter.post(
+  "/moto-hails/:id/assign",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const { driverId } = z.object({ driverId: z.string().min(1) }).parse(req.body);
+    const op = await prisma.operator.findUnique({ where: { id: opId } });
+    if (!op || !op.modes.includes("MOTO")) throw new HttpError(403, "Your company does not offer moto-taxi service");
+
+    const driver = await prisma.driver.findFirst({
+      where: { id: driverId, operatorId: opId, ...motoDriverWhere },
+      include: { user: true },
+    });
+    if (!driver) throw new HttpError(409, "That driver is not an online, available moto of your fleet");
+    const { busy, ids } = await motoFleet(opId);
+    if (busy.has(driver.id)) throw new HttpError(409, `${fullNameOf(driver.user)} is on a ride — pick a free driver`);
+
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.status !== "OPEN") throw new HttpError(409, "This hail is no longer open");
+    if (ride.targetDriverId && !ids.includes(ride.targetDriverId)) {
+      throw new HttpError(409, "The passenger sent this request to another operator's driver");
+    }
+
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { targetDriverId: driver.id } });
+    await notify(
+      driver.userId,
+      "Ride assigned to you",
+      `${op.companyName} assigned you a moto request: ${ride.originLabel} → ${ride.destLabel}. Open your console to accept it.`
+    );
+    res.json({ assigned: true, driverId: driver.id });
   })
 );

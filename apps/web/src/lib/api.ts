@@ -229,7 +229,7 @@ export const api = {
   confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
   cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
   driverMotoRequests: () =>
-    request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null; platformCommissionPct: number }>("/driver/moto-requests", { auth: true }),
+    request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null; platformCommissionPct: number; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
   driverAcceptMotoRide: (id: string) => request<{ accepted: boolean }>(`/driver/moto-requests/${id}/accept`, { method: "POST", auth: true }),
   driverOfferMotoRide: (id: string, amount: number) =>
     request<{ offered: boolean }>(`/driver/moto-requests/${id}/offer`, { method: "POST", body: { amount }, auth: true }),
@@ -388,6 +388,10 @@ export const api = {
   // Reports — `q` is the range query from components/reports.tsx (rangeQuery)
   adminReports: (q = "?period=month") => request<AdminReports>(`/admin/reports${q}`, { auth: true }),
   adminReportExportUrl: (type: AdminReportType, q = "?period=all") => `${BASE}/admin/reports/export${q}&type=${type}`,
+  // moto dispatch (operators offering MOTO)
+  operatorMotoHails: () => request<OperatorMotoHails>("/operator/moto-hails", { auth: true }),
+  operatorAssignMotoHail: (id: string, driverId: string) =>
+    request<{ assigned: boolean; driverId: string }>(`/operator/moto-hails/${id}/assign`, { method: "POST", body: { driverId }, auth: true }),
   operatorReports: (q = "?period=month") => request<OperatorReports>(`/operator/reports${q}`, { auth: true }),
   operatorReportExportUrl: (q = "?period=month") => `${BASE}/operator/reports/export${q}`,
   driverReports: (q = "?period=month") => request<DriverReports>(`/driver/reports${q}`, { auth: true }),
@@ -447,6 +451,44 @@ export interface RideView {
   offers: RideOfferView[];
   createdAt: string;
   acceptedAt: string | null;
+}
+// Operator dispatch board for on-demand moto hails (GET /operator/moto-hails).
+export interface OperatorMotoHail {
+  id: string;
+  from: string;
+  to: string;
+  passenger: string;
+  fare: number | null;
+  prepaid: boolean;
+  departAt: string | null;
+  requestedAt: string;
+  assignedTo: { id: string; name: string } | null;
+  offers: { driverName: string; amount: number }[];
+}
+export interface OperatorMotoActiveRide {
+  id: string;
+  from: string;
+  to: string;
+  passenger: string;
+  fare: number | null;
+  status: RideStatus;
+  driver: { id: string; name: string; plate: string } | null;
+  acceptedAt: string | null;
+}
+export interface OperatorMotoDriver {
+  id: string;
+  name: string;
+  plate: string;
+  online: boolean;
+  suspended: boolean;
+  busy: boolean;
+  available: boolean;
+}
+export interface OperatorMotoHails {
+  enabled: boolean;
+  open: OperatorMotoHail[];
+  active: OperatorMotoActiveRide[];
+  drivers: OperatorMotoDriver[];
 }
 export interface DriverMotoRequest {
   id: string;

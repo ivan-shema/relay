@@ -171,6 +171,24 @@ no credentials (toggle in `apps/api/.env`):
   real time over the `GET /me/stream` SSE channel, so the bell updates without
   a refresh.
 
+## Moto hailing & dispatch
+
+- **Who receives a hail.** Drivers are classified by the vehicle their operator
+  assigned them. A passenger's hail (broadcast, or aimed at one nearby moto)
+  reaches a driver only if they are online, not suspended, sit on a `MOTO`
+  vehicle, **and** belong to a `VERIFIED` operator whose modes include `MOTO`
+  (`apps/api/src/lib/moto.ts`). A bus driver — e.g. the demo driver
+  `jean@relay.app` — sees "hailing is off" with the reason; the seeded online
+  moto driver is `driver2@relay.app` (David, Kigali Bus Co.).
+- **Operator dispatch.** Operators offering MOTO get a *Moto hails* tab: every
+  open hail their fleet could take, their drivers' rides in progress, and an
+  *Assign* action that aims a hail at one of their free online motos (the
+  driver is notified and still accepts — price, pickup and completion run
+  through the driver, who is the one physically there).
+- **One passenger per moto.** Vehicles and departures with mode `MOTO` must
+  have capacity 1 (the forms lock the field), bookings on a moto trip are one
+  seat, and a departure's vehicle must belong to the operator and match the mode.
+
 ## What the passenger slice does end-to-end
 
 1. **Landing** (`/`) — pixel-faithful marketing page, browse without auth.

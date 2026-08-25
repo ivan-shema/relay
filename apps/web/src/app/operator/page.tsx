@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   api,
+  ApiError,
   type OperatorOverview,
   type OperatorVehicle,
   type OperatorRoute,
@@ -14,6 +15,7 @@ import {
   type OperatorBookingRow,
   type OperatorPayments,
   type OperatorReports,
+  type OperatorMotoHails,
 } from "@/lib/api";
 import {
   formatRWF,
@@ -42,6 +44,7 @@ const NAV: NavItem[] = [
   { key: "routes", label: "Routes", icon: "⋔" },
   { key: "schedule", label: "Schedule", icon: "◷" },
   { key: "drivers", label: "Drivers", icon: "☻" },
+  { key: "moto", label: "Moto hails", icon: "⚡" },
   { key: "bookings", label: "Bookings", icon: "≡" },
   { key: "payments", label: "Payments", icon: "◈" },
   { key: "reports", label: "Reports", icon: "▧" },
@@ -54,6 +57,7 @@ const TITLES: Record<string, string> = {
   routes: "Routes",
   schedule: "Schedule",
   drivers: "Drivers",
+  moto: "Moto hails",
   bookings: "Bookings",
   payments: "Payments & payouts",
   reports: "Reports & analytics",
@@ -65,6 +69,7 @@ export default function OperatorConsole() {
   const [tab, setTab] = useState("overview");
   const [company, setCompany] = useState("Operator");
   const [status, setStatus] = useState<string | null>(null);
+  const [modes, setModes] = useState<string[]>([]);
   const [selectedDriver, setSelectedDriver] = useState<string | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
 
@@ -74,6 +79,7 @@ export default function OperatorConsole() {
       .then((o) => {
         setCompany(o.companyName);
         setStatus(o.status);
+        setModes(o.modes);
       })
       .catch(() => setStatus("ERROR"));
   }, []);
@@ -99,7 +105,7 @@ export default function OperatorConsole() {
     <div className="rel-console-page">
       <ConsoleShell
         role="Operator"
-        nav={NAV}
+        nav={modes.includes("MOTO") ? NAV : NAV.filter((n) => n.key !== "moto")}
         active={profileOpen ? "" : tab}
         onNav={(k) => { setProfileOpen(false); setTab(k); setSelectedDriver(null); }}
         onOpenProfile={() => setProfileOpen(true)}
@@ -119,6 +125,7 @@ export default function OperatorConsole() {
             {tab === "routes" && <RoutesTab />}
             {tab === "schedule" && <ScheduleTab />}
             {tab === "drivers" && <DriversTab selected={selectedDriver} onSelect={setSelectedDriver} />}
+            {tab === "moto" && <MotoHailsTab />}
             {tab === "bookings" && <BookingsTab />}
             {tab === "payments" && <PaymentsTab />}
             {tab === "reports" && <ReportsTab />}
@@ -290,7 +297,7 @@ function FleetTab() {
           fields={[
             { name: "plateNumber", label: "Plate number", placeholder: "RAD 500 X" },
             { name: "type", label: "Type", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }] },
-            { name: "capacity", label: "Capacity", type: "number", defaultValue: "33" },
+            { name: "capacity", label: "Capacity", type: "number", defaultValue: "33", lockedValue: (v) => (v.type === "MOTO" || v.mode === "MOTO" ? "1" : undefined) },
             { name: "model", label: "Model", placeholder: "Coaster HD" },
           ]}
           onSubmit={async (v) => { const d = v as CreateVehicleInput; await api.operatorAddVehicle({ plateNumber: d.plateNumber, type: d.type, capacity: d.capacity, model: d.model }); reloadFirst(); }}
@@ -378,7 +385,7 @@ function ScheduleTab() {
             { name: "fare", label: "Fare (RWF)", type: "number", defaultValue: "800" },
             { name: "departInMinutes", label: "Departs in (min)", type: "number", defaultValue: "30" },
             { name: "durationMinutes", label: "Duration (min)", type: "number", defaultValue: "30" },
-            { name: "capacity", label: "Capacity", type: "number", defaultValue: "33" },
+            { name: "capacity", label: "Capacity", type: "number", defaultValue: "33", lockedValue: (v) => (v.type === "MOTO" || v.mode === "MOTO" ? "1" : undefined) },
           ]}
           onSubmit={async (v) => { const d = v as CreateDepartureInput; await api.operatorAddDeparture({ routeId: d.routeId, mode: d.mode, fare: d.fare, departInMinutes: d.departInMinutes, durationMinutes: d.durationMinutes, capacity: d.capacity }); reloadFirst(); }}
           onClose={() => setModal(false)}
@@ -946,5 +953,129 @@ function OperatorMap() {
       <circle cx="470" cy="300" r="9" fill="#ff6a1a" stroke="#fff" strokeWidth="3" />
       <circle cx="560" cy="360" r="9" fill="#1f9d6b" stroke="#fff" strokeWidth="3" />
     </svg>
+  );
+}
+
+
+// Dispatch board for operators that offer MOTO: every open hail the fleet
+// could take, the fleet's live rides, and an "assign" action that aims a hail
+// at one of the operator's free online motos (the driver still accepts).
+function MotoHailsTab() {
+  const [data, setData] = useState<OperatorMotoHails | null>(null);
+  const [pick, setPick] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api.operatorMotoHails().then(setData).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  if (!data) return <Loading />;
+  if (!data.enabled) {
+    return (
+      <Card>
+        <CardTitle>Moto hails</CardTitle>
+        <div style={{ padding: "14px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>Your company is not registered for moto-taxi service, so passengers&apos; hails are not routed to your drivers.</div>
+      </Card>
+    );
+  }
+
+  const free = data.drivers.filter((d) => d.available);
+  const assign = async (hailId: string) => {
+    const driverId = pick[hailId] ?? free[0]?.id;
+    if (!driverId) return;
+    setBusyId(hailId);
+    try {
+      await api.operatorAssignMotoHail(hailId, driverId);
+    } catch (e) {
+      window.alert(e instanceof ApiError ? e.message : "Could not assign this hail");
+    } finally {
+      setBusyId(null);
+      load();
+    }
+  };
+  const fmtAgo = (iso: string) => {
+    const m = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    return m < 1 ? "just now" : `${m} min ago`;
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <Card>
+        <CardTitle>Moto fleet · {data.drivers.filter((d) => d.online).length} online of {data.drivers.length}</CardTitle>
+        {data.drivers.length === 0 ? (
+          <div style={{ padding: "12px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>No driver has a moto assigned yet — assign a MOTO vehicle from the Drivers tab.</div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, paddingTop: 6 }}>
+            {data.drivers.map((d) => {
+              const tone = d.suspended ? { c: "#c2553f", b: "#fbeae6", t: "Suspended" } : !d.online ? { c: "#8c8378", b: "#f1ede4", t: "Offline" } : d.busy ? { c: "#2f6bff", b: "#e9f0ff", t: "On a ride" } : { c: "#1f9d6b", b: "#e7f6ee", t: "Available" };
+              return (
+                <div key={d.id} style={{ border: "1px solid #e9e3d8", borderRadius: 13, padding: "10px 13px", minWidth: 180, display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: "50%", background: tone.c, flex: "none" }} />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                    <span style={{ display: "block", fontSize: 11.5, fontFamily: MONO, color: "#8c8378" }}>{d.plate}</span>
+                  </span>
+                  <span style={{ fontSize: 10.5, fontWeight: 800, color: tone.c, background: tone.b, borderRadius: 7, padding: "3px 8px", textTransform: "uppercase" }}>{tone.t}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <CardTitle>Open hails · {data.open.length}</CardTitle>
+        {data.open.length === 0 ? (
+          <div style={{ padding: "12px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>No passenger is hailing a moto right now. Broadcast hails and hails sent to your drivers appear here live.</div>
+        ) : (
+          <>
+            <TableHead cols={["Requested", "Trip", "Passenger", "Fare", "Status", "Assign to"]} template=".8fr 1.8fr 1fr .7fr 1fr 1.6fr" />
+            {data.open.map((h) => (
+              <Row key={h.id} template=".8fr 1.8fr 1fr .7fr 1fr 1.6fr">
+                <span style={{ fontFamily: MONO, fontSize: 12, color: "#8c8378" }}>{fmtAgo(h.requestedAt)}</span>
+                <span style={{ fontWeight: 600 }}>{h.from} → {h.to}{h.departAt ? <span style={{ display: "block", fontSize: 11.5, color: "#8c8378" }}>leave {new Date(h.departAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> : null}</span>
+                <span style={{ color: "#6b6258" }}>{h.passenger}</span>
+                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{h.fare !== null ? formatRWF(h.fare) : "open"}{h.prepaid ? <span style={{ display: "block", fontSize: 10.5, color: "#1f9d6b" }}>funded</span> : null}</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: h.assignedTo ? "#2f6bff" : "#8c8378" }}>
+                  {h.assignedTo ? `Sent to ${h.assignedTo.name}` : "Broadcast"}
+                  {h.offers.length > 0 && <span style={{ display: "block", fontSize: 11, color: "#8c8378", fontWeight: 600 }}>{h.offers.map((o) => `${o.driverName.split(" ")[0]} offered ${formatRWF(o.amount)}`).join(" · ")}</span>}
+                </span>
+                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <select value={pick[h.id] ?? free[0]?.id ?? ""} onChange={(e) => setPick((p) => ({ ...p, [h.id]: e.target.value }))} disabled={free.length === 0} style={{ flex: 1, border: "1px solid #e3ddd1", borderRadius: 9, padding: "7px 9px", fontSize: 12.5, fontWeight: 600, fontFamily: "'Manrope', sans-serif", background: "#fff" }}>
+                    {free.length === 0 ? <option value="">No free moto online</option> : free.map((d) => <option key={d.id} value={d.id}>{d.name} · {d.plate}</option>)}
+                  </select>
+                  <button disabled={free.length === 0 || busyId === h.id} onClick={() => assign(h.id)} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: free.length === 0 ? "default" : "pointer", opacity: free.length === 0 ? 0.5 : 1, fontFamily: "'Manrope', sans-serif" }}>{busyId === h.id ? "…" : h.assignedTo ? "Reassign" : "Assign"}</button>
+                </span>
+              </Row>
+            ))}
+          </>
+        )}
+      </Card>
+
+      <Card>
+        <CardTitle>Rides in progress · {data.active.length}</CardTitle>
+        {data.active.length === 0 ? (
+          <div style={{ padding: "12px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>None of your motos is on a ride right now.</div>
+        ) : (
+          <>
+            <TableHead cols={["Driver", "Trip", "Passenger", "Fare", "Status"]} template="1.2fr 1.8fr 1fr .8fr 1fr" />
+            {data.active.map((r) => (
+              <Row key={r.id} template="1.2fr 1.8fr 1fr .8fr 1fr">
+                <span style={{ fontWeight: 700 }}>{r.driver?.name ?? "—"}<span style={{ display: "block", fontSize: 11.5, fontFamily: MONO, color: "#8c8378", fontWeight: 600 }}>{r.driver?.plate ?? ""}</span></span>
+                <span style={{ fontWeight: 600 }}>{r.from} → {r.to}</span>
+                <span style={{ color: "#6b6258" }}>{r.passenger}</span>
+                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{r.fare !== null ? formatRWF(r.fare) : "—"}</span>
+                <span style={{ textAlign: "right" }}><StatusPill status={r.status} /></span>
+              </Row>
+            ))}
+          </>
+        )}
+      </Card>
+    </div>
   );
 }

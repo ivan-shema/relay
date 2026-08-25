@@ -222,12 +222,13 @@ function fmtHm(iso: string): string {
 function MotoHailSection({ online }: { online: boolean }) {
   const [open, setOpen] = useState<DriverMotoRequest[]>([]);
   const [current, setCurrent] = useState<DriverMotoRequest | null>(null);
+  const [hailing, setHailing] = useState<{ enabled: boolean; reason: string | null } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [counterFor, setCounterFor] = useState<string | null>(null);
   const [counterAmount, setCounterAmount] = useState("");
 
   const load = useCallback(() => {
-    api.driverMotoRequests().then((r) => { setOpen(r.open); setCurrent(r.current); }).catch(() => undefined);
+    api.driverMotoRequests().then((r) => { setOpen(r.open); setCurrent(r.current); setHailing(r.hailing ?? null); }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -362,6 +363,8 @@ function MotoHailSection({ online }: { online: boolean }) {
         </div>
       ) : !online ? (
         <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>Go online to receive hails from passengers nearby.</div>
+      ) : hailing && !hailing.enabled ? (
+        <div style={{ background: "#fff8f5", border: "1px solid #f0d4cc", borderRadius: 12, padding: "11px 14px", fontSize: 13, color: "#c2553f", fontWeight: 600 }}>Hailing is off for you: {hailing.reason}</div>
       ) : open.length === 0 ? (
         <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600 }}>No open hails right now — new requests appear here automatically.</div>
       ) : (

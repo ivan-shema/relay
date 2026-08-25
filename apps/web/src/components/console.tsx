@@ -480,6 +480,9 @@ export interface FormField {
   // Conditionally show this field based on the live form values
   // (e.g. company name only when role === "OPERATOR").
   showIf?: (values: Record<string, unknown>) => boolean;
+  // Pin the field to a derived value (rendered read-only) while the predicate
+  // returns one — e.g. capacity is always 1 for a moto-taxi.
+  lockedValue?: (values: Record<string, unknown>) => string | undefined;
 }
 
 type FormValues = Record<string, unknown>;
@@ -513,6 +516,7 @@ export function FormModal({
     register,
     handleSubmit,
     watch,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({ resolver: zodResolver(schema) as Resolver<FormValues>, defaultValues: computedDefaults });
 
@@ -524,6 +528,13 @@ export function FormModal({
 
   const watched = watch();
   const visibleFields = fields.filter((f) => !f.showIf || f.showIf(watched));
+  // Keep locked fields in sync with what they derive from.
+  useEffect(() => {
+    for (const f of fields) {
+      const lv = f.lockedValue?.(watched);
+      if (lv !== undefined && String(watched[f.name] ?? "") !== lv) setValue(f.name, lv);
+    }
+  });
 
   const submit = handleSubmit(async (values) => {
     setServerError(null);
@@ -582,6 +593,8 @@ export function FormModal({
                     <input
                       {...register(f.name)}
                       type={f.type === "number" ? "number" : f.type === "password" ? "password" : "text"}
+                      readOnly={f.lockedValue?.(watched) !== undefined}
+                      title={f.lockedValue?.(watched) !== undefined ? "Fixed for this mode" : undefined}
                       placeholder={f.placeholder}
                       list={f.suggestions ? `dl-${f.name}` : undefined}
                       style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}

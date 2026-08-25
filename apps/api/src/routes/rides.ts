@@ -7,6 +7,7 @@ import { requireAuth } from "../middleware/auth";
 import { fullNameOf } from "../lib/mappers";
 import { notify } from "../lib/notify";
 import { getMotoCommissionPct } from "../lib/settings";
+import { motoDriverWhere } from "../lib/moto";
 
 export const ridesRouter = Router();
 
@@ -34,11 +35,6 @@ function mockDistanceKm(driverId: string): number {
   return Math.round((3 + (h % 27)) * 10) / 100; // 0.30 – 2.90 km
 }
 
-const motoDriverWhere = {
-  online: true,
-  suspended: false,
-  vehicle: { is: { type: "MOTO" as const } },
-};
 
 // GET /rides/nearby — online moto drivers a passenger can hail
 ridesRouter.get(
