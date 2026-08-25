@@ -988,7 +988,7 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
             <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
               <div style={{ width: 46, height: 46, borderRadius: 13, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14.5, fontWeight: 700 }}>{active.driver.name} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
+                <div style={{ fontSize: 14.5, fontWeight: 700 }}>{active.driver.name}{active.driver.operator ? ` · ${active.driver.operator}` : ""} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
                 <div style={{ fontSize: 12, color: "#8c8378" }}>{active.driver.model} · <span style={{ fontFamily: MONO }}>{active.driver.plate}</span> · <span style={{ fontFamily: MONO }}>{active.driver.phone}</span></div>
               </div>
             </div>
@@ -1002,7 +1002,7 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
                 {active.offers.map((o) => (
                   <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #ffd9c2", background: "#fff6f0", borderRadius: 13, padding: "11px 13px" }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{o.driverName} · <span style={{ color: "#ff6a1a" }}>★ {o.rating.toFixed(1)}</span></div>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{o.driverName}{o.operator ? ` · ${o.operator}` : ""} · <span style={{ color: "#ff6a1a" }}>★ {o.rating.toFixed(1)}</span></div>
                       <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600 }}><span style={{ fontFamily: MONO }}>{o.plate}</span> · ~{o.distanceKm} km away</div>
                     </div>
                     <button onClick={() => run(() => api.acceptRideOffer(active.id, o.id))} disabled={busy} style={{ background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>

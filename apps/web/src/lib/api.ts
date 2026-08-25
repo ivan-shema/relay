@@ -229,11 +229,7 @@ export const api = {
   confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
   cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
   driverMotoRequests: () =>
-    request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null; platformCommissionPct: number; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
-  driverAcceptMotoRide: (id: string) => request<{ accepted: boolean }>(`/driver/moto-requests/${id}/accept`, { method: "POST", auth: true }),
-  driverOfferMotoRide: (id: string, amount: number) =>
-    request<{ offered: boolean }>(`/driver/moto-requests/${id}/offer`, { method: "POST", body: { amount }, auth: true }),
-  driverWithdrawMotoRide: (id: string) => request<{ withdrawn: boolean }>(`/driver/moto-requests/${id}/withdraw`, { method: "POST", auth: true }),
+    request<{ current: DriverMotoRequest | null; platformCommissionPct: number; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
   driverAcknowledgeNoPickup: (id: string) =>
     request<{ acknowledged: boolean }>(`/driver/moto-requests/${id}/acknowledge-no-pickup`, { method: "POST", auth: true }),
   driverContestDispute: (id: string) =>
@@ -394,8 +390,13 @@ export const api = {
   adminReportExportUrl: (type: AdminReportType, q = "?period=all") => `${BASE}/admin/reports/export${q}&type=${type}`,
   // moto dispatch (operators offering MOTO)
   operatorMotoHails: () => request<OperatorMotoHails>("/operator/moto-hails", { auth: true }),
-  operatorAssignMotoHail: (id: string, driverId: string) =>
-    request<{ assigned: boolean; driverId: string }>(`/operator/moto-hails/${id}/assign`, { method: "POST", body: { driverId }, auth: true }),
+  operatorAcceptMotoHail: (id: string, driverId: string) =>
+    request<{ accepted: boolean; driverId: string; status: string }>(`/operator/moto-hails/${id}/accept`, { method: "POST", body: { driverId }, auth: true }),
+  operatorQuoteMotoHail: (id: string, driverId: string, amount: number) =>
+    request<{ quoted: boolean }>(`/operator/moto-hails/${id}/quote`, { method: "POST", body: { driverId, amount }, auth: true }),
+  operatorWithdrawMotoHail: (id: string) => request<{ withdrawn: boolean }>(`/operator/moto-hails/${id}/withdraw`, { method: "POST", auth: true }),
+  operatorReassignMotoHail: (id: string, driverId: string) =>
+    request<{ reassigned: boolean }>(`/operator/moto-hails/${id}/reassign`, { method: "POST", body: { driverId }, auth: true }),
   operatorReports: (q = "?period=month") => request<OperatorReports>(`/operator/reports${q}`, { auth: true }),
   operatorReportExportUrl: (q = "?period=month") => `${BASE}/operator/reports/export${q}`,
   driverReports: (q = "?period=month") => request<DriverReports>(`/driver/reports${q}`, { auth: true }),
@@ -435,6 +436,7 @@ export interface RideOfferView {
   rating: number;
   plate: string;
   distanceKm: number;
+  operator: string | null;
 }
 export interface RideView {
   id: string;
@@ -451,7 +453,7 @@ export interface RideView {
   pickupOverdue: boolean;
   disputedAt: string | null;
   disputeContested: boolean;
-  driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number } | null;
+  driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number; operator: string | null } | null;
   offers: RideOfferView[];
   createdAt: string;
   acceptedAt: string | null;
@@ -466,8 +468,8 @@ export interface OperatorMotoHail {
   prepaid: boolean;
   departAt: string | null;
   requestedAt: string;
-  assignedTo: { id: string; name: string } | null;
-  offers: { driverName: string; amount: number }[];
+  requested: { id: string; name: string } | null;
+  offers: { driverId: string; driverName: string; amount: number }[];
 }
 export interface OperatorMotoActiveRide {
   id: string;
@@ -478,6 +480,7 @@ export interface OperatorMotoActiveRide {
   status: RideStatus;
   driver: { id: string; name: string; plate: string } | null;
   acceptedAt: string | null;
+  pickupDeadline: string | null;
 }
 export interface OperatorMotoDriver {
   id: string;

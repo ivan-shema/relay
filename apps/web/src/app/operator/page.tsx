@@ -17,6 +17,7 @@ import {
   type OperatorReports,
   type ScheduleLookups,
   type OperatorMotoHails,
+  type OperatorMotoHail,
 } from "@/lib/api";
 import {
   formatRWF,
@@ -1012,12 +1013,17 @@ function OperatorMap() {
 }
 
 
-// Dispatch board for operators that offer MOTO: every open hail the fleet
-// could take, the fleet's live rides, and an "assign" action that aims a hail
-// at one of the operator's free online motos (the driver still accepts).
+
+
+// Dispatch board for operators that offer MOTO. The operator handles each
+// hail: pick one of its free motos and accept at the passenger's price or send
+// a quote on that driver's behalf; withdraw an unpaid acceptance; hand a paid
+// ride to another driver. Drivers themselves only see their assigned ride.
 function MotoHailsTab() {
   const [data, setData] = useState<OperatorMotoHails | null>(null);
   const [pick, setPick] = useState<Record<string, string>>({});
+  const [quoteFor, setQuoteFor] = useState<string | null>(null);
+  const [quoteAmount, setQuoteAmount] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -1034,20 +1040,20 @@ function MotoHailsTab() {
     return (
       <Card>
         <CardTitle>Moto hails</CardTitle>
-        <div style={{ padding: "14px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>Your company is not registered for moto-taxi service, so passengers&apos; hails are not routed to your drivers.</div>
+        <div style={{ padding: "14px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>Your company is not registered for moto-taxi service, so passengers&apos; hails are not routed to you.</div>
       </Card>
     );
   }
 
   const free = data.drivers.filter((d) => d.available);
-  const assign = async (hailId: string) => {
-    const driverId = pick[hailId] ?? free[0]?.id;
-    if (!driverId) return;
-    setBusyId(hailId);
+  // Default driver for a hail: the moto the passenger asked for (if free), else the first free one.
+  const chosen = (h: OperatorMotoHail) => pick[h.id] ?? (h.requested && free.some((d) => d.id === h.requested!.id) ? h.requested.id : free[0]?.id) ?? "";
+  const run = async (id: string, fn: () => Promise<unknown>) => {
+    setBusyId(id);
     try {
-      await api.operatorAssignMotoHail(hailId, driverId);
+      await fn();
     } catch (e) {
-      window.alert(e instanceof ApiError ? e.message : "Could not assign this hail");
+      window.alert(e instanceof ApiError ? e.message : "That didn't go through — please try again");
     } finally {
       setBusyId(null);
       load();
@@ -1056,6 +1062,16 @@ function MotoHailsTab() {
   const fmtAgo = (iso: string) => {
     const m = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
     return m < 1 ? "just now" : `${m} min ago`;
+  };
+  const fmtHm = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const btn = (bg: string, color = "#fff", border = "none"): React.CSSProperties => ({ background: bg, color, border, borderRadius: 9, padding: "8px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" });
+  const select = (h: OperatorMotoHail | { id: string }, exclude?: string | null) => {
+    const opts = free.filter((d) => d.id !== exclude);
+    return (
+      <select value={pick[h.id] ?? ("requested" in h ? chosen(h) : opts[0]?.id ?? "")} onChange={(e) => setPick((p) => ({ ...p, [h.id]: e.target.value }))} disabled={opts.length === 0} style={{ flex: 1, minWidth: 150, border: "1px solid #e3ddd1", borderRadius: 9, padding: "7px 9px", fontSize: 12.5, fontWeight: 600, fontFamily: "'Manrope', sans-serif", background: "#fff" }}>
+        {opts.length === 0 ? <option value="">No free moto online</option> : opts.map((d) => <option key={d.id} value={d.id}>{d.name} · {d.plate}</option>)}
+      </select>
+    );
   };
 
   return (
@@ -1086,29 +1102,54 @@ function MotoHailsTab() {
       <Card>
         <CardTitle>Open hails · {data.open.length}</CardTitle>
         {data.open.length === 0 ? (
-          <div style={{ padding: "12px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>No passenger is hailing a moto right now. Broadcast hails and hails sent to your drivers appear here live.</div>
+          <div style={{ padding: "12px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>No passenger is hailing a moto right now — new requests appear here automatically.</div>
         ) : (
-          <>
-            <TableHead cols={["Requested", "Trip", "Passenger", "Fare", "Status", "Assign to"]} template=".8fr 1.8fr 1fr .7fr 1fr 1.6fr" />
-            {data.open.map((h) => (
-              <Row key={h.id} template=".8fr 1.8fr 1fr .7fr 1fr 1.6fr">
-                <span style={{ fontFamily: MONO, fontSize: 12, color: "#8c8378" }}>{fmtAgo(h.requestedAt)}</span>
-                <span style={{ fontWeight: 600 }}>{h.from} → {h.to}{h.departAt ? <span style={{ display: "block", fontSize: 11.5, color: "#8c8378" }}>leave {new Date(h.departAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> : null}</span>
-                <span style={{ color: "#6b6258" }}>{h.passenger}</span>
-                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{h.fare !== null ? formatRWF(h.fare) : "open"}{h.prepaid ? <span style={{ display: "block", fontSize: 10.5, color: "#1f9d6b" }}>funded</span> : null}</span>
-                <span style={{ fontSize: 12, fontWeight: 700, color: h.assignedTo ? "#2f6bff" : "#8c8378" }}>
-                  {h.assignedTo ? `Sent to ${h.assignedTo.name}` : "Broadcast"}
-                  {h.offers.length > 0 && <span style={{ display: "block", fontSize: 11, color: "#8c8378", fontWeight: 600 }}>{h.offers.map((o) => `${o.driverName.split(" ")[0]} offered ${formatRWF(o.amount)}`).join(" · ")}</span>}
-                </span>
-                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <select value={pick[h.id] ?? free[0]?.id ?? ""} onChange={(e) => setPick((p) => ({ ...p, [h.id]: e.target.value }))} disabled={free.length === 0} style={{ flex: 1, border: "1px solid #e3ddd1", borderRadius: 9, padding: "7px 9px", fontSize: 12.5, fontWeight: 600, fontFamily: "'Manrope', sans-serif", background: "#fff" }}>
-                    {free.length === 0 ? <option value="">No free moto online</option> : free.map((d) => <option key={d.id} value={d.id}>{d.name} · {d.plate}</option>)}
-                  </select>
-                  <button disabled={free.length === 0 || busyId === h.id} onClick={() => assign(h.id)} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 700, cursor: free.length === 0 ? "default" : "pointer", opacity: free.length === 0 ? 0.5 : 1, fontFamily: "'Manrope', sans-serif" }}>{busyId === h.id ? "…" : h.assignedTo ? "Reassign" : "Assign"}</button>
-                </span>
-              </Row>
-            ))}
-          </>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 6 }}>
+            {data.open.map((h) => {
+              const driverId = chosen(h);
+              return (
+                <div key={h.id} style={{ border: `1px solid ${h.requested ? "#ffd9c2" : "#ece6db"}`, background: h.requested ? "#fff6f0" : "#fff", borderRadius: 14, padding: "12px 14px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                    <div style={{ flex: 1, minWidth: 220 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>
+                        {h.from} → {h.to}
+                        {h.requested && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#ff6a1a", background: "#fff0e6", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>asked for {h.requested.name.split(" ")[0]}</span>}
+                        {h.prepaid && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#1f9d6b", background: "#e7f6ee", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>prepaid</span>}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
+                        {h.passenger} · {fmtAgo(h.requestedAt)}{h.departAt && <> · leave {fmtHm(h.departAt)}</>}
+                        {h.fare !== null
+                          ? <> · {h.prepaid ? "pays" : "offers"} <span style={{ fontFamily: MONO, color: h.prepaid ? "#1f9d6b" : "#ff6a1a", fontWeight: 700 }}>{formatRWF(h.fare)}</span></>
+                          : <> · <span style={{ color: "#ff6a1a", fontWeight: 700 }}>no price — send a quote</span></>}
+                        {h.offers.length > 0 && <> · quoted: {h.offers.map((o) => `${o.driverName.split(" ")[0]} ${formatRWF(o.amount)}`).join(", ")}</>}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                      {select(h)}
+                      {h.fare !== null && (
+                        <button disabled={!driverId || busyId === h.id} onClick={() => run(h.id, () => api.operatorAcceptMotoHail(h.id, driverId))} style={{ ...btn("#ff6a1a"), opacity: driverId ? 1 : 0.5 }}>
+                          {busyId === h.id ? "…" : `Accept ${formatRWF(h.fare)}`}
+                        </button>
+                      )}
+                      {!h.prepaid && (
+                        <button disabled={!driverId} onClick={() => { setQuoteFor(quoteFor === h.id ? null : h.id); setQuoteAmount(""); }} style={{ ...btn("#fff", "#1b1714", "1px solid #e3ddd1"), opacity: driverId ? 1 : 0.5 }}>
+                          {h.fare !== null ? "Counter" : "Quote price"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {quoteFor === h.id && (
+                    <div style={{ display: "flex", gap: 8, marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1ece2" }}>
+                      <input value={quoteAmount} onChange={(e) => setQuoteAmount(e.target.value.replace(/[^0-9]/g, ""))} placeholder="Price (RWF)" inputMode="numeric" style={{ flex: 1, border: "1px solid #e3ddd1", borderRadius: 10, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, fontFamily: MONO, outline: "none" }} />
+                      <button disabled={busyId === h.id || !quoteAmount || !driverId} onClick={() => run(h.id, async () => { await api.operatorQuoteMotoHail(h.id, driverId, Number(quoteAmount)); setQuoteFor(null); setQuoteAmount(""); })} style={btn("#1b1714")}>
+                        {busyId === h.id ? "…" : "Send quote"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </Card>
 
@@ -1117,18 +1158,34 @@ function MotoHailsTab() {
         {data.active.length === 0 ? (
           <div style={{ padding: "12px 0", fontSize: 13.5, color: "#8c8378", fontWeight: 600 }}>None of your motos is on a ride right now.</div>
         ) : (
-          <>
-            <TableHead cols={["Driver", "Trip", "Passenger", "Fare", "Status"]} template="1.2fr 1.8fr 1fr .8fr 1fr" />
-            {data.active.map((r) => (
-              <Row key={r.id} template="1.2fr 1.8fr 1fr .8fr 1fr">
-                <span style={{ fontWeight: 700 }}>{r.driver?.name ?? "—"}<span style={{ display: "block", fontSize: 11.5, fontFamily: MONO, color: "#8c8378", fontWeight: 600 }}>{r.driver?.plate ?? ""}</span></span>
-                <span style={{ fontWeight: 600 }}>{r.from} → {r.to}</span>
-                <span style={{ color: "#6b6258" }}>{r.passenger}</span>
-                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{r.fare !== null ? formatRWF(r.fare) : "—"}</span>
-                <span style={{ textAlign: "right" }}><StatusPill status={r.status} /></span>
-              </Row>
-            ))}
-          </>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 6 }}>
+            {data.active.map((r) => {
+              const movable = r.status === "ACCEPTED" || r.status === "CONFIRMED";
+              const target = pick[r.id] ?? free.find((d) => d.id !== r.driver?.id)?.id ?? "";
+              return (
+                <div key={r.id} style={{ border: "1px solid #ece6db", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 220 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700 }}>{r.from} → {r.to} <StatusPill status={r.status} /></div>
+                    <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
+                      {r.driver?.name ?? "—"} <span style={{ fontFamily: MONO }}>{r.driver?.plate ?? ""}</span> · {r.passenger}
+                      {r.fare !== null && <> · <span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(r.fare)}</span></>}
+                      {r.status === "ACCEPTED" && <> · waiting for the passenger to pay</>}
+                      {r.status === "CONFIRMED" && r.pickupDeadline && <> · pick up by {fmtHm(r.pickupDeadline)}</>}
+                    </div>
+                  </div>
+                  {movable && (
+                    <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                      {select(r, r.driver?.id)}
+                      <button disabled={!target || busyId === r.id} onClick={() => run(r.id, () => api.operatorReassignMotoHail(r.id, target))} style={{ ...btn("#fff", "#1b1714", "1px solid #e3ddd1"), opacity: target ? 1 : 0.5 }}>{busyId === r.id ? "…" : "Hand to"}</button>
+                      {r.status === "ACCEPTED" && (
+                        <button disabled={busyId === r.id} onClick={() => { if (window.confirm("Withdraw this acceptance? The hail reopens for other operators.")) run(r.id, () => api.operatorWithdrawMotoHail(r.id)); }} style={btn("#fff", "#c2553f", "1px solid #f0d4cc")}>Withdraw</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </Card>
     </div>
