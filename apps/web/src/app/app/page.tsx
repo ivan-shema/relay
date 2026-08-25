@@ -13,7 +13,7 @@ import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { formatRWF, topUpSchema, savedPlaceSchema, operatorOnboardingSchema, updateProfileSchema, changePasswordSchema, type TopUpInput, type SavedPlaceInput, type UpdateProfileInput, type ChangePasswordInput, type TransportMode } from "@relay/shared";
-import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus, type PassengerReports, type OperatorApplicationStatus } from "@/lib/api";
+import { api, ApiError, type SavedPlace, type WalletData, type MeStats, type Insights, type PlannedWatch, type NearbyMoto, type RideView, type RideStatus, type PassengerReports, type OperatorApplicationStatus, type MyDriverInvite } from "@/lib/api";
 import { Avatar } from "@/components/avatar";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
@@ -518,6 +518,7 @@ function HomeScreen({
             </div>
           )}
 
+          <DriverInviteCard />
           <OperatorHomeCard status={operatorStatus} onApply={onApplyOperator} />
         </div>
 
@@ -988,7 +989,7 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
             <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
               <div style={{ width: 46, height: 46, borderRadius: 13, background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14.5, fontWeight: 700 }}>{active.driver.name} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
+                <div style={{ fontSize: 14.5, fontWeight: 700 }}>{active.driver.name}{active.driver.operator ? ` · ${active.driver.operator}` : ""} · <span style={{ color: "#ff6a1a" }}>★ {active.driver.rating.toFixed(1)}</span></div>
                 <div style={{ fontSize: 12, color: "#8c8378" }}>{active.driver.model} · <span style={{ fontFamily: MONO }}>{active.driver.plate}</span> · <span style={{ fontFamily: MONO }}>{active.driver.phone}</span></div>
               </div>
             </div>
@@ -1002,7 +1003,7 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
                 {active.offers.map((o) => (
                   <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #ffd9c2", background: "#fff6f0", borderRadius: 13, padding: "11px 13px" }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{o.driverName} · <span style={{ color: "#ff6a1a" }}>★ {o.rating.toFixed(1)}</span></div>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{o.driverName}{o.operator ? ` · ${o.operator}` : ""} · <span style={{ color: "#ff6a1a" }}>★ {o.rating.toFixed(1)}</span></div>
                       <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600 }}><span style={{ fontFamily: MONO }}>{o.plate}</span> · ~{o.distanceKm} km away</div>
                     </div>
                     <button onClick={() => run(() => api.acceptRideOffer(active.id, o.id))} disabled={busy} style={{ background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 10, padding: "9px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope', sans-serif", flex: "none" }}>
@@ -2239,6 +2240,7 @@ function YouTab({ operatorStatus, onApplyOperator }: { operatorStatus: OperatorS
             ))}
           </div>
 
+          <DriverInviteCard />
           <OperatorProfileRow status={operatorStatus} onApply={onApplyOperator} />
         </div>
       </div>
@@ -2865,6 +2867,156 @@ function StatementCard() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+
+/* -------- Invitations to drive for an operator --------
+   The candidate submits licence + ID here; the operator's approval turns the
+   account into a driver, at which point the card offers the driver console. */
+
+function DriverInviteCard() {
+  const router = useRouter();
+  const { refreshUser } = useAuth();
+  const [invites, setInvites] = useState<MyDriverInvite[]>([]);
+  const load = useCallback(() => {
+    api.myDriverInvites().then(setInvites).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 20000);
+    return () => clearInterval(t);
+  }, [load]);
+  if (invites.length === 0) return null;
+  return (
+    <>
+      {invites.map((i) => (
+        <DriverInviteItem
+          key={i.id}
+          invite={i}
+          onChanged={load}
+          onOpenConsole={async () => {
+            await refreshUser();
+            router.push("/driver");
+          }}
+        />
+      ))}
+    </>
+  );
+}
+
+function DriverInviteItem({ invite, onChanged, onOpenConsole }: { invite: MyDriverInvite; onChanged: () => void; onOpenConsole: () => void }) {
+  const [licenseNumber, setLicenseNumber] = useState(invite.licenseNumber ?? "");
+  const [idNumber, setIdNumber] = useState(invite.nationalId ?? "");
+  const [idDoc, setIdDoc] = useState<File | null>(null);
+  const [licenseDoc, setLicenseDoc] = useState<File | null>(null);
+  const [open, setOpen] = useState(invite.status === "REJECTED");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const current = (kind: string) => invite.documents.find((d) => d.kind === kind) ?? null;
+
+  const submit = async () => {
+    setError(null);
+    if (licenseNumber.trim().length < 4 || idNumber.trim().length < 5) return setError("Enter your driving licence number and national ID number.");
+    if ((!idDoc && !current("NATIONAL_ID")) || (!licenseDoc && !current("DRIVING_LICENSE"))) return setError("Upload your national ID and your driving licence (PDF or image).");
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("licenseNumber", licenseNumber.trim());
+      fd.append("idNumber", idNumber.trim());
+      if (idDoc) fd.append("idDocument", idDoc);
+      if (licenseDoc) fd.append("licenseDocument", licenseDoc);
+      await api.submitDriverInvite(invite.id, fd);
+      setOpen(false);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not submit your documents");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const decline = async () => {
+    if (!window.confirm(`Decline ${invite.company}'s invitation?`)) return;
+    setBusy(true);
+    try {
+      await api.declineDriverInvite(invite.id);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not decline");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const shell: React.CSSProperties = { background: "#1b1714", borderRadius: 20, padding: 20, marginTop: 26, position: "relative", overflow: "hidden", color: "#fff" };
+  const btn = (bg: string, color = "#fff", border = "none"): React.CSSProperties => ({ background: bg, color, border, borderRadius: 12, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" });
+  const field: React.CSSProperties = { width: "100%", border: "1px solid #e3ddd1", borderRadius: 12, padding: "12px 14px", fontSize: 14, fontWeight: 600, outline: "none", fontFamily: MONO, boxSizing: "border-box", background: "#fff", color: "#1b1714" };
+
+  if (invite.status === "APPROVED") {
+    return (
+      <div style={{ ...shell, background: "#1f9d6b" }}>
+        <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em", opacity: 0.85, marginBottom: 8 }}>You&apos;re approved</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: "-.3px", marginBottom: 6 }}>You now drive for {invite.company}</div>
+        <p style={{ fontSize: 13, lineHeight: 1.55, opacity: 0.9, margin: "0 0 14px" }}>Your documents were approved. Your driver console is ready — go online there to start receiving rides.</p>
+        <button onClick={onOpenConsole} style={btn("#fff", "#1f9d6b")}>Open your driver console →</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={shell}>
+      <div style={{ position: "absolute", right: -70, top: -70, width: 200, height: 200, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,106,26,.22),transparent 68%)" }} />
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "#ff6a1a", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Driver invitation</div>
+        <div style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 700, letterSpacing: "-.3px", marginBottom: 6 }}>{invite.company} invited you to drive</div>
+        {invite.note && <p style={{ fontSize: 13, lineHeight: 1.55, color: "#cfc7bb", margin: "0 0 10px", fontStyle: "italic" }}>“{invite.note}”</p>}
+
+        {invite.status === "SUBMITTED" ? (
+          <>
+            <p style={{ fontSize: 13, lineHeight: 1.55, color: "#cfc7bb", margin: "0 0 14px" }}>Your documents are with {invite.company} for review. You&apos;ll be notified as soon as they decide.</p>
+            <span style={{ display: "inline-block", background: "rgba(255,106,26,.16)", color: "#ff6a1a", borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" }}>Under review</span>
+          </>
+        ) : (
+          <>
+            {invite.status === "REJECTED" && (
+              <div style={{ background: "rgba(194,85,63,.18)", border: "1px solid rgba(194,85,63,.5)", borderRadius: 12, padding: "10px 13px", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+                <span style={{ color: "#ff9c58", fontWeight: 800 }}>Changes requested:</span> {invite.rejectionReason ?? "please check your submission"}
+              </div>
+            )}
+            {!open ? (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button onClick={() => setOpen(true)} style={btn("#ff6a1a")}>Submit my documents →</button>
+                <button onClick={decline} disabled={busy} style={btn("transparent", "#cfc7bb", "1px solid rgba(255,255,255,.25)")}>Decline</button>
+              </div>
+            ) : (
+              <div style={{ background: "#fff", borderRadius: 16, padding: 16, color: "#1b1714" }}>
+                <p style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, margin: "0 0 12px" }}>Relay needs your driving licence and national ID (PDF or image, max 5 MB each). {invite.company} reviews them; only they and Relay admins can see them.</p>
+                {error && <div style={{ background: "#fff0e6", border: "1px solid #ffd9c2", color: "#c2553f", borderRadius: 12, padding: "10px 13px", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{error}</div>}
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 180 }}>
+                    <OnboardLabel>Driving licence number</OnboardLabel>
+                    <input value={licenseNumber} onChange={(e) => setLicenseNumber(e.target.value)} placeholder="RW-DRV-…" style={field} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 180 }}>
+                    <OnboardLabel>National ID number</OnboardLabel>
+                    <input value={idNumber} onChange={(e) => setIdNumber(e.target.value)} placeholder="1199…" style={field} />
+                  </div>
+                </div>
+                <div style={{ height: 14 }} />
+                <FilePreview label="National ID document" file={idDoc} onPick={setIdDoc} current={current("NATIONAL_ID")} />
+                <div style={{ height: 12 }} />
+                <FilePreview label="Driving licence document" file={licenseDoc} onPick={setLicenseDoc} current={current("DRIVING_LICENSE")} />
+                <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+                  <button onClick={submit} disabled={busy} style={btn("#ff6a1a")}>{busy ? "Submitting…" : invite.status === "REJECTED" ? "Resubmit documents" : "Submit for review"}</button>
+                  <button onClick={() => setOpen(false)} disabled={busy} style={btn("#fff", "#1b1714", "1px solid #e3ddd1")}>Later</button>
+                  <button onClick={decline} disabled={busy} style={{ ...btn("#fff", "#c2553f", "1px solid #f0d4cc"), marginLeft: "auto" }}>Decline invitation</button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

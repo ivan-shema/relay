@@ -73,9 +73,9 @@ const createRideSchema = z.object({
 const ACTIVE_STATUSES = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
 
 const rideInclude = {
-  targetDriver: { include: { user: true, vehicle: true } },
-  acceptedDriver: { include: { user: true, vehicle: true } },
-  offers: { where: { status: "PENDING" as const }, include: { driver: { include: { user: true, vehicle: true } } } },
+  targetDriver: { include: { user: true, vehicle: true, operator: true } },
+  acceptedDriver: { include: { user: true, vehicle: true, operator: true } },
+  offers: { where: { status: "PENDING" as const }, include: { driver: { include: { user: true, vehicle: true, operator: true } } } },
 } satisfies Prisma.RideRequestInclude;
 
 type RideWithRels = Prisma.RideRequestGetPayload<{ include: typeof rideInclude }>;
@@ -107,6 +107,7 @@ function toRideView(r: RideWithRels) {
           rating: driver.ratingAvg,
           plate: driver.vehicle?.plateNumber ?? "—",
           model: driver.vehicle?.model ?? "Moto",
+          operator: driver.operator?.companyName ?? null,
           distanceKm: mockDistanceKm(driver.id),
         }
       : null,
@@ -118,6 +119,7 @@ function toRideView(r: RideWithRels) {
           driverName: fullNameOf(o.driver.user),
           rating: o.driver.ratingAvg,
           plate: o.driver.vehicle?.plateNumber ?? "—",
+          operator: o.driver.operator?.companyName ?? null,
           distanceKm: mockDistanceKm(o.driverId),
         }))
       : [],
@@ -197,8 +199,19 @@ ridesRouter.post(
       include: rideInclude,
     });
 
-    if (ride.targetDriver) {
-      await notify(ride.targetDriver.userId, "New moto ride request", `${ride.originLabel} → ${ride.destLabel} — a passenger requested you directly.`);
+    // Hails are handled by operators: tell the operator whose moto was asked
+    // for, or every verified MOTO operator on a broadcast. Their dispatch
+    // board also polls, so this is the "ping", not the delivery mechanism.
+    const operators = ride.targetDriver?.operator
+      ? [ride.targetDriver.operator]
+      : await prisma.operator.findMany({ where: { status: "VERIFIED", modes: { has: "MOTO" }, ownerUserId: { not: null } } });
+    for (const op of operators) {
+      if (!op.ownerUserId) continue;
+      await notify(
+        op.ownerUserId,
+        "New moto hail",
+        `${ride.originLabel} → ${ride.destLabel}${ride.targetDriver ? ` — the passenger asked for ${fullNameOf(ride.targetDriver.user)}` : ""}. Open Moto hails to accept or quote.`
+      );
     }
 
     res.status(201).json(toRideView(ride));

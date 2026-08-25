@@ -147,15 +147,19 @@ export const createVehicleSchema = z
     }
   });
 
-// Drivers are onboarded exclusively by operators, with KYC: ID number +
-// driving licence number, plus their document uploads (validated server-side).
-export const inviteDriverSchema = z.object({
-  firstName: z.string().min(2, "Enter a first name"),
-  lastName: z.string().min(2, "Enter a last name"),
-  phone: phoneSchema,
-  email: z.union([z.string().email("Invalid email"), z.literal("")]).optional(),
-  idNumber: z.string().min(5, "Enter the driver's ID number"),
-  licenseNumber: z.string().min(4, "Enter the driving licence number"),
+// Driver onboarding: the operator only needs the person (a registered user
+// picked from search, or an email). The invitee submits their own KYC; the
+// operator's approval creates the Driver record and promotes the user.
+export const driverInviteSchema = z.object({
+  email: z.string().trim().toLowerCase().email("Enter a valid email"),
+  note: z.string().trim().max(300, "Keep the note under 300 characters").optional(),
+});
+export const driverKycSchema = z.object({
+  licenseNumber: z.string().trim().min(4, "Enter your driving licence number"),
+  idNumber: z.string().trim().min(5, "Enter your national ID number"),
+});
+export const rejectDriverInviteSchema = z.object({
+  reason: z.string().trim().min(10, "Tell the candidate what to fix (at least 10 characters)").max(1000),
 });
 
 export const createUserSchema = z
@@ -265,7 +269,8 @@ export const savedPlaceSchema = z.object({
 export type NewPasswordInput = z.infer<typeof newPasswordSchema>;
 export type OperatorOnboardingInput = z.infer<typeof operatorOnboardingSchema>;
 export type CreateVehicleInput = z.infer<typeof createVehicleSchema>;
-export type InviteDriverInput = z.infer<typeof inviteDriverSchema>;
+export type DriverInviteInput = z.infer<typeof driverInviteSchema>;
+export type DriverKycInput = z.infer<typeof driverKycSchema>;
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type CreateRouteInput = z.infer<typeof createRouteSchema>;
 export type CreateDepartureInput = z.infer<typeof createDepartureSchema>;
@@ -285,3 +290,11 @@ export const rejectOperatorSchema = z.object({
     .max(1000, "Keep the reason under 1000 characters"),
 });
 export type RejectOperatorInput = z.infer<typeof rejectOperatorSchema>;
+
+// Operator: (re)assign a vehicle and/or driver to an existing departure.
+// Empty strings come from "— none —" select options and mean "clear".
+export const assignDepartureSchema = z.object({
+  vehicleId: z.string().optional(),
+  driverId: z.string().optional(),
+});
+export type AssignDepartureInput = z.infer<typeof assignDepartureSchema>;

@@ -171,20 +171,49 @@ no credentials (toggle in `apps/api/.env`):
   real time over the `GET /me/stream` SSE channel, so the bell updates without
   a refresh.
 
+## Driver onboarding (invitation → KYC → approval)
+
+1. **Invite.** From *Drivers → Invite driver* the operator picks a registered
+   passenger from a typeahead (name, email or phone) or types an email for
+   someone not on Relay yet, optionally with a note. That is all the operator
+   provides. A registered invitee is notified in-app and by email; an
+   unregistered one gets an email whose link opens registration with the email
+   pre-filled (`GET /auth/invite/:token`).
+2. **Submit.** The invitation appears in the invitee's passenger dashboard
+   (home and Profile). They enter their driving-licence and national-ID
+   numbers and upload both documents (`POST /me/driver-invites/:id/submit`),
+   or decline. Documents are private Cloudinary assets visible only to the
+   inviting operator, the candidate and admins.
+3. **Review.** The operator sees the submission under *Drivers → Invitations*
+   and can **Approve** — which creates the `Driver` record, moves the documents
+   onto it and flips the account's role to `DRIVER` — or **Send back** with a
+   reason the candidate can act on (they resubmit; files they don't replace are
+   kept), or **Withdraw** the invitation. Approval cancels any other operator's
+   open invitation for the same person.
+
+Accounts are never created or edited on the candidate's behalf; the previous
+"operator types the driver's details and gets a temporary password" flow is
+gone. Admins can still add users of any role from the admin console.
+
 ## Moto hailing & dispatch
 
 - **Who receives a hail.** Drivers are classified by the vehicle their operator
-  assigned them. A passenger's hail (broadcast, or aimed at one nearby moto)
-  reaches a driver only if they are online, not suspended, sit on a `MOTO`
-  vehicle, **and** belong to a `VERIFIED` operator whose modes include `MOTO`
-  (`apps/api/src/lib/moto.ts`). A bus driver — e.g. the demo driver
-  `jean@relay.app` — sees "hailing is off" with the reason; the seeded online
-  moto driver is `driver2@relay.app` (David, Kigali Bus Co.).
-- **Operator dispatch.** Operators offering MOTO get a *Moto hails* tab: every
-  open hail their fleet could take, their drivers' rides in progress, and an
-  *Assign* action that aims a hail at one of their free online motos (the
-  driver is notified and still accepts — price, pickup and completion run
-  through the driver, who is the one physically there).
+  assigned them. A hail is routed to operators that are `VERIFIED` and offer
+  `MOTO`; a driver counts as an available moto only if online, not suspended and
+  on a `MOTO` vehicle (`apps/api/src/lib/moto.ts`). Seeded: `ops@kigalibus.app`
+  runs the moto fleet; `driver2@relay.app` (David) is its online moto;
+  `jean@relay.app` drives a bus and sees "hailing is off" with the reason.
+- **The operator handles the request.** From the *Moto hails* tab the operator
+  picks one of its free motos and either **accepts at the passenger's price** or
+  **quotes** a price on that driver's behalf (`POST /operator/moto-hails/:id/accept`
+  / `/quote`). The passenger accepts a quote and pays into escrow exactly as
+  before. The operator can **withdraw** an unpaid acceptance or **hand** an
+  accepted/paid ride to another free moto (`/withdraw`, `/reassign`).
+- **The driver just drives.** Their console shows only the ride assigned to
+  them: *Passenger picked up* → *Ride done*; the passenger confirms completion,
+  which releases the escrow minus commission. Pickup disputes stay with the
+  driver (they're about what physically happened) and can be escalated to an
+  admin.
 - **One passenger per moto.** Vehicles and departures with mode `MOTO` must
   have capacity 1 (the forms lock the field), bookings on a moto trip are one
   seat, and a departure's vehicle must belong to the operator and match the mode.

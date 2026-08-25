@@ -92,6 +92,15 @@ enum MomoTransferStatus {
   FAILED
 }
 
+enum DriverInviteStatus {
+  INVITED // sent; waiting for the invitee to submit their documents
+  SUBMITTED // documents in — waiting for the operator to review
+  APPROVED // driver record created, user promoted to DRIVER
+  REJECTED // operator asked for changes; the invitee can resubmit
+  DECLINED // the invitee said no
+  CANCELLED // the operator withdrew the invite
+}
+
 enum DocumentKind {
   NATIONAL_ID
   PASSPORT
@@ -132,6 +141,7 @@ model User {
   walletTxns    WalletTransaction[]
   savedPlaces   SavedPlace[]
   rideRequests  RideRequest[]
+  driverInvites DriverInvite[]
 }
 
 model Operator {
@@ -154,6 +164,7 @@ model Operator {
   drivers   Driver[]
   trips     Trip[]
   documents Document[]
+  driverInvites DriverInvite[]
 }
 
 model Driver {
@@ -507,6 +518,9 @@ model Document {
   operator   Operator?    @relation(fields: [operatorId], references: [id])
   driverId   String?
   driver     Driver?      @relation(fields: [driverId], references: [id])
+  // KYC uploaded by a driver candidate; moved to the Driver on approval
+  inviteId   String?
+  invite     DriverInvite? @relation(fields: [inviteId], references: [id])
   createdAt  DateTime     @default(now())
 }
 
@@ -521,4 +535,31 @@ model Payout {
   status     MomoTransferStatus @default(COMPLETED)
   momoRef    String?            @unique // Paypack transaction ref
   createdAt  DateTime           @default(now())
+}
+
+// An operator inviting someone to drive for them. The invitee (registered or
+// not yet) submits their KYC; the operator's approval is what creates the
+// Driver record and promotes the user to DRIVER.
+model DriverInvite {
+  id              String             @id @default(cuid())
+  operatorId      String
+  operator        Operator           @relation(fields: [operatorId], references: [id])
+  email           String // lowercased; the invite follows this address
+  userId          String? // linked once a user with that email exists
+  user            User?              @relation(fields: [userId], references: [id])
+  token           String             @unique // register/sign-in link in the email
+  note            String?
+  status          DriverInviteStatus @default(INVITED)
+  // the candidate's submission
+  licenseNumber   String?
+  nationalId      String?
+  rejectionReason String?
+  invitedAt       DateTime           @default(now())
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+
+  documents Document[]
+
+  @@index([email])
+  @@index([operatorId, status])
 }

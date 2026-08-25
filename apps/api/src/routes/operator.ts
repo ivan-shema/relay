@@ -6,24 +6,28 @@ import {
   createVehicleSchema,
   createRouteSchema,
   createDepartureSchema,
-  inviteDriverSchema,
   assignVehicleSchema,
   assignTripSchema,
   operatorOnboardingSchema,
+  assignDepartureSchema,
+  driverInviteSchema,
+  rejectDriverInviteSchema,
 } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { hashPassword, generateTempPassword } from "../lib/auth";
-import { sendCredentialsEmail } from "../lib/mailer";
+import { randomBytes } from "crypto";
+import { sendDriverInviteEmail } from "../lib/mailer";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
-import { upload, requireFile } from "../lib/uploads";
-import { storeFile, deleteFile, fromMulter } from "../lib/storage";
+import { upload } from "../lib/uploads";
+import { storeFile, deleteFile, fromMulter, publicUrl } from "../lib/storage";
 import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
 import { notify } from "../lib/notify";
 import { motoDriverWhere } from "../lib/moto";
+import { getMotoCommissionPct } from "../lib/settings";
+import { PICKUP_WINDOW_MS } from "./rides";
 import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
 export const operatorRouter = Router();
@@ -396,13 +400,22 @@ operatorRouter.post(
       if (vehicle.type !== body.mode) throw new HttpError(400, `That vehicle is a ${vehicle.type.toLowerCase()}, not a ${body.mode.toLowerCase()}`);
       if (body.capacity > vehicle.capacity) throw new HttpError(400, `That vehicle only seats ${vehicle.capacity}`);
     }
+    // A chosen driver must be ours; if no vehicle was picked, use the driver's
+    // own vehicle when it matches the mode.
+    let vehicleId = body.vehicleId || undefined;
+    if (body.driverId) {
+      const driver = await prisma.driver.findFirst({ where: { id: body.driverId, operatorId: opId }, include: { vehicle: true } });
+      if (!driver) throw new HttpError(400, "That driver is not in your fleet");
+      if (driver.suspended) throw new HttpError(409, "That driver is suspended");
+      if (!vehicleId && driver.vehicle && driver.vehicle.type === body.mode) vehicleId = driver.vehicle.id;
+    }
     const departAt = new Date(Date.now() + body.departInMinutes * 60_000);
     const trip = await prisma.trip.create({
       data: {
         routeId: route.id,
         operatorId: opId,
-        vehicleId: body.vehicleId,
-        driverId: body.driverId,
+        vehicleId,
+        driverId: body.driverId || undefined,
         legs: [{ mode: body.mode }],
         departAt,
         arriveAt: new Date(departAt.getTime() + body.durationMinutes * 60_000),
@@ -437,61 +450,6 @@ operatorRouter.post(
   })
 );
 
-// POST /operator/drivers/invite — onboard a new driver with KYC (multipart):
-// ID number + driving licence number, plus their ID and licence documents.
-operatorRouter.post(
-  "/drivers/invite",
-  upload.fields([
-    { name: "idDocument", maxCount: 1 },
-    { name: "licenseDocument", maxCount: 1 },
-  ]),
-  asyncHandler(async (req, res) => {
-    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
-    const body = inviteDriverSchema.parse(req.body);
-    const idDocument = requireFile(req, "idDocument");
-    const licenseDocument = requireFile(req, "licenseDocument");
-
-    // Without an email the driver gets a synthetic, undeliverable address and
-    // the temp password is returned to the operator to hand over in person.
-    const hasEmail = !!body.email && body.email.length > 0;
-    const email = hasEmail ? body.email! : `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
-    const existing = await prisma.user.findFirst({ where: { OR: [{ email }, { phone: body.phone }] } });
-    if (existing) throw new HttpError(409, "Phone or email already registered");
-
-    const tempPassword = generateTempPassword();
-    const passwordHash = await hashPassword(tempPassword);
-    // Upload the KYC files first; roll them back if the account rows fail.
-    const [idKey, licenseKey] = await Promise.all([
-      storeFile(fromMulter(idDocument), { folder: "kyc/drivers", visibility: "private" }),
-      storeFile(fromMulter(licenseDocument), { folder: "kyc/drivers", visibility: "private" }),
-    ]);
-    const driver = await prisma
-      .$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", credentialsEmailed: hasEmail },
-        });
-        const d = await tx.driver.create({
-          data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber, nationalId: body.idNumber },
-        });
-        await tx.document.createMany({
-          data: [
-            { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idKey, mimeType: idDocument.mimetype, size: idDocument.size, driverId: d.id },
-            { kind: "DRIVING_LICENSE", fileName: licenseDocument.originalname, filePath: licenseKey, mimeType: licenseDocument.mimetype, size: licenseDocument.size, driverId: d.id },
-          ],
-        });
-        return d;
-      })
-      .catch(async (e: unknown) => {
-        await Promise.all([deleteFile(idKey), deleteFile(licenseKey)]);
-        throw e;
-      });
-    if (hasEmail) {
-      const op = await prisma.operator.findUnique({ where: { id: opId } });
-      sendCredentialsEmail({ email, firstName: body.firstName }, { tempPassword, roleLabel: "driver", createdBy: op?.companyName ?? "Your operator" });
-    }
-    res.status(201).json({ id: driver.id, credentialsSentTo: hasEmail ? email : null, tempPassword: hasEmail ? undefined : tempPassword });
-  })
-);
 
 // Today's withdrawable balance: net of Relay's fee, minus what was already
 // paid out (or is in flight) today. Failed payouts return to the pool.
@@ -582,6 +540,9 @@ operatorRouter.get(
             booked,
             capacity: t.capacity,
             status: t.status,
+            mode: (t.legs as { mode?: string }[] | null)?.[0]?.mode ?? "BUS",
+            vehicleId: t.vehicleId,
+            driverId: t.driverId,
           };
         }),
         total,
@@ -993,13 +954,20 @@ operatorRouter.get(
 
 
 /* -------- Moto hail dispatch --------
-   Hails are accepted by the driver who will actually ride (price, pickup and
-   completion all run through them), but the operator that offers MOTO sees
-   every open hail its fleet could take, its drivers' live rides, and can
-   assign an open hail to one of its online motos. Assignment targets the
-   request at that driver (they still confirm) and notifies them. */
+   The operator that offers MOTO handles a passenger's hail: it picks one of
+   its motos and either accepts at the passenger's price or quotes a price on
+   that driver's behalf. Once the passenger agrees/pays, the driver simply sees
+   the ride assigned to them and does pickup → complete. The operator can also
+   withdraw an unpaid acceptance or hand a paid ride to another driver. */
 
 const OPERATOR_ACTIVE_RIDE_STATUSES = ["ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
+
+async function motoOperator(userId: string) {
+  const opId = await resolveVerifiedOperatorId(userId);
+  const op = await prisma.operator.findUnique({ where: { id: opId } });
+  if (!op) throw new HttpError(404, "Operator not found");
+  return op;
+}
 
 async function motoFleet(opId: string) {
   const drivers = await prisma.driver.findMany({
@@ -1019,6 +987,15 @@ async function motoFleet(opId: string) {
   return { drivers, ids, active, busy };
 }
 
+// One of MY motos that can be handed a ride right now.
+async function availableMoto(opId: string, driverId: string) {
+  const driver = await prisma.driver.findFirst({ where: { id: driverId, operatorId: opId, ...motoDriverWhere }, include: { user: true, vehicle: true } });
+  if (!driver) throw new HttpError(409, "That driver is not an online, available moto of your fleet");
+  const onRide = await prisma.rideRequest.findFirst({ where: { acceptedDriverId: driver.id, status: { in: [...OPERATOR_ACTIVE_RIDE_STATUSES] } } });
+  if (onRide) throw new HttpError(409, `${fullNameOf(driver.user)} is on a ride — pick a free driver`);
+  return driver;
+}
+
 function hailFare(r: { agreedFare: Prisma.Decimal | null; offerFare: Prisma.Decimal | null }): number | null {
   const v = r.agreedFare ?? r.offerFare;
   return v === null ? null : rdec(v);
@@ -1028,14 +1005,12 @@ function hailFare(r: { agreedFare: Prisma.Decimal | null; offerFare: Prisma.Deci
 operatorRouter.get(
   "/moto-hails",
   asyncHandler(async (req, res) => {
-    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
-    const op = await prisma.operator.findUnique({ where: { id: opId } });
-    const enabled = !!op && op.modes.includes("MOTO");
-    if (!enabled) {
+    const op = await motoOperator(req.auth!.sub);
+    if (!op.modes.includes("MOTO")) {
       res.json({ enabled: false, open: [], active: [], drivers: [] });
       return;
     }
-    const { drivers, ids, active, busy } = await motoFleet(opId);
+    const { drivers, ids, active, busy } = await motoFleet(op.id);
     const open = await prisma.rideRequest.findMany({
       where: { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: { in: ids } }] },
       include: {
@@ -1057,9 +1032,9 @@ operatorRouter.get(
         prepaid: Boolean(r.paidAt),
         departAt: r.departAt?.toISOString() ?? null,
         requestedAt: r.createdAt.toISOString(),
-        // set when the hail is already aimed at one of OUR drivers
-        assignedTo: r.targetDriver ? { id: r.targetDriver.id, name: fullNameOf(r.targetDriver.user) } : null,
-        offers: r.offers.map((o) => ({ driverName: fullNameOf(o.driver.user), amount: rdec(o.amount) })),
+        // the passenger asked for one of OUR motos by name
+        requested: r.targetDriver ? { id: r.targetDriver.id, name: fullNameOf(r.targetDriver.user) } : null,
+        offers: r.offers.map((o) => ({ driverId: o.driverId, driverName: fullNameOf(o.driver.user), amount: rdec(o.amount) })),
       })),
       active: active.map((r) => ({
         id: r.id,
@@ -1070,6 +1045,7 @@ operatorRouter.get(
         status: r.status,
         driver: r.acceptedDriver ? { id: r.acceptedDriver.id, name: fullNameOf(r.acceptedDriver.user), plate: r.acceptedDriver.vehicle?.plateNumber ?? "—" } : null,
         acceptedAt: r.acceptedAt?.toISOString() ?? null,
+        pickupDeadline: r.pickupDeadline?.toISOString() ?? null,
       })),
       drivers: drivers.map((d) => ({
         id: d.id,
@@ -1078,43 +1054,389 @@ operatorRouter.get(
         online: d.online,
         suspended: d.suspended,
         busy: busy.has(d.id),
-        // can be handed a hail right now
         available: d.online && !d.suspended && !busy.has(d.id),
       })),
     });
   })
 );
 
-// POST /operator/moto-hails/:id/assign { driverId } — aim an open hail at one
-// of my available motos. The driver still accepts in their console.
+// POST /operator/moto-hails/:id/accept { driverId } — take the hail at the
+// passenger's asking price (or the already-funded fare on a re-broadcast) with
+// the chosen moto. Atomic OPEN→next-state claim: if another operator's accept
+// lands first, this one matches zero rows and is rejected.
 operatorRouter.post(
-  "/moto-hails/:id/assign",
+  "/moto-hails/:id/accept",
   asyncHandler(async (req, res) => {
-    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const op = await motoOperator(req.auth!.sub);
+    if (!op.modes.includes("MOTO")) throw new HttpError(403, "Your company does not offer moto-taxi service");
     const { driverId } = z.object({ driverId: z.string().min(1) }).parse(req.body);
-    const op = await prisma.operator.findUnique({ where: { id: opId } });
-    if (!op || !op.modes.includes("MOTO")) throw new HttpError(403, "Your company does not offer moto-taxi service");
-
-    const driver = await prisma.driver.findFirst({
-      where: { id: driverId, operatorId: opId, ...motoDriverWhere },
-      include: { user: true },
-    });
-    if (!driver) throw new HttpError(409, "That driver is not an online, available moto of your fleet");
-    const { busy, ids } = await motoFleet(opId);
-    if (busy.has(driver.id)) throw new HttpError(409, `${fullNameOf(driver.user)} is on a ride — pick a free driver`);
+    const driver = await availableMoto(op.id, driverId);
 
     const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
     if (!ride || ride.status !== "OPEN") throw new HttpError(409, "This hail is no longer open");
-    if (ride.targetDriverId && !ids.includes(ride.targetDriverId)) {
-      throw new HttpError(409, "The passenger sent this request to another operator's driver");
+    if (ride.targetDriverId && ride.targetDriverId !== driver.id) {
+      const mine = await prisma.driver.findFirst({ where: { id: ride.targetDriverId, operatorId: op.id } });
+      if (!mine) throw new HttpError(409, "The passenger sent this request to another operator's moto");
     }
+    const prepaid = Boolean(ride.paidAt);
+    const fare = prepaid ? ride.agreedFare : ride.offerFare;
+    if (!fare) throw new HttpError(409, "The passenger didn't propose a price — send them a quote instead");
 
-    await prisma.rideRequest.update({ where: { id: ride.id }, data: { targetDriverId: driver.id } });
+    const now = new Date();
+    // Commission is snapshotted the moment the price is agreed; a prepaid
+    // re-broadcast already carries the rate locked at the original agreement.
+    const pct = await getMotoCommissionPct();
+    const claimed = await prisma.rideRequest.updateMany({
+      where: { id: ride.id, status: "OPEN" },
+      data: prepaid
+        ? { status: "CONFIRMED", acceptedDriverId: driver.id, acceptedAt: now, pickupDeadline: new Date(Math.max(now.getTime(), ride.departAt?.getTime() ?? 0) + PICKUP_WINDOW_MS) }
+        : { status: "ACCEPTED", acceptedDriverId: driver.id, acceptedAt: now, agreedFare: fare, commissionPct: pct, commissionAmount: new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2) },
+    });
+    if (claimed.count === 0) throw new HttpError(409, "Too late — another operator already took this hail");
+    await prisma.rideOffer.updateMany({ where: { rideId: ride.id, status: "PENDING" }, data: { status: "DECLINED" } });
+
+    const who = `${fullNameOf(driver.user)} (${driver.vehicle?.plateNumber ?? "moto"}, ${op.companyName})`;
+    await notify(
+      ride.passengerId,
+      prepaid ? "New moto on the way" : "Your moto request was accepted",
+      prepaid
+        ? `${who} is taking over ${ride.originLabel} → ${ride.destLabel} — already paid, they're coming.`
+        : `${who} accepted ${ride.originLabel} → ${ride.destLabel} at your price. Pay to confirm the ride.`
+    );
     await notify(
       driver.userId,
-      "Ride assigned to you",
-      `${op.companyName} assigned you a moto request: ${ride.originLabel} → ${ride.destLabel}. Open your console to accept it.`
+      prepaid ? "Ride assigned — go to pickup" : "Ride assigned to you",
+      prepaid
+        ? `${op.companyName} assigned you ${ride.originLabel} → ${ride.destLabel}. It's already paid — head to the pickup now.`
+        : `${op.companyName} assigned you ${ride.originLabel} → ${ride.destLabel}. Head to the pickup once the passenger pays.`
     );
-    res.json({ assigned: true, driverId: driver.id });
+    res.json({ accepted: true, driverId: driver.id, status: prepaid ? "CONFIRMED" : "ACCEPTED" });
+  })
+);
+
+// POST /operator/moto-hails/:id/quote { driverId, amount } — offer a price on
+// behalf of the chosen moto (when the passenger set none, or theirs is too
+// low). One live quote per driver per hail; re-quoting replaces it.
+operatorRouter.post(
+  "/moto-hails/:id/quote",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    if (!op.modes.includes("MOTO")) throw new HttpError(403, "Your company does not offer moto-taxi service");
+    const { driverId, amount } = z.object({ driverId: z.string().min(1), amount: z.coerce.number().positive().max(100_000) }).parse(req.body);
+    const driver = await availableMoto(op.id, driverId);
+
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
+    if (!ride || ride.status !== "OPEN") throw new HttpError(409, "This hail is no longer open");
+    if (ride.paidAt) throw new HttpError(409, "This ride is already funded at a fixed price — accept it as is");
+    if (ride.targetDriverId && ride.targetDriverId !== driver.id) {
+      const mine = await prisma.driver.findFirst({ where: { id: ride.targetDriverId, operatorId: op.id } });
+      if (!mine) throw new HttpError(409, "The passenger sent this request to another operator's moto");
+    }
+
+    await prisma.rideOffer.upsert({
+      where: { rideId_driverId: { rideId: ride.id, driverId: driver.id } },
+      create: { rideId: ride.id, driverId: driver.id, amount },
+      update: { amount, status: "PENDING" },
+    });
+    await notify(
+      ride.passengerId,
+      `Price offer from ${op.companyName}`,
+      `${fullNameOf(driver.user)} can take ${ride.originLabel} → ${ride.destLabel} for RWF ${Math.round(amount).toLocaleString("en-US")}. Accept the offer to continue.`
+    );
+    res.status(201).json({ quoted: true, driverId: driver.id });
+  })
+);
+
+// POST /operator/moto-hails/:id/withdraw — back out of an ACCEPTED (unpaid)
+// ride; it reopens for everyone.
+operatorRouter.post(
+  "/moto-hails/:id/withdraw",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const { ids } = await motoFleet(op.id);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: { include: { user: true } } } });
+    if (!ride || !ride.acceptedDriverId || !ids.includes(ride.acceptedDriverId)) throw new HttpError(404, "Ride not found");
+    if (ride.status !== "ACCEPTED") throw new HttpError(409, "You can only withdraw before the passenger pays");
+
+    await prisma.rideRequest.update({
+      where: { id: ride.id },
+      data: { status: "OPEN", acceptedDriverId: null, acceptedAt: null, agreedFare: null, targetDriverId: null, commissionPct: null, commissionAmount: null },
+    });
+    await notify(ride.passengerId, "Moto withdrew", `${op.companyName} can't take ${ride.originLabel} → ${ride.destLabel} after all — your request is open to other motos again.`);
+    if (ride.acceptedDriver) await notify(ride.acceptedDriver.userId, "Ride withdrawn", `${op.companyName} withdrew you from ${ride.originLabel} → ${ride.destLabel}.`);
+    res.json({ withdrawn: true });
+  })
+);
+
+// POST /operator/moto-hails/:id/reassign { driverId } — hand an accepted or
+// paid ride to another of my free motos (the first driver is unavailable).
+// The price, payment and pickup window are untouched.
+operatorRouter.post(
+  "/moto-hails/:id/reassign",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const { driverId } = z.object({ driverId: z.string().min(1) }).parse(req.body);
+    const { ids } = await motoFleet(op.id);
+    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: { include: { user: true } } } });
+    if (!ride || !ride.acceptedDriverId || !ids.includes(ride.acceptedDriverId)) throw new HttpError(404, "Ride not found");
+    if (ride.status !== "ACCEPTED" && ride.status !== "CONFIRMED") throw new HttpError(409, "Only rides that haven't started can be handed to another driver");
+    if (ride.acceptedDriverId === driverId) throw new HttpError(409, "That driver already has this ride");
+    const driver = await availableMoto(op.id, driverId);
+
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { acceptedDriverId: driver.id, targetDriverId: driver.id } });
+    const who = `${fullNameOf(driver.user)} (${driver.vehicle?.plateNumber ?? "moto"})`;
+    await notify(ride.passengerId, "Your moto changed", `${op.companyName} reassigned ${ride.originLabel} → ${ride.destLabel} to ${who}.`);
+    await notify(driver.userId, "Ride assigned to you", `${op.companyName} handed you ${ride.originLabel} → ${ride.destLabel}${ride.status === "CONFIRMED" ? " — already paid, head to the pickup" : ""}.`);
+    if (ride.acceptedDriver) await notify(ride.acceptedDriver.userId, "Ride reassigned", `${op.companyName} moved ${ride.originLabel} → ${ride.destLabel} to another driver.`);
+    res.json({ reassigned: true, driverId: driver.id });
+  })
+);
+
+/* -------- Departure assignment (vehicle + driver) -------- */
+
+const ASSIGNABLE_TRIP_STATUSES = ["SCHEDULED", "BOARDING"] as const;
+function tripMode(t: { legs: unknown }): string {
+  const legs = t.legs as { mode?: string }[] | null;
+  return legs?.[0]?.mode ?? "BUS";
+}
+
+// GET /operator/schedule/lookups — vehicles and drivers for the departure
+// pickers, with the bits the form needs to filter by mode.
+operatorRouter.get(
+  "/schedule/lookups",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const [vehicles, drivers] = await Promise.all([
+      prisma.vehicle.findMany({ where: { operatorId: opId }, orderBy: { plateNumber: "asc" }, take: 200 }),
+      prisma.driver.findMany({ where: { operatorId: opId }, include: { user: true, vehicle: true }, orderBy: { createdAt: "asc" }, take: 200 }),
+    ]);
+    res.json({
+      vehicles: vehicles.map((v) => ({ value: v.id, label: `${v.plateNumber} · ${v.label ?? v.model ?? v.type} · ${v.capacity} seats`, type: v.type, driverId: v.driverId })),
+      drivers: drivers.map((d) => ({
+        value: d.id,
+        label: `${fullNameOf(d.user)}${d.vehicle ? ` · ${d.vehicle.plateNumber}` : " · no vehicle"}${d.suspended ? " (suspended)" : ""}`,
+        vehicleId: d.vehicle?.id ?? null,
+        vehicleType: d.vehicle?.type ?? null,
+      })),
+    });
+  })
+);
+
+// PATCH /operator/schedule/:id/assign — set or clear the vehicle and/or driver
+// of an upcoming departure. Omitted field = unchanged, "" = clear. The vehicle
+// must be ours and match the departure's mode (a moto can't run a bus
+// departure) and seat the departure's capacity; the driver must be ours, and
+// picking a driver without a vehicle uses the driver's own matching vehicle.
+operatorRouter.patch(
+  "/schedule/:id/assign",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const body = assignDepartureSchema.parse(req.body);
+    const trip = await prisma.trip.findFirst({ where: { id: req.params.id, operatorId: opId } });
+    if (!trip) throw new HttpError(404, "Departure not found");
+    if (!(ASSIGNABLE_TRIP_STATUSES as readonly string[]).includes(trip.status)) {
+      throw new HttpError(409, "Only upcoming departures can be reassigned");
+    }
+    const mode = tripMode(trip);
+
+    let driverId = body.driverId === undefined ? trip.driverId : body.driverId || null;
+    let vehicleId = body.vehicleId === undefined ? trip.vehicleId : body.vehicleId || null;
+
+    const driver = driverId
+      ? await prisma.driver.findFirst({ where: { id: driverId, operatorId: opId }, include: { vehicle: true, user: true } })
+      : null;
+    if (driverId && !driver) throw new HttpError(400, "That driver is not in your fleet");
+    if (driver?.suspended) throw new HttpError(409, "That driver is suspended");
+    if (driver && !vehicleId && driver.vehicle && driver.vehicle.type === mode) vehicleId = driver.vehicle.id;
+
+    if (vehicleId) {
+      const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId, operatorId: opId } });
+      if (!vehicle) throw new HttpError(400, "That vehicle is not in your fleet");
+      if (vehicle.type !== mode) throw new HttpError(400, `That vehicle is a ${vehicle.type.toLowerCase()} — this departure is a ${mode.toLowerCase()}`);
+      if (trip.capacity > vehicle.capacity) throw new HttpError(400, `That vehicle only seats ${vehicle.capacity}; this departure has ${trip.capacity} seats`);
+    }
+
+    await prisma.trip.update({ where: { id: trip.id }, data: { vehicleId, driverId } });
+    if (driver && driver.id !== trip.driverId) {
+      await notify(driver.userId, "New trip assigned", "You've been assigned to an upcoming departure.");
+    }
+    res.json({ ok: true, vehicleId, driverId });
+  })
+);
+
+
+/* -------- Driver onboarding by invitation --------
+   The operator only names the person (a registered passenger picked from
+   search, or an email). The candidate submits their own KYC from their
+   dashboard; the operator's approval is what creates the Driver record and
+   promotes the user to DRIVER. Nothing about the account is created or
+   edited on the candidate's behalf. */
+
+const OPEN_INVITE_STATUSES = ["INVITED", "SUBMITTED", "REJECTED"] as const;
+
+type InviteWithRels = Prisma.DriverInviteGetPayload<{ include: { user: true; documents: true } }>;
+function mapInvite(i: InviteWithRels) {
+  return {
+    id: i.id,
+    email: i.email,
+    name: i.user ? fullNameOf(i.user) : null,
+    phone: i.user?.phone ?? null,
+    avatarUrl: publicUrl(i.user?.avatarKey),
+    registered: Boolean(i.userId),
+    status: i.status,
+    note: i.note,
+    licenseNumber: i.licenseNumber,
+    nationalId: i.nationalId,
+    rejectionReason: i.rejectionReason,
+    invitedAt: i.invitedAt.toISOString(),
+    submittedAt: i.submittedAt?.toISOString() ?? null,
+    reviewedAt: i.reviewedAt?.toISOString() ?? null,
+    documents: i.documents.map((d) => ({ id: d.id, kind: d.kind, fileName: d.fileName, mimeType: d.mimeType })),
+  };
+}
+
+// GET /operator/users/search?q= — registered passengers an operator can invite
+// (typeahead: name, email or phone). Two characters minimum, eight results.
+operatorRouter.get(
+  "/users/search",
+  asyncHandler(async (req, res) => {
+    await resolveVerifiedOperatorId(req.auth!.sub);
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 2) {
+      res.json([]);
+      return;
+    }
+    const digits = q.replace(/[\s\-().]/g, "");
+    const users = await prisma.user.findMany({
+      where: {
+        role: "PASSENGER",
+        driverProfile: null,
+        OR: [
+          { email: { contains: q, mode: "insensitive" } },
+          { firstName: { contains: q, mode: "insensitive" } },
+          { lastName: { contains: q, mode: "insensitive" } },
+          ...(digits.length >= 3 ? [{ phone: { contains: digits.replace(/^0/, "") } }] : []),
+        ],
+      },
+      orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
+      take: 8,
+    });
+    res.json(users.map((u) => ({ id: u.id, name: fullNameOf(u), email: u.email, phone: u.phone, avatarUrl: publicUrl(u.avatarKey) })));
+  })
+);
+
+// POST /operator/driver-invites { email, note? }  (not under /drivers/… — that
+// prefix has a /drivers/:id route which would swallow "invites")
+operatorRouter.post(
+  "/driver-invites",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const { email, note } = driverInviteSchema.parse(req.body);
+
+    const user = await prisma.user.findFirst({ where: { email: { equals: email, mode: "insensitive" } }, include: { driverProfile: true } });
+    if (user && (user.role !== "PASSENGER" || user.driverProfile)) {
+      throw new HttpError(409, user.role === "DRIVER" || user.driverProfile ? "That person already drives on Relay" : "That account cannot be invited as a driver");
+    }
+    const dup = await prisma.driverInvite.findFirst({ where: { operatorId: op.id, email, status: { in: [...OPEN_INVITE_STATUSES] } } });
+    if (dup) throw new HttpError(409, "You already have an open invitation for this person");
+
+    const invite = await prisma.driverInvite.create({
+      data: { operatorId: op.id, email, userId: user?.id ?? null, note: note || null, token: randomBytes(24).toString("hex") },
+    });
+    if (user) {
+      await notify(
+        user.id,
+        `${op.companyName} invited you to drive`,
+        `${op.companyName} would like you to drive for them on Relay.${note ? `\n\n"${note}"` : ""}\n\nOpen your dashboard to submit your driving licence and national ID — once they approve, your driver console is unlocked.`
+      );
+    } else {
+      sendDriverInviteEmail(email, { company: op.companyName, note, token: invite.token });
+    }
+    res.status(201).json({ id: invite.id, status: invite.status, registered: Boolean(user) });
+  })
+);
+
+// GET /operator/driver-invites — every invitation except cancelled ones
+operatorRouter.get(
+  "/driver-invites",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const invites = await prisma.driverInvite.findMany({
+      where: { operatorId: opId, status: { not: "CANCELLED" } },
+      include: { user: true, documents: true },
+      orderBy: { invitedAt: "desc" },
+      take: 100,
+    });
+    res.json(invites.map(mapInvite));
+  })
+);
+
+async function myInvite(opId: string, id: string) {
+  const invite = await prisma.driverInvite.findFirst({ where: { id, operatorId: opId }, include: { user: true, documents: true } });
+  if (!invite) throw new HttpError(404, "Invitation not found");
+  return invite;
+}
+
+// POST /operator/driver-invites/:id/approve — the moment someone becomes a
+// driver: Driver record, role flip, documents moved onto the driver.
+operatorRouter.post(
+  "/driver-invites/:id/approve",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const invite = await myInvite(op.id, req.params.id);
+    if (invite.status !== "SUBMITTED") throw new HttpError(409, "Only a submitted application can be approved");
+    if (!invite.userId || !invite.user) throw new HttpError(409, "The candidate hasn't registered on Relay yet");
+    if (invite.user.role !== "PASSENGER") throw new HttpError(409, "That account is no longer eligible to become a driver");
+    const kinds = new Set(invite.documents.map((d) => d.kind));
+    if (!invite.licenseNumber || !kinds.has("NATIONAL_ID") || !kinds.has("DRIVING_LICENSE")) {
+      throw new HttpError(409, "The submission is incomplete — ask the candidate to resubmit");
+    }
+    const userId = invite.userId;
+    await prisma.$transaction(async (tx) => {
+      const d = await tx.driver.create({ data: { userId, operatorId: op.id, licenseNumber: invite.licenseNumber!, nationalId: invite.nationalId } });
+      await tx.document.updateMany({ where: { inviteId: invite.id }, data: { driverId: d.id, inviteId: null } });
+      await tx.user.update({ where: { id: userId }, data: { role: "DRIVER" } });
+      await tx.driverInvite.update({ where: { id: invite.id }, data: { status: "APPROVED", reviewedAt: new Date() } });
+      // Other operators' open invitations for this person are moot now.
+      await tx.driverInvite.updateMany({ where: { email: invite.email, id: { not: invite.id }, status: { in: [...OPEN_INVITE_STATUSES] } }, data: { status: "CANCELLED" } });
+    });
+    await notify(userId, "You're now a driver", `${op.companyName} approved your documents — welcome aboard. Open your driver console from the app to go online.`);
+    res.json({ approved: true });
+  })
+);
+
+// POST /operator/driver-invites/:id/reject { reason } — ask for changes;
+// the candidate sees the reason and can resubmit.
+operatorRouter.post(
+  "/driver-invites/:id/reject",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const { reason } = rejectDriverInviteSchema.parse(req.body);
+    const invite = await myInvite(op.id, req.params.id);
+    if (invite.status !== "SUBMITTED") throw new HttpError(409, "Only a submitted application can be sent back");
+    await prisma.driverInvite.update({ where: { id: invite.id }, data: { status: "REJECTED", rejectionReason: reason, reviewedAt: new Date() } });
+    if (invite.userId) {
+      await notify(invite.userId, `${op.companyName} needs changes to your documents`, `Reason: ${reason}\n\nFix the issue and resubmit from your dashboard.`);
+    }
+    res.json({ rejected: true });
+  })
+);
+
+// POST /operator/driver-invites/:id/cancel — withdraw an open invitation.
+// Any KYC the candidate uploaded is deleted: it was collected for a review
+// that will no longer happen.
+operatorRouter.post(
+  "/driver-invites/:id/cancel",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const invite = await myInvite(op.id, req.params.id);
+    if (!(OPEN_INVITE_STATUSES as readonly string[]).includes(invite.status)) throw new HttpError(409, "This invitation is already closed");
+    await prisma.$transaction([
+      prisma.document.deleteMany({ where: { inviteId: invite.id } }),
+      prisma.driverInvite.update({ where: { id: invite.id }, data: { status: "CANCELLED", reviewedAt: new Date() } }),
+    ]);
+    await Promise.all(invite.documents.map((d) => deleteFile(d.filePath)));
+    if (invite.userId) await notify(invite.userId, "Invitation withdrawn", `${op.companyName} withdrew their driver invitation.`);
+    res.json({ cancelled: true });
   })
 );

@@ -135,38 +135,24 @@ function rideMockDistanceKm(id: string): number {
 
 const DRIVER_ACTIVE_RIDE_STATUSES = ["ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
 
-// GET /driver/moto-requests — open hails this moto can take (broadcasts +
-// requests targeted at them, with their own pending counter-offer attached),
-// plus their current ride at whatever lifecycle stage it's in.
+// GET /driver/moto-requests — the ride currently assigned to this moto by its
+// operator (at whatever lifecycle stage), plus why hailing may be off. Hails
+// are accepted/quoted by the operator, not the driver, so there is no list of
+// open requests here.
 driverRouter.get(
   "/moto-requests",
   asyncHandler(async (req, res) => {
     const driver = await getDriver(req.auth!.sub);
-    // Why hailing is off for this driver (wrong vehicle, operator not verified /
-    // not offering MOTO…) — surfaced in the console instead of a silent empty list.
     const hailingReason = motoIneligibleReason(driver);
-    // Current platform rate — for previewing the payout on rides that don't
-    // have a locked rate yet. Once a price is agreed, the rate is snapshotted
-    // on the ride (commissionPct) and later admin changes don't touch it.
     const platformCommissionPct = await getMotoCommissionPct();
-    let [open, current] = await Promise.all([
-      prisma.rideRequest.findMany({
-        where: hailingReason ? { id: "__none__" } : { status: "OPEN", OR: [{ targetDriverId: null }, { targetDriverId: driver.id }] },
-        include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
-        orderBy: { createdAt: "desc" },
-        take: 20,
-      }),
-      prisma.rideRequest.findFirst({
-        where: { status: { in: [...DRIVER_ACTIVE_RIDE_STATUSES] }, acceptedDriverId: driver.id },
-        include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
-      }),
-    ]);
+    const include = { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" as const } } };
+    let current = await prisma.rideRequest.findFirst({
+      where: { status: { in: [...DRIVER_ACTIVE_RIDE_STATUSES] }, acceptedDriverId: driver.id },
+      include,
+    });
     // A dispute the driver never answered resolves for the passenger.
     if (current && (await autoResolveStaleDispute(current))) {
-      current = await prisma.rideRequest.findUnique({
-        where: { id: current.id },
-        include: { passenger: true, offers: { where: { driverId: driver.id, status: "PENDING" } } },
-      });
+      current = await prisma.rideRequest.findUnique({ where: { id: current.id }, include });
     }
     const map = (r: NonNullable<typeof current>) => {
       // Fee transparency: the driver always sees what Relay takes and what
@@ -184,7 +170,6 @@ driverRouter.get(
         offerFare: r.offerFare === null ? null : dec(r.offerFare),
         agreedFare: r.agreedFare === null ? null : dec(r.agreedFare),
         departAt: r.departAt?.toISOString() ?? null,
-        // funded re-broadcast: accepting goes straight to pickup, price locked
         prepaid: Boolean(r.paidAt),
         pickupDeadline: r.pickupDeadline?.toISOString() ?? null,
         pickupOverdue: r.status === "CONFIRMED" && r.pickupDeadline !== null && r.pickupDeadline.getTime() < Date.now(),
@@ -200,125 +185,10 @@ driverRouter.get(
         netPayout: fare === null || commission === null ? null : Math.round((fare - commission) * 100) / 100,
       };
     };
-    res.json({ open: open.map(map), current: current ? map(current) : null, platformCommissionPct, hailing: { enabled: !hailingReason, reason: hailingReason } });
+    res.json({ current: current ? map(current) : null, platformCommissionPct, hailing: { enabled: !hailingReason, reason: hailingReason } });
   })
 );
 
-// POST /driver/moto-requests/:id/accept — claim a hail at the passenger's
-// asking price (or the already-funded fare on a re-broadcast). The claim is a
-// single atomic OPEN→next-state update: whichever driver's request lands first
-// wins, and every later acceptance matches zero rows and is rejected.
-driverRouter.post(
-  "/moto-requests/:id/accept",
-  asyncHandler(async (req, res) => {
-    const driver = await getDriver(req.auth!.sub);
-    const ineligible = motoIneligibleReason(driver);
-    if (ineligible) throw new HttpError(403, ineligible);
-
-    const busy = await prisma.rideRequest.findFirst({
-      where: { status: { in: [...DRIVER_ACTIVE_RIDE_STATUSES] }, acceptedDriverId: driver.id },
-    });
-    if (busy) throw new HttpError(409, "Finish your current ride before accepting another");
-
-    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
-    if (!ride) throw new HttpError(404, "Ride not found");
-
-    // A funded re-broadcast keeps its fare and skips payment; a fresh ride
-    // needs the passenger's asking price to accept directly (else counter).
-    const prepaid = Boolean(ride.paidAt);
-    const fare = prepaid ? ride.agreedFare : ride.offerFare;
-    if (!fare) throw new HttpError(409, "The passenger didn't propose a price — send them your offer instead");
-
-    const now = new Date();
-    // Snapshot the commission the moment the price is agreed: this is the rate
-    // the driver saw when accepting, and later admin changes must not move it.
-    // A prepaid re-broadcast already carries the rate locked at the original
-    // agreement, so it's left untouched.
-    const pct = await getMotoCommissionPct();
-    const claimed = await prisma.rideRequest.updateMany({
-      where: {
-        id: ride.id,
-        status: "OPEN",
-        OR: [{ targetDriverId: null }, { targetDriverId: driver.id }],
-      },
-      data: prepaid
-        ? {
-            status: "CONFIRMED",
-            acceptedDriverId: driver.id,
-            acceptedAt: now,
-            pickupDeadline: new Date(Math.max(now.getTime(), ride.departAt?.getTime() ?? 0) + 10 * 60_000),
-          }
-        : {
-            status: "ACCEPTED",
-            acceptedDriverId: driver.id,
-            acceptedAt: now,
-            agreedFare: fare,
-            commissionPct: pct,
-            commissionAmount: new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2),
-          },
-    });
-    if (claimed.count === 0) throw new HttpError(409, "Too late — another driver already took this ride");
-
-    await prisma.rideOffer.updateMany({ where: { rideId: ride.id, status: "PENDING" }, data: { status: "DECLINED" } });
-    await notify(
-      ride.passengerId,
-      prepaid ? "New moto on the way" : "Moto accepted your request",
-      prepaid
-        ? `${fullNameOf(driver.user)} took over your ride ${ride.originLabel} → ${ride.destLabel} — already paid, they're coming.`
-        : `${fullNameOf(driver.user)} accepted ${ride.originLabel} → ${ride.destLabel} at your price. Pay to confirm the ride.`
-    );
-    res.json({ accepted: true });
-  })
-);
-
-// POST /driver/moto-requests/:id/offer — bargaining: quote a price (when the
-// passenger didn't set one, or theirs is too low for the distance). One live
-// offer per driver per ride; re-quoting replaces it.
-driverRouter.post(
-  "/moto-requests/:id/offer",
-  asyncHandler(async (req, res) => {
-    const { amount } = z.object({ amount: z.coerce.number().positive().max(100_000) }).parse(req.body);
-    const driver = await getDriver(req.auth!.sub);
-    const ineligible = motoIneligibleReason(driver);
-    if (ineligible) throw new HttpError(403, ineligible);
-
-    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
-    if (!ride || ride.status !== "OPEN") throw new HttpError(409, "This ride is no longer open");
-    if (ride.paidAt) throw new HttpError(409, "This ride is already funded at a fixed price — accept it as is");
-    if (ride.targetDriverId && ride.targetDriverId !== driver.id) throw new HttpError(403, "This request was sent to another driver");
-
-    await prisma.rideOffer.upsert({
-      where: { rideId_driverId: { rideId: ride.id, driverId: driver.id } },
-      create: { rideId: ride.id, driverId: driver.id, amount },
-      update: { amount, status: "PENDING" },
-    });
-    await notify(
-      ride.passengerId,
-      "Price offer from a moto",
-      `${fullNameOf(driver.user)} offers RWF ${Math.round(amount).toLocaleString("en-US")} for ${ride.originLabel} → ${ride.destLabel}. Accept it to continue.`
-    );
-    res.status(201).json({ offered: true });
-  })
-);
-
-// POST /driver/moto-requests/:id/withdraw — driver backs out of an ACCEPTED
-// (still unpaid) ride; it reopens for everyone else.
-driverRouter.post(
-  "/moto-requests/:id/withdraw",
-  asyncHandler(async (req, res) => {
-    const driver = await getDriver(req.auth!.sub);
-    const ride = await prisma.rideRequest.findUnique({ where: { id: req.params.id } });
-    if (!ride || ride.acceptedDriverId !== driver.id) throw new HttpError(404, "Ride not found");
-    if (ride.status !== "ACCEPTED") throw new HttpError(409, "You can only withdraw before the passenger pays");
-
-    await prisma.rideRequest.update({
-      where: { id: ride.id },
-      data: { status: "OPEN", acceptedDriverId: null, acceptedAt: null, agreedFare: null, targetDriverId: null, commissionPct: null, commissionAmount: null },
-    });
-    await notify(ride.passengerId, "Driver withdrew", `${fullNameOf(driver.user)} can't take ${ride.originLabel} → ${ride.destLabel} — your request is open to other motos again.`);
-    res.json({ withdrawn: true });
-  })
-);
 
 // POST /driver/moto-requests/:id/pickup — driver confirms the passenger is on
 // the moto. Allowed while CONFIRMED, even slightly past the deadline (if the

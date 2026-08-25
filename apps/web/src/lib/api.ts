@@ -229,11 +229,7 @@ export const api = {
   confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
   cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
   driverMotoRequests: () =>
-    request<{ open: DriverMotoRequest[]; current: DriverMotoRequest | null; platformCommissionPct: number; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
-  driverAcceptMotoRide: (id: string) => request<{ accepted: boolean }>(`/driver/moto-requests/${id}/accept`, { method: "POST", auth: true }),
-  driverOfferMotoRide: (id: string, amount: number) =>
-    request<{ offered: boolean }>(`/driver/moto-requests/${id}/offer`, { method: "POST", body: { amount }, auth: true }),
-  driverWithdrawMotoRide: (id: string) => request<{ withdrawn: boolean }>(`/driver/moto-requests/${id}/withdraw`, { method: "POST", auth: true }),
+    request<{ current: DriverMotoRequest | null; platformCommissionPct: number; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
   driverAcknowledgeNoPickup: (id: string) =>
     request<{ acknowledged: boolean }>(`/driver/moto-requests/${id}/acknowledge-no-pickup`, { method: "POST", auth: true }),
   driverContestDispute: (id: string) =>
@@ -285,6 +281,10 @@ export const api = {
   operatorRoutes: (page?: number) => request<Paginated<OperatorRoute>>(`/operator/routes${pageQuery(page)}`, { auth: true }),
   operatorRouteLookup: () => request<{ value: string; label: string }[]>("/operator/routes/lookup", { auth: true }),
   operatorSchedule: (page?: number) => request<Paginated<OperatorScheduleRow>>(`/operator/schedule${pageQuery(page)}`, { auth: true }),
+  // vehicles + drivers for the departure pickers (with type / assigned vehicle so the form can filter by mode)
+  operatorScheduleLookups: () => request<ScheduleLookups>("/operator/schedule/lookups", { auth: true }),
+  operatorAssignDeparture: (id: string, body: { vehicleId?: string; driverId?: string }) =>
+    request<{ ok: boolean }>(`/operator/schedule/${id}/assign`, { method: "PATCH", body, auth: true }),
   operatorDrivers: (page?: number) => request<Paginated<OperatorDriverRow>>(`/operator/drivers${pageQuery(page)}`, { auth: true }),
   operatorDriver: (id: string) => request<OperatorDriverDetail>(`/operator/drivers/${id}`, { auth: true }),
   operatorSuspend: (id: string) => request<{ suspended: boolean }>(`/operator/drivers/${id}/suspend`, { method: "POST", auth: true }),
@@ -296,6 +296,24 @@ export const api = {
   operatorAssignTrip: (id: string, tripId: string) =>
     request<{ ok: boolean }>(`/operator/drivers/${id}/assign-trip`, { method: "POST", body: { tripId }, auth: true }),
   operatorRemoveDriver: (id: string) => request<{ removed: boolean }>(`/operator/drivers/${id}/remove`, { method: "POST", auth: true }),
+  // ---- driver onboarding by invitation ----
+  // typeahead over registered passengers (name / email / phone)
+  operatorSearchUsers: (q: string) => request<UserSuggestion[]>(`/operator/users/search?q=${encodeURIComponent(q)}`, { auth: true }),
+  operatorInviteDriver: (body: { email: string; note?: string }) =>
+    request<{ id: string; status: string; registered: boolean }>("/operator/driver-invites", { method: "POST", body, auth: true }),
+  operatorDriverInvites: () => request<DriverInviteRow[]>("/operator/driver-invites", { auth: true }),
+  operatorApproveDriverInvite: (id: string) => request<{ approved: boolean }>(`/operator/driver-invites/${id}/approve`, { method: "POST", auth: true }),
+  operatorRejectDriverInvite: (id: string, reason: string) =>
+    request<{ rejected: boolean }>(`/operator/driver-invites/${id}/reject`, { method: "POST", body: { reason }, auth: true }),
+  operatorCancelDriverInvite: (id: string) => request<{ cancelled: boolean }>(`/operator/driver-invites/${id}/cancel`, { method: "POST", auth: true }),
+  // the invitee's side
+  myDriverInvites: () => request<MyDriverInvite[]>("/me/driver-invites", { auth: true }),
+  submitDriverInvite: (id: string, formData: FormData) => requestMultipart<{ submitted: boolean }>(`/me/driver-invites/${id}/submit`, formData, true),
+  declineDriverInvite: (id: string) => request<{ declined: boolean }>(`/me/driver-invites/${id}/decline`, { method: "POST", auth: true }),
+  // public: pre-fill registration from an invitation email link
+  inviteInfo: (token: string) => request<{ email: string; company: string; registered: boolean }>(`/auth/invite/${encodeURIComponent(token)}`),
+  // authenticated document download URL (use with downloadAuthed)
+  documentUrl: (id: string) => `${BASE}/documents/${id}`,
   operatorBookings: (page?: number) => request<Paginated<OperatorBookingRow>>(`/operator/bookings${pageQuery(page)}`, { auth: true }),
   operatorPayments: (page?: number) => request<OperatorPayments>(`/operator/payments${pageQuery(page)}`, { auth: true }),
 
@@ -336,7 +354,6 @@ export const api = {
   operatorAddRoute: (body: { origin: string; destination: string; distanceKm?: number }) => request<{ id: string; name: string }>("/operator/routes", { method: "POST", body, auth: true }),
   operatorAddDeparture: (body: { routeId: string; fare: number; departInMinutes?: number; durationMinutes?: number; capacity?: number; mode?: string; vehicleId?: string; driverId?: string }) => request<{ id: string }>("/operator/departures", { method: "POST", body, auth: true }),
   // multipart: KYC fields + ID document + driving licence document
-  operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string; credentialsSentTo: string | null; tempPassword?: string }>("/operator/drivers/invite", formData, true),
   operatorWithdraw: () => request<{ amount: number; reference: string; status: TransferStatus }>("/operator/payout", { method: "POST", auth: true }),
   operatorPayoutStatus: (reference: string) => request<{ status: TransferStatus; amount: number; reference: string }>(`/operator/payout/${reference}/status`, { auth: true }),
 
@@ -390,8 +407,13 @@ export const api = {
   adminReportExportUrl: (type: AdminReportType, q = "?period=all") => `${BASE}/admin/reports/export${q}&type=${type}`,
   // moto dispatch (operators offering MOTO)
   operatorMotoHails: () => request<OperatorMotoHails>("/operator/moto-hails", { auth: true }),
-  operatorAssignMotoHail: (id: string, driverId: string) =>
-    request<{ assigned: boolean; driverId: string }>(`/operator/moto-hails/${id}/assign`, { method: "POST", body: { driverId }, auth: true }),
+  operatorAcceptMotoHail: (id: string, driverId: string) =>
+    request<{ accepted: boolean; driverId: string; status: string }>(`/operator/moto-hails/${id}/accept`, { method: "POST", body: { driverId }, auth: true }),
+  operatorQuoteMotoHail: (id: string, driverId: string, amount: number) =>
+    request<{ quoted: boolean }>(`/operator/moto-hails/${id}/quote`, { method: "POST", body: { driverId, amount }, auth: true }),
+  operatorWithdrawMotoHail: (id: string) => request<{ withdrawn: boolean }>(`/operator/moto-hails/${id}/withdraw`, { method: "POST", auth: true }),
+  operatorReassignMotoHail: (id: string, driverId: string) =>
+    request<{ reassigned: boolean }>(`/operator/moto-hails/${id}/reassign`, { method: "POST", body: { driverId }, auth: true }),
   operatorReports: (q = "?period=month") => request<OperatorReports>(`/operator/reports${q}`, { auth: true }),
   operatorReportExportUrl: (q = "?period=month") => `${BASE}/operator/reports/export${q}`,
   driverReports: (q = "?period=month") => request<DriverReports>(`/driver/reports${q}`, { auth: true }),
@@ -431,6 +453,7 @@ export interface RideOfferView {
   rating: number;
   plate: string;
   distanceKm: number;
+  operator: string | null;
 }
 export interface RideView {
   id: string;
@@ -447,7 +470,7 @@ export interface RideView {
   pickupOverdue: boolean;
   disputedAt: string | null;
   disputeContested: boolean;
-  driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number } | null;
+  driver: { name: string; phone: string; rating: number; plate: string; model: string; distanceKm: number; operator: string | null } | null;
   offers: RideOfferView[];
   createdAt: string;
   acceptedAt: string | null;
@@ -462,8 +485,8 @@ export interface OperatorMotoHail {
   prepaid: boolean;
   departAt: string | null;
   requestedAt: string;
-  assignedTo: { id: string; name: string } | null;
-  offers: { driverName: string; amount: number }[];
+  requested: { id: string; name: string } | null;
+  offers: { driverId: string; driverName: string; amount: number }[];
 }
 export interface OperatorMotoActiveRide {
   id: string;
@@ -474,6 +497,7 @@ export interface OperatorMotoActiveRide {
   status: RideStatus;
   driver: { id: string; name: string; plate: string } | null;
   acceptedAt: string | null;
+  pickupDeadline: string | null;
 }
 export interface OperatorMotoDriver {
   id: string;
@@ -682,6 +706,10 @@ export interface OperatorRoute {
   util: number;
   fare: number;
 }
+export interface ScheduleLookups {
+  vehicles: { value: string; label: string; type: string; driverId: string | null }[];
+  drivers: { value: string; label: string; vehicleId: string | null; vehicleType: string | null }[];
+}
 export interface OperatorScheduleRow {
   id: string;
   time: string;
@@ -691,6 +719,9 @@ export interface OperatorScheduleRow {
   booked: number;
   capacity: number;
   status: string;
+  mode: string;
+  vehicleId: string | null;
+  driverId: string | null;
 }
 export interface OperatorDriverRow {
   id: string;
@@ -701,6 +732,43 @@ export interface OperatorDriverRow {
   rating: number;
   revenue: number; // operator revenue from this driver's trips (not personal pay)
   status: string;
+}
+// Driver onboarding by invitation.
+export interface UserSuggestion {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  avatarUrl: string | null;
+}
+export interface DriverInviteRow {
+  id: string;
+  email: string;
+  name: string | null;
+  phone: string | null;
+  avatarUrl: string | null;
+  registered: boolean;
+  status: string; // INVITED | SUBMITTED | APPROVED | REJECTED | DECLINED
+  note: string | null;
+  licenseNumber: string | null;
+  nationalId: string | null;
+  rejectionReason: string | null;
+  invitedAt: string;
+  submittedAt: string | null;
+  reviewedAt: string | null;
+  documents: KycDocument[];
+}
+export interface MyDriverInvite {
+  id: string;
+  company: string;
+  note: string | null;
+  status: string;
+  rejectionReason: string | null;
+  licenseNumber: string | null;
+  nationalId: string | null;
+  invitedAt: string;
+  submittedAt: string | null;
+  documents: KycDocument[];
 }
 export interface KycDocument {
   id: string;

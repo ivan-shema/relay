@@ -369,3 +369,16 @@ authRouter.get(
     res.json(toAuthUser(user));
   })
 );
+
+
+// GET /auth/invite/:token — public: what the register page needs to pre-fill
+// for someone arriving from a driver-invitation email. Reveals nothing beyond
+// what the email itself contained.
+authRouter.get(
+  "/invite/:token",
+  asyncHandler(async (req, res) => {
+    const invite = await prisma.driverInvite.findUnique({ where: { token: req.params.token }, include: { operator: true } });
+    if (!invite || invite.status === "CANCELLED" || invite.status === "DECLINED") throw new HttpError(404, "This invitation is no longer valid");
+    res.json({ email: invite.email, company: invite.operator.companyName, registered: Boolean(invite.userId) });
+  })
+);
