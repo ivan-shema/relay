@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm, type UseFormRegisterReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -42,6 +42,14 @@ function AuthInner() {
   const [resetCode, setResetCode] = useState("");
   const [pendingGoogle, setPendingGoogle] = useState<PendingGoogle | null>(null);
   const [googleError, setGoogleError] = useState<string | null>(null);
+  // Arriving from a driver-invitation email: pre-fill the email and land on
+  // register (or sign-in if that email already has an account).
+  const inviteToken = params.get("invite");
+  const [invite, setInvite] = useState<InviteInfo | null>(null);
+  useEffect(() => {
+    if (!inviteToken) return;
+    api.inviteInfo(inviteToken).then((i) => { setInvite(i); setScreen(i.registered ? "login" : "register"); }).catch(() => undefined);
+  }, [inviteToken]);
 
   const goHome = (u: AuthUser | UserRole) => router.push(homePathForRole(typeof u === "string" ? u : u.role));
 
@@ -87,6 +95,7 @@ function AuthInner() {
               onDone={goHome}
               onGoogle={onGoogleCredential}
               googleError={googleError}
+              invite={invite}
             />
           )}
           {screen === "register" && (
@@ -96,6 +105,7 @@ function AuthInner() {
               onRegistered={onRegistered}
               onGoogle={onGoogleCredential}
               googleError={googleError}
+              invite={invite}
             />
           )}
           {screen === "google-phone" && pendingGoogle && (
@@ -118,16 +128,20 @@ function AuthInner() {
 
 /* ---------------- forms ---------------- */
 
+type InviteInfo = { email: string; company: string; registered: boolean };
+
 interface GoogleProps {
   onGoogle: (credential: string) => void;
   googleError: string | null;
+  invite?: InviteInfo | null;
 }
 
-function LoginForm({ signIn, onForgot, onRegister, onDone, onGoogle, googleError }: { signIn: (id: string, pw: string) => Promise<AuthUser>; onForgot: () => void; onRegister: () => void; onDone: (u: AuthUser) => void } & GoogleProps) {
-  const { register, handleSubmit, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof loginSchema>>({
+function LoginForm({ signIn, onForgot, onRegister, onDone, onGoogle, googleError, invite }: { signIn: (id: string, pw: string) => Promise<AuthUser>; onForgot: () => void; onRegister: () => void; onDone: (u: AuthUser) => void } & GoogleProps) {
+  const { register, handleSubmit, setValue, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof loginSchema>>({
     resolver: zodResolver(loginSchema),
     defaultValues: { identifier: "amara@relay.app", password: "password123" },
   });
+  useEffect(() => { if (invite) setValue("identifier", invite.email); }, [invite, setValue]);
   const submit = handleSubmit(async (v) => {
     try {
       onDone(await signIn(v.identifier, v.password));
@@ -139,6 +153,7 @@ function LoginForm({ signIn, onForgot, onRegister, onDone, onGoogle, googleError
     <Panel>
       <form onSubmit={submit} noValidate>
         <Title sub="Sign in to continue to Relay">Welcome back</Title>
+        {invite && <InviteBanner invite={invite} />}
         <ErrorBanner message={errors.root?.message ?? googleError ?? undefined} />
         <Label>Email or phone</Label>
         <TextField reg={register("identifier")} error={errors.identifier?.message} placeholder="amara@relay.app" />
@@ -158,11 +173,12 @@ function LoginForm({ signIn, onForgot, onRegister, onDone, onGoogle, googleError
 // Public registration — everyone signs up as a passenger. Drivers are invited by
 // their operator; running a transport business is an application you make from
 // the passenger dashboard after signing up (Profile → Become an operator).
-function RegisterForm({ setSession, onLogin, onRegistered, onGoogle, googleError }: { setSession: (r: AuthResponse) => void; onLogin: () => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void } & GoogleProps) {
-  const { register, handleSubmit, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof registerSchema>>({
+function RegisterForm({ setSession, onLogin, onRegistered, onGoogle, googleError, invite }: { setSession: (r: AuthResponse) => void; onLogin: () => void; onRegistered: (userId: string, role: UserRole, needsVerify: boolean) => void } & GoogleProps) {
+  const { register, handleSubmit, setValue, formState: { errors, isSubmitting }, setError } = useForm<z.infer<typeof registerSchema>>({
     resolver: zodResolver(registerSchema),
     defaultValues: { firstName: "", lastName: "", email: "", phone: "", password: "" },
   });
+  useEffect(() => { if (invite) setValue("email", invite.email); }, [invite, setValue]);
   const submit = handleSubmit(async (v) => {
     try {
       const resp = await api.register(v);
@@ -176,6 +192,7 @@ function RegisterForm({ setSession, onLogin, onRegistered, onGoogle, googleError
     <Panel width={400}>
       <form onSubmit={submit} noValidate>
         <Title sub="Join Relay in under a minute">Create your account</Title>
+        {invite && <InviteBanner invite={invite} />}
         <ErrorBanner message={errors.root?.message ?? googleError ?? undefined} />
         <div style={{ display: "flex", gap: 12 }}>
           <div style={{ flex: 1 }}>
@@ -550,5 +567,14 @@ function BackBtn({ children, onClick, full }: { children: React.ReactNode; onCli
     <button type="button" onClick={onClick} style={{ width: full ? "100%" : "auto", display: "block", margin: full ? "18px auto 0" : "14px auto 0", background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "#a39a8d", cursor: "pointer" }}>
       {children}
     </button>
+  );
+}
+
+// Context for someone arriving from an operator's driver-invitation email.
+function InviteBanner({ invite }: { invite: InviteInfo }) {
+  return (
+    <div style={{ background: "#fff8f5", border: "1px solid #ffd9c2", borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, color: "#1b1714", marginBottom: 16 }}>
+      <b>{invite.company}</b> invited you to drive on Relay. {invite.registered ? "Sign in" : "Create your account"} with <span style={{ fontFamily: MONO }}>{invite.email}</span> — the invitation is waiting in your dashboard.
+    </div>
   );
 }

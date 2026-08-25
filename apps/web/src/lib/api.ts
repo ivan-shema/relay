@@ -296,6 +296,24 @@ export const api = {
   operatorAssignTrip: (id: string, tripId: string) =>
     request<{ ok: boolean }>(`/operator/drivers/${id}/assign-trip`, { method: "POST", body: { tripId }, auth: true }),
   operatorRemoveDriver: (id: string) => request<{ removed: boolean }>(`/operator/drivers/${id}/remove`, { method: "POST", auth: true }),
+  // ---- driver onboarding by invitation ----
+  // typeahead over registered passengers (name / email / phone)
+  operatorSearchUsers: (q: string) => request<UserSuggestion[]>(`/operator/users/search?q=${encodeURIComponent(q)}`, { auth: true }),
+  operatorInviteDriver: (body: { email: string; note?: string }) =>
+    request<{ id: string; status: string; registered: boolean }>("/operator/driver-invites", { method: "POST", body, auth: true }),
+  operatorDriverInvites: () => request<DriverInviteRow[]>("/operator/driver-invites", { auth: true }),
+  operatorApproveDriverInvite: (id: string) => request<{ approved: boolean }>(`/operator/driver-invites/${id}/approve`, { method: "POST", auth: true }),
+  operatorRejectDriverInvite: (id: string, reason: string) =>
+    request<{ rejected: boolean }>(`/operator/driver-invites/${id}/reject`, { method: "POST", body: { reason }, auth: true }),
+  operatorCancelDriverInvite: (id: string) => request<{ cancelled: boolean }>(`/operator/driver-invites/${id}/cancel`, { method: "POST", auth: true }),
+  // the invitee's side
+  myDriverInvites: () => request<MyDriverInvite[]>("/me/driver-invites", { auth: true }),
+  submitDriverInvite: (id: string, formData: FormData) => requestMultipart<{ submitted: boolean }>(`/me/driver-invites/${id}/submit`, formData, true),
+  declineDriverInvite: (id: string) => request<{ declined: boolean }>(`/me/driver-invites/${id}/decline`, { method: "POST", auth: true }),
+  // public: pre-fill registration from an invitation email link
+  inviteInfo: (token: string) => request<{ email: string; company: string; registered: boolean }>(`/auth/invite/${encodeURIComponent(token)}`),
+  // authenticated document download URL (use with downloadAuthed)
+  documentUrl: (id: string) => `${BASE}/documents/${id}`,
   operatorBookings: (page?: number) => request<Paginated<OperatorBookingRow>>(`/operator/bookings${pageQuery(page)}`, { auth: true }),
   operatorPayments: (page?: number) => request<OperatorPayments>(`/operator/payments${pageQuery(page)}`, { auth: true }),
 
@@ -336,7 +354,6 @@ export const api = {
   operatorAddRoute: (body: { origin: string; destination: string; distanceKm?: number }) => request<{ id: string; name: string }>("/operator/routes", { method: "POST", body, auth: true }),
   operatorAddDeparture: (body: { routeId: string; fare: number; departInMinutes?: number; durationMinutes?: number; capacity?: number; mode?: string; vehicleId?: string; driverId?: string }) => request<{ id: string }>("/operator/departures", { method: "POST", body, auth: true }),
   // multipart: KYC fields + ID document + driving licence document
-  operatorInviteDriver: (formData: FormData) => requestMultipart<{ id: string; credentialsSentTo: string | null; tempPassword?: string }>("/operator/drivers/invite", formData, true),
   operatorWithdraw: () => request<{ amount: number; reference: string; status: TransferStatus }>("/operator/payout", { method: "POST", auth: true }),
   operatorPayoutStatus: (reference: string) => request<{ status: TransferStatus; amount: number; reference: string }>(`/operator/payout/${reference}/status`, { auth: true }),
 
@@ -715,6 +732,43 @@ export interface OperatorDriverRow {
   rating: number;
   revenue: number; // operator revenue from this driver's trips (not personal pay)
   status: string;
+}
+// Driver onboarding by invitation.
+export interface UserSuggestion {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  avatarUrl: string | null;
+}
+export interface DriverInviteRow {
+  id: string;
+  email: string;
+  name: string | null;
+  phone: string | null;
+  avatarUrl: string | null;
+  registered: boolean;
+  status: string; // INVITED | SUBMITTED | APPROVED | REJECTED | DECLINED
+  note: string | null;
+  licenseNumber: string | null;
+  nationalId: string | null;
+  rejectionReason: string | null;
+  invitedAt: string;
+  submittedAt: string | null;
+  reviewedAt: string | null;
+  documents: KycDocument[];
+}
+export interface MyDriverInvite {
+  id: string;
+  company: string;
+  note: string | null;
+  status: string;
+  rejectionReason: string | null;
+  licenseNumber: string | null;
+  nationalId: string | null;
+  invitedAt: string;
+  submittedAt: string | null;
+  documents: KycDocument[];
 }
 export interface KycDocument {
   id: string;

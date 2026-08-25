@@ -16,6 +16,8 @@ import {
   type OperatorPayments,
   type OperatorReports,
   type ScheduleLookups,
+  type UserSuggestion,
+  type DriverInviteRow,
   type OperatorMotoHails,
   type OperatorMotoHail,
 } from "@/lib/api";
@@ -24,20 +26,19 @@ import {
   createVehicleSchema,
   createRouteSchema,
   createDepartureSchema,
-  inviteDriverSchema,
   assignVehicleSchema,
   assignTripSchema,
   assignDepartureSchema,
   type CreateVehicleInput,
   type CreateRouteInput,
   type CreateDepartureInput,
-  type InviteDriverInput,
   type AssignDepartureInput,
 } from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
 import { ConsoleShell, ProfileSettingsPage, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, TicketVerifyForm, BarChart, type NavItem } from "@/components/console";
 import { PeriodPicker, ExportButtons, StatTile, ReportTable, downloadAuthed, exportReportPdf, rangeQuery, isRangeReady, fmtMoney, type ReportRangeValue } from "@/components/reports";
 import { NotificationBell } from "@/components/notification-bell";
+import { Avatar } from "@/components/avatar";
 
 const MONO = "'JetBrains Mono', monospace";
 
@@ -491,9 +492,9 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
   const [history, setHistory] = useState<OperatorDriverTrip[]>([]);
   const [lookups, setLookups] = useState<{ vehicles: { value: string; label: string }[]; trips: { value: string; label: string }[] }>({ vehicles: [], trips: [] });
   const [inviteModal, setInviteModal] = useState(false);
-  // Shown once after an invite: where the login details went, or — for a
-  // driver without an email — the temp password the operator must pass on.
-  const [invited, setInvited] = useState<{ name: string; phone: string; credentialsSentTo: string | null; tempPassword?: string } | null>(null);
+  // Shown once after sending an invitation.
+  const [sent, setSent] = useState<{ registered: boolean; email: string } | null>(null);
+  const [inviteTick, setInviteTick] = useState(0);
   const [action, setAction] = useState<"vehicle" | "trip" | null>(null);
 
   const loadDetail = useCallback((id: string) => {
@@ -647,55 +648,17 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
   if (!list) return <Loading />;
   return (
     <Card>
-      {inviteModal && (
-        <FormModal
-          title="Invite a driver"
-          submitLabel="Send invite"
-          schema={inviteDriverSchema}
-          fields={[
-            { name: "firstName", label: "First name", placeholder: "Patrick" },
-            { name: "lastName", label: "Last name", placeholder: "Habimana" },
-            { name: "phone", label: "Phone number", placeholder: "+250 78 000 0000" },
-            { name: "email", label: "Email (optional)", placeholder: "driver@email.com" },
-            { name: "idNumber", label: "National ID number", placeholder: "1199…" },
-            { name: "licenseNumber", label: "Driving licence number", placeholder: "RW-DRV-…" },
-            { name: "idDocument", label: "ID document", type: "file" },
-            { name: "licenseDocument", label: "Driving licence document", type: "file" },
-          ]}
-          onSubmit={async (v) => {
-            const d = v as InviteDriverInput & { idDocument: File; licenseDocument: File };
-            const fd = new FormData();
-            fd.append("firstName", d.firstName);
-            fd.append("lastName", d.lastName);
-            fd.append("phone", d.phone);
-            if (d.email) fd.append("email", d.email);
-            fd.append("idNumber", d.idNumber);
-            fd.append("licenseNumber", d.licenseNumber);
-            fd.append("idDocument", d.idDocument);
-            fd.append("licenseDocument", d.licenseDocument);
-            const r = await api.operatorInviteDriver(fd);
-            setInvited({ name: `${d.firstName} ${d.lastName}`, phone: d.phone, credentialsSentTo: r.credentialsSentTo, tempPassword: r.tempPassword });
-            reloadFirst();
-          }}
-          onClose={() => setInviteModal(false)}
-        />
-      )}
-      {invited && (
-        <div style={{ display: "flex", gap: 12, alignItems: "flex-start", background: invited.tempPassword ? "#fff5e8" : "#e7f6ee", border: `1px solid ${invited.tempPassword ? "#f3d9b8" : "#bfe8d2"}`, borderRadius: 12, padding: "12px 14px", marginBottom: 14, fontSize: 13 }}>
+      {inviteModal && <InviteDriverModal onClose={() => setInviteModal(false)} onSent={(r) => { setSent(r); setInviteTick((t) => t + 1); }} />}
+      {sent && (
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start", background: "#e7f6ee", border: "1px solid #bfe6d1", borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13 }}>
           <div style={{ flex: 1 }}>
-            {invited.tempPassword ? (
-              <>
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>Share these login details with {invited.name} — they are shown only once.</div>
-                <div style={{ fontFamily: MONO, fontSize: 12.5 }}>Phone: {invited.phone} · Temporary password: <b>{invited.tempPassword}</b></div>
-                <div style={{ fontSize: 12, color: "#8c8378", marginTop: 4 }}>No email was given, so nothing was sent. The driver signs in with their phone number and should change the password after the first sign-in.</div>
-              </>
-            ) : (
-              <div style={{ fontWeight: 700 }}>{invited.name} added — a temporary password was emailed to <span style={{ fontFamily: MONO }}>{invited.credentialsSentTo}</span>.</div>
-            )}
+            <div style={{ fontWeight: 700 }}>Invitation sent to <span style={{ fontFamily: MONO }}>{sent.email}</span></div>
+            <div style={{ fontSize: 12, color: "#8c8378", marginTop: 3 }}>{sent.registered ? "They've been notified in the app and by email. Once they submit their licence and ID, review them below." : "They'll get an email with a link to register. Once they submit their licence and ID, review them below."}</div>
           </div>
-          <button onClick={() => setInvited(null)} style={{ background: "none", border: "none", color: "#8c8378", fontSize: 16, cursor: "pointer", lineHeight: 1 }}>×</button>
+          <button onClick={() => setSent(null)} style={{ background: "none", border: "none", color: "#8c8378", fontSize: 16, cursor: "pointer", lineHeight: 1 }}>×</button>
         </div>
       )}
+      <DriverInvitesCard refreshKey={inviteTick} onApproved={reloadFirst} />
       <CardTitle right={<AccentButton onClick={() => setInviteModal(true)}>+ Invite driver</AccentButton>}>Drivers · {list.total}</CardTitle>
       <TableHead cols={["Driver", "Vehicle", "Trips", "Rating", "Revenue", "Status", ""]} template="1.2fr 1.4fr .6fr .6fr .8fr .9fr 24px" />
       {list.items.map((d) => (
@@ -1189,5 +1152,208 @@ function MotoHailsTab() {
         )}
       </Card>
     </div>
+  );
+}
+
+
+/* -------- Driver onboarding by invitation -------- */
+
+const inviteInput: React.CSSProperties = { width: "100%", border: "1px solid #e3ddd1", borderRadius: 11, padding: "11px 13px", fontSize: 14, fontWeight: 600, outline: "none", fontFamily: "'Manrope', sans-serif", boxSizing: "border-box", background: "#fff" };
+const inviteLabel: React.CSSProperties = { fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 };
+const inviteBtn = (bg: string, color = "#fff", border = "none", disabled = false): React.CSSProperties => ({ background: bg, color, border, borderRadius: 10, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1, fontFamily: "'Manrope', sans-serif", flex: "none" });
+const splitName = (name: string) => ({ firstName: name.split(" ")[0] ?? "", lastName: name.split(" ").slice(1).join(" ") });
+
+// Invite a driver: pick a registered passenger from the typeahead, or type an
+// email for someone not on Relay yet. That's all the operator provides — the
+// candidate submits their own licence and ID, and the operator approves below.
+function InviteDriverModal({ onClose, onSent }: { onClose: () => void; onSent: (r: { registered: boolean; email: string }) => void }) {
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<UserSuggestion[]>([]);
+  const [picked, setPicked] = useState<UserSuggestion | null>(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (picked || q.trim().length < 2) {
+      setHits([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      api.operatorSearchUsers(q.trim()).then(setHits).catch(() => setHits([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q, picked]);
+
+  const typedEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(q.trim()) ? q.trim().toLowerCase() : null;
+  const email = picked?.email ?? typedEmail;
+  const send = async () => {
+    if (!email) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.operatorInviteDriver({ email, note: note.trim() || undefined });
+      onSent({ registered: r.registered, email });
+      onClose();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not send the invitation");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(27,23,20,.55)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 470, background: "#fff", borderRadius: 20, boxShadow: "0 40px 90px -40px rgba(27,23,20,.6)", overflow: "visible" }}>
+        <div style={{ padding: "20px 22px", borderBottom: "1px solid #ece6db" }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, fontWeight: 700, letterSpacing: "-.4px" }}>Invite a driver</div>
+          <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>They submit their own licence and ID; you approve, and their driver console unlocks.</div>
+        </div>
+        <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
+          {error && <div style={{ background: "#fbeae6", border: "1px solid #f0d4cc", color: "#c2553f", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, fontWeight: 600 }}>{error}</div>}
+          <div>
+            <div style={inviteLabel}>Who</div>
+            {picked ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid #e3ddd1", borderRadius: 11, padding: "9px 12px" }}>
+                <Avatar user={{ ...splitName(picked.id ? picked.name : picked.email), avatarUrl: picked.avatarUrl }} size={30} />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 700 }}>{picked.id ? picked.name : "Invite by email"}</span>
+                  <span style={{ display: "block", fontSize: 12, color: "#8c8378", fontFamily: MONO, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{picked.email}{picked.phone ? ` · ${picked.phone}` : " · not on Relay yet"}</span>
+                </span>
+                <button type="button" onClick={() => { setPicked(null); setQ(""); }} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>Change</button>
+              </div>
+            ) : (
+              <div style={{ position: "relative" }}>
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Name, phone or email" autoFocus style={inviteInput} />
+                {(hits.length > 0 || typedEmail) && (
+                  <div style={{ position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", background: "#fff", border: "1px solid #e3ddd1", borderRadius: 12, boxShadow: "0 18px 40px -18px rgba(27,23,20,.4)", zIndex: 5, overflow: "hidden" }}>
+                    {hits.map((u) => (
+                      <button type="button" key={u.id} onClick={() => { setPicked(u); setHits([]); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: "1px solid #f1ece2", padding: "9px 12px", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+                        <Avatar user={{ ...splitName(u.name), avatarUrl: u.avatarUrl }} size={28} />
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ display: "block", fontSize: 13, fontWeight: 700 }}>{u.name}</span>
+                          <span style={{ display: "block", fontSize: 11.5, color: "#8c8378", fontFamily: MONO, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email} · {u.phone}</span>
+                        </span>
+                        <span style={{ fontSize: 10, fontWeight: 800, color: "#1f9d6b", background: "#e7f6ee", borderRadius: 7, padding: "3px 7px", textTransform: "uppercase" }}>on Relay</span>
+                      </button>
+                    ))}
+                    {typedEmail && !hits.some((h) => h.email.toLowerCase() === typedEmail) && (
+                      <button type="button" onClick={() => { setPicked({ id: "", name: typedEmail, email: typedEmail, phone: "", avatarUrl: null }); setHits([]); }} style={{ display: "block", width: "100%", textAlign: "left", background: "#fff8f5", border: "none", padding: "10px 12px", cursor: "pointer", fontSize: 13, fontWeight: 600, color: "#1b1714", fontFamily: "'Manrope', sans-serif" }}>
+                        Invite <b style={{ fontFamily: MONO }}>{typedEmail}</b> by email — they&apos;ll register first
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            {!picked && q.trim().length >= 2 && hits.length === 0 && !typedEmail && (
+              <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 6 }}>No registered passenger matches — type their email to invite them to join Relay.</div>
+            )}
+          </div>
+          <div>
+            <div style={inviteLabel}>Message (optional)</div>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} maxLength={300} placeholder="e.g. We run motos around Remera — have your licence and ID ready." style={{ ...inviteInput, resize: "vertical" }} />
+          </div>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button type="button" onClick={onClose} style={inviteBtn("#fff", "#1b1714", "1px solid #e3ddd1")}>Cancel</button>
+            <button type="button" disabled={!email || busy} onClick={send} style={inviteBtn("#ff6a1a", "#fff", "none", !email || busy)}>{busy ? "Sending…" : "Send invitation"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Invitations and their KYC submissions. "Approve" is the moment the
+// candidate becomes a driver (Driver record + role flip); "Send back" returns
+// a reason they can act on; "Withdraw" cancels the invitation.
+function DriverInvitesCard({ refreshKey, onApproved }: { refreshKey: number; onApproved: () => void }) {
+  const [rows, setRows] = useState<DriverInviteRow[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null);
+
+  const load = useCallback(() => {
+    api.operatorDriverInvites().then(setRows).catch(() => setRows([]));
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [load, refreshKey]);
+
+  const run = async (id: string, fn: () => Promise<unknown>) => {
+    setBusyId(id);
+    try {
+      await fn();
+    } catch (e) {
+      window.alert(e instanceof ApiError ? e.message : "That didn't go through — please try again");
+    } finally {
+      setBusyId(null);
+      load();
+    }
+  };
+  if (!rows || rows.length === 0) return null;
+
+  const fmtDate = (iso: string) => new Date(iso).toLocaleDateString([], { day: "numeric", month: "short" });
+  const docLabel: Record<string, string> = { NATIONAL_ID: "National ID", DRIVING_LICENSE: "Driving licence", PASSPORT: "Passport" };
+  return (
+    <Card>
+      <CardTitle>Invitations · {rows.length}</CardTitle>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 6 }}>
+        {rows.map((r) => {
+          const open = r.status === "INVITED" || r.status === "SUBMITTED" || r.status === "REJECTED";
+          return (
+            <div key={r.id} style={{ border: `1px solid ${r.status === "SUBMITTED" ? "#ffd9c2" : "#ece6db"}`, background: r.status === "SUBMITTED" ? "#fff8f5" : "#fff", borderRadius: 14, padding: "12px 14px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <Avatar user={{ ...splitName(r.name ?? r.email), avatarUrl: r.avatarUrl }} size={34} />
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700 }}>
+                    {r.name ?? r.email}
+                    <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: r.registered ? "#1f9d6b" : "#8c8378", background: r.registered ? "#e7f6ee" : "#f1ede4", borderRadius: 20, padding: "2px 8px", textTransform: "uppercase" }}>{r.registered ? "on Relay" : "invited by email"}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2, fontFamily: MONO }}>
+                    {r.email}{r.phone ? ` · ${r.phone}` : ""} · invited {fmtDate(r.invitedAt)}
+                  </div>
+                  {r.status === "SUBMITTED" && r.submittedAt && (
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1b1714", marginTop: 6 }}>
+                      Licence <span style={{ fontFamily: MONO }}>{r.licenseNumber}</span> · ID <span style={{ fontFamily: MONO }}>{r.nationalId}</span> · submitted {fmtDate(r.submittedAt)}
+                      <span style={{ display: "inline-flex", gap: 6, marginLeft: 8 }}>
+                        {r.documents.map((d) => (
+                          <button key={d.id} type="button" onClick={() => downloadAuthed(api.documentUrl(d.id), d.fileName)} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 8, padding: "3px 9px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>View {docLabel[d.kind] ?? d.kind}</button>
+                        ))}
+                      </span>
+                    </div>
+                  )}
+                  {r.status === "REJECTED" && r.rejectionReason && <div style={{ fontSize: 12, color: "#c2553f", fontWeight: 600, marginTop: 6 }}>Sent back: “{r.rejectionReason}” — waiting for a resubmission.</div>}
+                  {r.status === "INVITED" && <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 6 }}>{r.registered ? "Waiting for them to submit their documents." : "Waiting for them to register and submit their documents."}</div>}
+                </div>
+                <StatusPill status={r.status} />
+                {open && (
+                  <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                    {r.status === "SUBMITTED" && (
+                      <>
+                        <button disabled={busyId === r.id} onClick={() => run(r.id, async () => { await api.operatorApproveDriverInvite(r.id); onApproved(); })} style={inviteBtn("#1f9d6b")}>{busyId === r.id ? "…" : "Approve — make driver"}</button>
+                        <button disabled={busyId === r.id} onClick={() => setRejecting(rejecting?.id === r.id ? null : { id: r.id, reason: "" })} style={inviteBtn("#fff", "#c2553f", "1px solid #f0d4cc")}>Send back</button>
+                      </>
+                    )}
+                    <button disabled={busyId === r.id} onClick={() => { if (window.confirm("Withdraw this invitation? Any documents they uploaded are deleted.")) run(r.id, () => api.operatorCancelDriverInvite(r.id)); }} style={inviteBtn("#fff", "#8c8378", "1px solid #e3ddd1")}>Withdraw</button>
+                  </div>
+                )}
+              </div>
+              {rejecting?.id === r.id && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1ece2" }}>
+                  <div style={inviteLabel}>What should they fix? (sent to the candidate)</div>
+                  <textarea value={rejecting.reason} onChange={(e) => setRejecting({ id: r.id, reason: e.target.value })} rows={2} autoFocus placeholder="e.g. The licence photo is blurry — please upload a readable scan." style={{ ...inviteInput, resize: "vertical" }} />
+                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+                    <button onClick={() => setRejecting(null)} style={inviteBtn("#fff", "#8c8378", "1px solid #e3ddd1")}>Cancel</button>
+                    <button disabled={rejecting.reason.trim().length < 10 || busyId === r.id} onClick={() => run(r.id, async () => { await api.operatorRejectDriverInvite(r.id, rejecting.reason.trim()); setRejecting(null); })} style={inviteBtn("#c2553f", "#fff", "none", rejecting.reason.trim().length < 10)}>Send back with reason</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }

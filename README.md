@@ -171,6 +171,30 @@ no credentials (toggle in `apps/api/.env`):
   real time over the `GET /me/stream` SSE channel, so the bell updates without
   a refresh.
 
+## Driver onboarding (invitation → KYC → approval)
+
+1. **Invite.** From *Drivers → Invite driver* the operator picks a registered
+   passenger from a typeahead (name, email or phone) or types an email for
+   someone not on Relay yet, optionally with a note. That is all the operator
+   provides. A registered invitee is notified in-app and by email; an
+   unregistered one gets an email whose link opens registration with the email
+   pre-filled (`GET /auth/invite/:token`).
+2. **Submit.** The invitation appears in the invitee's passenger dashboard
+   (home and Profile). They enter their driving-licence and national-ID
+   numbers and upload both documents (`POST /me/driver-invites/:id/submit`),
+   or decline. Documents are private Cloudinary assets visible only to the
+   inviting operator, the candidate and admins.
+3. **Review.** The operator sees the submission under *Drivers → Invitations*
+   and can **Approve** — which creates the `Driver` record, moves the documents
+   onto it and flips the account's role to `DRIVER` — or **Send back** with a
+   reason the candidate can act on (they resubmit; files they don't replace are
+   kept), or **Withdraw** the invitation. Approval cancels any other operator's
+   open invitation for the same person.
+
+Accounts are never created or edited on the candidate's behalf; the previous
+"operator types the driver's details and gets a temporary password" flow is
+gone. Admins can still add users of any role from the admin console.
+
 ## Moto hailing & dispatch
 
 - **Who receives a hail.** Drivers are classified by the vehicle their operator

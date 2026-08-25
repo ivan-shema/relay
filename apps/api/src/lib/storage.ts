@@ -92,6 +92,12 @@ export async function storeFile(input: UploadInput, opts: { folder: string; visi
         (err, res) => (err || !res ? reject(err ?? new Error("Cloudinary returned no result")) : resolve(res))
       );
       stream.end(input.buffer);
+    }).catch((e: unknown) => {
+      // Cloudinary rejects corrupt/unsupported files with an http_code: that is
+      // the uploaded file at fault, not an outage, so answer 400 rather than 500.
+      const code = (e as { http_code?: number })?.http_code;
+      if (code && code >= 400 && code < 500) throw new HttpError(400, "That file could not be processed — upload a valid PDF, JPEG, PNG or WebP");
+      throw e;
     });
     return `cld:${type}:${resourceType}:${result.public_id}`;
   }

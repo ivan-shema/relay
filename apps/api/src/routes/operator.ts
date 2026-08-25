@@ -6,21 +6,22 @@ import {
   createVehicleSchema,
   createRouteSchema,
   createDepartureSchema,
-  inviteDriverSchema,
   assignVehicleSchema,
   assignTripSchema,
   operatorOnboardingSchema,
   assignDepartureSchema,
+  driverInviteSchema,
+  rejectDriverInviteSchema,
 } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { hashPassword, generateTempPassword } from "../lib/auth";
-import { sendCredentialsEmail } from "../lib/mailer";
+import { randomBytes } from "crypto";
+import { sendDriverInviteEmail } from "../lib/mailer";
 import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
-import { upload, requireFile } from "../lib/uploads";
-import { storeFile, deleteFile, fromMulter } from "../lib/storage";
+import { upload } from "../lib/uploads";
+import { storeFile, deleteFile, fromMulter, publicUrl } from "../lib/storage";
 import { paypackEnabled, normalizeMomoNumber, momoProviderLabel, requestCashout, fetchTransferOutcome } from "../lib/paypack";
 import { settlePayout } from "../lib/settlement";
 import { notify } from "../lib/notify";
@@ -449,61 +450,6 @@ operatorRouter.post(
   })
 );
 
-// POST /operator/drivers/invite — onboard a new driver with KYC (multipart):
-// ID number + driving licence number, plus their ID and licence documents.
-operatorRouter.post(
-  "/drivers/invite",
-  upload.fields([
-    { name: "idDocument", maxCount: 1 },
-    { name: "licenseDocument", maxCount: 1 },
-  ]),
-  asyncHandler(async (req, res) => {
-    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
-    const body = inviteDriverSchema.parse(req.body);
-    const idDocument = requireFile(req, "idDocument");
-    const licenseDocument = requireFile(req, "licenseDocument");
-
-    // Without an email the driver gets a synthetic, undeliverable address and
-    // the temp password is returned to the operator to hand over in person.
-    const hasEmail = !!body.email && body.email.length > 0;
-    const email = hasEmail ? body.email! : `${body.phone.replace(/\D/g, "")}@drivers.relay.app`;
-    const existing = await prisma.user.findFirst({ where: { OR: [{ email }, { phone: body.phone }] } });
-    if (existing) throw new HttpError(409, "Phone or email already registered");
-
-    const tempPassword = generateTempPassword();
-    const passwordHash = await hashPassword(tempPassword);
-    // Upload the KYC files first; roll them back if the account rows fail.
-    const [idKey, licenseKey] = await Promise.all([
-      storeFile(fromMulter(idDocument), { folder: "kyc/drivers", visibility: "private" }),
-      storeFile(fromMulter(licenseDocument), { folder: "kyc/drivers", visibility: "private" }),
-    ]);
-    const driver = await prisma
-      .$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: { firstName: body.firstName, lastName: body.lastName, email, phone: body.phone, passwordHash, role: "DRIVER", credentialsEmailed: hasEmail },
-        });
-        const d = await tx.driver.create({
-          data: { userId: user.id, operatorId: opId, licenseNumber: body.licenseNumber, nationalId: body.idNumber },
-        });
-        await tx.document.createMany({
-          data: [
-            { kind: "NATIONAL_ID", fileName: idDocument.originalname, filePath: idKey, mimeType: idDocument.mimetype, size: idDocument.size, driverId: d.id },
-            { kind: "DRIVING_LICENSE", fileName: licenseDocument.originalname, filePath: licenseKey, mimeType: licenseDocument.mimetype, size: licenseDocument.size, driverId: d.id },
-          ],
-        });
-        return d;
-      })
-      .catch(async (e: unknown) => {
-        await Promise.all([deleteFile(idKey), deleteFile(licenseKey)]);
-        throw e;
-      });
-    if (hasEmail) {
-      const op = await prisma.operator.findUnique({ where: { id: opId } });
-      sendCredentialsEmail({ email, firstName: body.firstName }, { tempPassword, roleLabel: "driver", createdBy: op?.companyName ?? "Your operator" });
-    }
-    res.status(201).json({ id: driver.id, credentialsSentTo: hasEmail ? email : null, tempPassword: hasEmail ? undefined : tempPassword });
-  })
-);
 
 // Today's withdrawable balance: net of Relay's fee, minus what was already
 // paid out (or is in flight) today. Failed payouts return to the pool.
@@ -1315,5 +1261,182 @@ operatorRouter.patch(
       await notify(driver.userId, "New trip assigned", "You've been assigned to an upcoming departure.");
     }
     res.json({ ok: true, vehicleId, driverId });
+  })
+);
+
+
+/* -------- Driver onboarding by invitation --------
+   The operator only names the person (a registered passenger picked from
+   search, or an email). The candidate submits their own KYC from their
+   dashboard; the operator's approval is what creates the Driver record and
+   promotes the user to DRIVER. Nothing about the account is created or
+   edited on the candidate's behalf. */
+
+const OPEN_INVITE_STATUSES = ["INVITED", "SUBMITTED", "REJECTED"] as const;
+
+type InviteWithRels = Prisma.DriverInviteGetPayload<{ include: { user: true; documents: true } }>;
+function mapInvite(i: InviteWithRels) {
+  return {
+    id: i.id,
+    email: i.email,
+    name: i.user ? fullNameOf(i.user) : null,
+    phone: i.user?.phone ?? null,
+    avatarUrl: publicUrl(i.user?.avatarKey),
+    registered: Boolean(i.userId),
+    status: i.status,
+    note: i.note,
+    licenseNumber: i.licenseNumber,
+    nationalId: i.nationalId,
+    rejectionReason: i.rejectionReason,
+    invitedAt: i.invitedAt.toISOString(),
+    submittedAt: i.submittedAt?.toISOString() ?? null,
+    reviewedAt: i.reviewedAt?.toISOString() ?? null,
+    documents: i.documents.map((d) => ({ id: d.id, kind: d.kind, fileName: d.fileName, mimeType: d.mimeType })),
+  };
+}
+
+// GET /operator/users/search?q= — registered passengers an operator can invite
+// (typeahead: name, email or phone). Two characters minimum, eight results.
+operatorRouter.get(
+  "/users/search",
+  asyncHandler(async (req, res) => {
+    await resolveVerifiedOperatorId(req.auth!.sub);
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 2) {
+      res.json([]);
+      return;
+    }
+    const digits = q.replace(/[\s\-().]/g, "");
+    const users = await prisma.user.findMany({
+      where: {
+        role: "PASSENGER",
+        driverProfile: null,
+        OR: [
+          { email: { contains: q, mode: "insensitive" } },
+          { firstName: { contains: q, mode: "insensitive" } },
+          { lastName: { contains: q, mode: "insensitive" } },
+          ...(digits.length >= 3 ? [{ phone: { contains: digits.replace(/^0/, "") } }] : []),
+        ],
+      },
+      orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
+      take: 8,
+    });
+    res.json(users.map((u) => ({ id: u.id, name: fullNameOf(u), email: u.email, phone: u.phone, avatarUrl: publicUrl(u.avatarKey) })));
+  })
+);
+
+// POST /operator/driver-invites { email, note? }  (not under /drivers/… — that
+// prefix has a /drivers/:id route which would swallow "invites")
+operatorRouter.post(
+  "/driver-invites",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const { email, note } = driverInviteSchema.parse(req.body);
+
+    const user = await prisma.user.findFirst({ where: { email: { equals: email, mode: "insensitive" } }, include: { driverProfile: true } });
+    if (user && (user.role !== "PASSENGER" || user.driverProfile)) {
+      throw new HttpError(409, user.role === "DRIVER" || user.driverProfile ? "That person already drives on Relay" : "That account cannot be invited as a driver");
+    }
+    const dup = await prisma.driverInvite.findFirst({ where: { operatorId: op.id, email, status: { in: [...OPEN_INVITE_STATUSES] } } });
+    if (dup) throw new HttpError(409, "You already have an open invitation for this person");
+
+    const invite = await prisma.driverInvite.create({
+      data: { operatorId: op.id, email, userId: user?.id ?? null, note: note || null, token: randomBytes(24).toString("hex") },
+    });
+    if (user) {
+      await notify(
+        user.id,
+        `${op.companyName} invited you to drive`,
+        `${op.companyName} would like you to drive for them on Relay.${note ? `\n\n"${note}"` : ""}\n\nOpen your dashboard to submit your driving licence and national ID — once they approve, your driver console is unlocked.`
+      );
+    } else {
+      sendDriverInviteEmail(email, { company: op.companyName, note, token: invite.token });
+    }
+    res.status(201).json({ id: invite.id, status: invite.status, registered: Boolean(user) });
+  })
+);
+
+// GET /operator/driver-invites — every invitation except cancelled ones
+operatorRouter.get(
+  "/driver-invites",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const invites = await prisma.driverInvite.findMany({
+      where: { operatorId: opId, status: { not: "CANCELLED" } },
+      include: { user: true, documents: true },
+      orderBy: { invitedAt: "desc" },
+      take: 100,
+    });
+    res.json(invites.map(mapInvite));
+  })
+);
+
+async function myInvite(opId: string, id: string) {
+  const invite = await prisma.driverInvite.findFirst({ where: { id, operatorId: opId }, include: { user: true, documents: true } });
+  if (!invite) throw new HttpError(404, "Invitation not found");
+  return invite;
+}
+
+// POST /operator/driver-invites/:id/approve — the moment someone becomes a
+// driver: Driver record, role flip, documents moved onto the driver.
+operatorRouter.post(
+  "/driver-invites/:id/approve",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const invite = await myInvite(op.id, req.params.id);
+    if (invite.status !== "SUBMITTED") throw new HttpError(409, "Only a submitted application can be approved");
+    if (!invite.userId || !invite.user) throw new HttpError(409, "The candidate hasn't registered on Relay yet");
+    if (invite.user.role !== "PASSENGER") throw new HttpError(409, "That account is no longer eligible to become a driver");
+    const kinds = new Set(invite.documents.map((d) => d.kind));
+    if (!invite.licenseNumber || !kinds.has("NATIONAL_ID") || !kinds.has("DRIVING_LICENSE")) {
+      throw new HttpError(409, "The submission is incomplete — ask the candidate to resubmit");
+    }
+    const userId = invite.userId;
+    await prisma.$transaction(async (tx) => {
+      const d = await tx.driver.create({ data: { userId, operatorId: op.id, licenseNumber: invite.licenseNumber!, nationalId: invite.nationalId } });
+      await tx.document.updateMany({ where: { inviteId: invite.id }, data: { driverId: d.id, inviteId: null } });
+      await tx.user.update({ where: { id: userId }, data: { role: "DRIVER" } });
+      await tx.driverInvite.update({ where: { id: invite.id }, data: { status: "APPROVED", reviewedAt: new Date() } });
+      // Other operators' open invitations for this person are moot now.
+      await tx.driverInvite.updateMany({ where: { email: invite.email, id: { not: invite.id }, status: { in: [...OPEN_INVITE_STATUSES] } }, data: { status: "CANCELLED" } });
+    });
+    await notify(userId, "You're now a driver", `${op.companyName} approved your documents — welcome aboard. Open your driver console from the app to go online.`);
+    res.json({ approved: true });
+  })
+);
+
+// POST /operator/driver-invites/:id/reject { reason } — ask for changes;
+// the candidate sees the reason and can resubmit.
+operatorRouter.post(
+  "/driver-invites/:id/reject",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const { reason } = rejectDriverInviteSchema.parse(req.body);
+    const invite = await myInvite(op.id, req.params.id);
+    if (invite.status !== "SUBMITTED") throw new HttpError(409, "Only a submitted application can be sent back");
+    await prisma.driverInvite.update({ where: { id: invite.id }, data: { status: "REJECTED", rejectionReason: reason, reviewedAt: new Date() } });
+    if (invite.userId) {
+      await notify(invite.userId, `${op.companyName} needs changes to your documents`, `Reason: ${reason}\n\nFix the issue and resubmit from your dashboard.`);
+    }
+    res.json({ rejected: true });
+  })
+);
+
+// POST /operator/driver-invites/:id/cancel — withdraw an open invitation.
+// Any KYC the candidate uploaded is deleted: it was collected for a review
+// that will no longer happen.
+operatorRouter.post(
+  "/driver-invites/:id/cancel",
+  asyncHandler(async (req, res) => {
+    const op = await motoOperator(req.auth!.sub);
+    const invite = await myInvite(op.id, req.params.id);
+    if (!(OPEN_INVITE_STATUSES as readonly string[]).includes(invite.status)) throw new HttpError(409, "This invitation is already closed");
+    await prisma.$transaction([
+      prisma.document.deleteMany({ where: { inviteId: invite.id } }),
+      prisma.driverInvite.update({ where: { id: invite.id }, data: { status: "CANCELLED", reviewedAt: new Date() } }),
+    ]);
+    await Promise.all(invite.documents.map((d) => deleteFile(d.filePath)));
+    if (invite.userId) await notify(invite.userId, "Invitation withdrawn", `${op.companyName} withdrew their driver invitation.`);
+    res.json({ cancelled: true });
   })
 );

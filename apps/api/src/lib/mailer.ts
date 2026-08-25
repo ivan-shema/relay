@@ -48,3 +48,24 @@ export function sendCredentialsEmail(to: { email: string; firstName: string }, o
   ].join("\n");
   void sendMail(to.email, "Your Relay account", text).catch((e) => console.error(`[mail] failed to send credentials to ${to.email}:`, e));
 }
+
+// "Come drive for X" for someone who isn't a Relay user yet: the link opens
+// registration with their email pre-filled; the invitation is waiting in their
+// dashboard right after. Fire-and-forget, like the credentials email.
+export function sendDriverInviteEmail(to: string, opts: { company: string; note?: string | null; token: string }): void {
+  const link = `${env.webOrigin}/auth?mode=register&invite=${encodeURIComponent(opts.token)}`;
+  const text = [
+    "Hi,",
+    "",
+    `${opts.company} would like you to drive for them on Relay.`,
+    ...(opts.note ? ["", `Message from ${opts.company}: ${opts.note}`] : []),
+    "",
+    "Create your Relay account with this email address, then submit your driving licence and national ID from your dashboard. Once the operator approves them, your driver console is unlocked:",
+    `  ${link}`,
+    "",
+    "If you weren't expecting this, you can ignore this email.",
+    "",
+    "— Relay",
+  ].join("\n");
+  void sendMail(to, `${opts.company} invited you to drive on Relay`, text).catch((e) => console.error(`[mail] failed to send driver invite to ${to}:`, e));
+}

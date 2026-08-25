@@ -1,11 +1,11 @@
 import { Router } from "express";
-import { topUpSchema, savedPlaceSchema, updateProfileSchema, changePasswordSchema, MODE_META } from "@relay/shared";
+import { topUpSchema, savedPlaceSchema, updateProfileSchema, changePasswordSchema, driverKycSchema, MODE_META } from "@relay/shared";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
-import { avatarUpload } from "../lib/uploads";
+import { avatarUpload, upload } from "../lib/uploads";
 import { storeFile, deleteFile, fromMulter, publicUrl } from "../lib/storage";
 import { hashPassword, verifyPassword } from "../lib/auth";
 import { parsePage, paged } from "../lib/pagination";
@@ -13,6 +13,8 @@ import { paypackEnabled, normalizeMomoNumber, requestCashin, fetchTransferOutcom
 import { settleWalletTopup } from "../lib/settlement";
 import { verifyAccessToken } from "../lib/auth";
 import { subscribe } from "../lib/realtime";
+import { fullNameOf } from "../lib/mappers";
+import { notify } from "../lib/notify";
 import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
 
 export const meRouter = Router();
@@ -512,5 +514,129 @@ meRouter.delete(
     const updated = await prisma.user.update({ where: { id: user.id }, data: { avatarKey: null } });
     await deleteFile(user.avatarKey);
     res.json(toAuthUser(updated));
+  })
+);
+
+
+/* -------- Driver invitations (the invitee's side) --------
+   An invitation follows an email address. It is linked to the account the
+   first time that user looks at their invitations — which covers both "was
+   already registered" and "registered after getting the email". */
+
+async function linkInvitesTo(user: { id: string; email: string }): Promise<void> {
+  await prisma.driverInvite.updateMany({ where: { email: user.email.toLowerCase(), userId: null }, data: { userId: user.id } });
+}
+
+// GET /me/driver-invites — open invitations plus recently approved ones (so
+// the dashboard can say "you're a driver now — open your console").
+meRouter.get(
+  "/driver-invites",
+  asyncHandler(async (req, res) => {
+    const me = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
+    if (!me) throw new HttpError(404, "User not found");
+    await linkInvitesTo(me);
+    const invites = await prisma.driverInvite.findMany({
+      where: {
+        userId: me.id,
+        OR: [{ status: { in: ["INVITED", "SUBMITTED", "REJECTED"] } }, { status: "APPROVED", reviewedAt: { gte: new Date(Date.now() - 7 * 864e5) } }],
+      },
+      include: { operator: true, documents: true },
+      orderBy: { invitedAt: "desc" },
+    });
+    res.json(
+      invites.map((i) => ({
+        id: i.id,
+        company: i.operator.companyName,
+        note: i.note,
+        status: i.status,
+        rejectionReason: i.rejectionReason,
+        licenseNumber: i.licenseNumber,
+        nationalId: i.nationalId,
+        invitedAt: i.invitedAt.toISOString(),
+        submittedAt: i.submittedAt?.toISOString() ?? null,
+        documents: i.documents.map((d) => ({ id: d.id, kind: d.kind, fileName: d.fileName, mimeType: d.mimeType })),
+      }))
+    );
+  })
+);
+
+// POST /me/driver-invites/:id/submit (multipart) — licence + ID numbers and
+// the two documents. First submission needs both files; a resubmission after
+// a rejection keeps whatever wasn't re-uploaded.
+meRouter.post(
+  "/driver-invites/:id/submit",
+  upload.fields([
+    { name: "idDocument", maxCount: 1 },
+    { name: "licenseDocument", maxCount: 1 },
+  ]),
+  asyncHandler(async (req, res) => {
+    const me = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
+    if (!me) throw new HttpError(404, "User not found");
+    await linkInvitesTo(me);
+    const invite = await prisma.driverInvite.findFirst({ where: { id: req.params.id, userId: me.id }, include: { documents: true, operator: true } });
+    if (!invite) throw new HttpError(404, "Invitation not found");
+    if (invite.status !== "INVITED" && invite.status !== "REJECTED") throw new HttpError(409, "This invitation is not open for submission");
+    const { licenseNumber, idNumber } = driverKycSchema.parse(req.body);
+
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    const uploads = [
+      files?.idDocument?.[0] && { kind: "NATIONAL_ID" as const, file: files.idDocument[0] },
+      files?.licenseDocument?.[0] && { kind: "DRIVING_LICENSE" as const, file: files.licenseDocument[0] },
+    ].filter((u): u is { kind: "NATIONAL_ID" | "DRIVING_LICENSE"; file: Express.Multer.File } => !!u);
+    const have = new Set(invite.documents.map((d) => d.kind));
+    for (const u of uploads) have.add(u.kind);
+    if (!have.has("NATIONAL_ID") || !have.has("DRIVING_LICENSE")) {
+      throw new HttpError(400, "Upload both your national ID and your driving licence");
+    }
+
+    const stored = await Promise.all(
+      uploads.map(async (u) => ({
+        kind: u.kind,
+        fileName: u.file.originalname,
+        filePath: await storeFile(fromMulter(u.file), { folder: "kyc/drivers", visibility: "private" }),
+        mimeType: u.file.mimetype,
+        size: u.file.size,
+      }))
+    );
+    const replaced = invite.documents.filter((d) => stored.some((s) => s.kind === d.kind));
+    await prisma
+      .$transaction(async (tx) => {
+        if (replaced.length) await tx.document.deleteMany({ where: { id: { in: replaced.map((d) => d.id) } } });
+        if (stored.length) await tx.document.createMany({ data: stored.map((s) => ({ ...s, inviteId: invite.id })) });
+        await tx.driverInvite.update({
+          where: { id: invite.id },
+          data: { licenseNumber, nationalId: idNumber, status: "SUBMITTED", submittedAt: new Date(), rejectionReason: null },
+        });
+      })
+      .catch(async (e: unknown) => {
+        await Promise.all(stored.map((s) => deleteFile(s.filePath)));
+        throw e;
+      });
+    await Promise.all(replaced.map((d) => deleteFile(d.filePath)));
+
+    if (invite.operator.ownerUserId) {
+      await notify(invite.operator.ownerUserId, "Driver documents submitted", `${fullNameOf(me)} submitted their driving licence and national ID — review them under Drivers → Invitations.`);
+    }
+    res.json({ submitted: true });
+  })
+);
+
+// POST /me/driver-invites/:id/decline
+meRouter.post(
+  "/driver-invites/:id/decline",
+  asyncHandler(async (req, res) => {
+    const me = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
+    if (!me) throw new HttpError(404, "User not found");
+    await linkInvitesTo(me);
+    const invite = await prisma.driverInvite.findFirst({ where: { id: req.params.id, userId: me.id }, include: { documents: true, operator: true } });
+    if (!invite) throw new HttpError(404, "Invitation not found");
+    if (invite.status !== "INVITED" && invite.status !== "REJECTED" && invite.status !== "SUBMITTED") throw new HttpError(409, "This invitation is already closed");
+    await prisma.$transaction([
+      prisma.document.deleteMany({ where: { inviteId: invite.id } }),
+      prisma.driverInvite.update({ where: { id: invite.id }, data: { status: "DECLINED", reviewedAt: new Date() } }),
+    ]);
+    await Promise.all(invite.documents.map((d) => deleteFile(d.filePath)));
+    if (invite.operator.ownerUserId) await notify(invite.operator.ownerUserId, "Driver invitation declined", `${fullNameOf(me)} declined your invitation to drive.`);
+    res.json({ declined: true });
   })
 );
