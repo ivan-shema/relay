@@ -2063,8 +2063,8 @@ function WalletTab({ insights }: { insights?: Insights | null }) {
           <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 20, padding: 20 }}>
             <div style={{ fontSize: 11.5, fontWeight: 800, color: "#a39a8d", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 15 }}>Payment methods</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <PayMethodRow glyph="M" bg="#ffd400" ink="#1b1714" name="MTN MoMo" sub="•••• 4821" badge="Default" />
-              <PayMethodRow glyph="◈" bg="#1b1714" ink="#ff6a1a" name="Relay Wallet" sub={data ? formatRWF(data.balance) : "—"} />
+              <PayMethodRow glyph="M" bg="#ffd400" ink="#1b1714" name="MTN MoMo or Airtel Money" sub="•••• 4821" badge="Default" />
+              {/* <PayMethodRow glyph="◈" bg="#1b1714" ink="#ff6a1a" name="Relay Wallet" sub={data ? formatRWF(data.balance) : "—"} /> */}
             </div>
           </div>
 
