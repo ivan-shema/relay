@@ -67,8 +67,10 @@ export default function PassengerApp() {
     if (user) loadOperatorStatus();
   }, [user, loadOperatorStatus]);
 
-  const [origin, setOrigin] = useState("Kabeza");
-  const [dest, setDest] = useState("Central Market");
+  // Empty origin/destination means "no filter" — passengers see every live
+  // trip until they narrow it down, rather than a pre-picked route.
+  const [origin, setOrigin] = useState("");
+  const [dest, setDest] = useState("");
 
   const [trips, setTrips] = useState<TripSummary[]>([]);
   const [tripsLoading, setTripsLoading] = useState(false);
@@ -323,6 +325,13 @@ export default function PassengerApp() {
 }
 
 /* ============ HOME ============ */
+// Display copy for an unset origin/destination — the search itself is simply unfiltered.
+const ANY_ORIGIN = "Anywhere";
+const ANY_DEST = "Any destination";
+function routeLabel(origin: string, dest: string): string {
+  return origin || dest ? `${origin || ANY_ORIGIN} → ${dest || ANY_DEST}` : "All routes";
+}
+
 const MODE_CARDS = [
   { code: "B", label: "Buses", color: "#2f6bff", bg: "#e9f0ff", from: "RWF 700" },
   { code: "M", label: "Moto-taxis", color: "#ff6a1a", bg: "#fff0e6", from: "RWF 1,000" },
@@ -413,7 +422,7 @@ function HomeScreen({
               <div style={{ width: 11, height: 11, borderRadius: "50%", border: "3px solid #ff6a1a", flex: "none" }} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 700, letterSpacing: ".04em" }}>FROM</div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>{origin}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: origin ? "#1b1714" : "#a39a8d" }}>{origin || ANY_ORIGIN}</div>
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", padding: "0 16px" }}>
@@ -424,7 +433,7 @@ function HomeScreen({
               <div style={{ width: 11, height: 11, borderRadius: 3, background: "#1b1714", flex: "none" }} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 700, letterSpacing: ".04em" }}>TO</div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>{dest}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: dest ? "#1b1714" : "#a39a8d" }}>{dest || ANY_DEST}</div>
               </div>
               <div style={{ width: 34, height: 34, borderRadius: 10, background: "#ff6a1a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flex: "none" }}>→</div>
             </div>
@@ -535,7 +544,7 @@ function HomeScreen({
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div>
                 <div style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 700, letterSpacing: "-.3px" }}>Departing now</div>
-                <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600 }}>{origin} → {dest}</div>
+                <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600 }}>{routeLabel(origin, dest)}</div>
               </div>
               <button onClick={onSeeTrips} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>See all →</button>
             </div>
@@ -550,7 +559,7 @@ function HomeScreen({
                   <div className="rel-skel" style={{ width: 44, height: 12, borderRadius: 5 }} />
                 </div>
               ))}
-              {!liveLoading && live.length === 0 && <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, padding: "6px 0" }}>No live trips on this route right now.</div>}
+              {!liveLoading && live.length === 0 && <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, padding: "6px 0" }}>{origin || dest ? "No live trips on this route right now." : "No live trips right now."}</div>}
               {!liveLoading && live.slice(0, 4).map((t) => (
                 <button key={t.id} disabled={busy || t.seatsLeft === 0} onClick={() => onBook(t)} style={{ textAlign: "left", background: t.seatsLeft === 0 ? "#faf8f4" : "#fff", border: "1px solid #e9e3d8", borderRadius: 15, padding: "12px 13px", cursor: busy ? "default" : "pointer", opacity: t.seatsLeft === 0 ? 0.6 : 1, display: "flex", alignItems: "center", gap: 11 }}>
                   <div style={{ display: "flex", gap: 4 }}>
@@ -690,13 +699,14 @@ function SearchScreen({
     <div style={{ padding: "8px 22px 28px" }} className="rel-up">
       <ScreenHeader onBack={onBack} title="Set your trip" />
       <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 8, marginBottom: 16 }}>
-        <FromToRow dotBorder value={origin} onChange={setOrigin} label="FROM" />
+        <FromToRow dotBorder value={origin} onChange={setOrigin} label="FROM" placeholder={ANY_ORIGIN} />
         <div style={{ display: "flex", alignItems: "center", padding: "0 14px" }}>
           <div style={{ flex: 1, height: 1, background: "#e9e3d8" }} />
           <button onClick={() => { const o = origin; setOrigin(dest); setDest(o); }} style={{ width: 32, height: 32, borderRadius: 9, border: "1px solid #e9e3d8", background: "#f4f1ea", cursor: "pointer", fontSize: 14 }}>⇅</button>
         </div>
-        <FromToRow value={dest} onChange={setDest} label="TO" highlight />
+        <FromToRow value={dest} onChange={setDest} label="TO" highlight placeholder={ANY_DEST} />
       </div>
+      <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, margin: "-6px 4px 14px" }}>Leave either blank to see every trip going that way.</div>
       <SectionLabel>Suggestions</SectionLabel>
       <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, overflow: "hidden", marginBottom: 16 }}>
         {suggest.map((g) => (
@@ -710,17 +720,22 @@ function SearchScreen({
         ))}
       </div>
       <PrimaryBtn onClick={onDone}>See available trips</PrimaryBtn>
+      {(origin || dest) && (
+        <button onClick={() => { setOrigin(""); setDest(""); }} style={{ display: "block", width: "100%", marginTop: 10, background: "none", border: "none", color: "#8c8378", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+          Clear and show all trips
+        </button>
+      )}
     </div>
   );
 }
 
-function FromToRow({ value, onChange, label, dotBorder, highlight }: { value: string; onChange: (v: string) => void; label: string; dotBorder?: boolean; highlight?: boolean }) {
+function FromToRow({ value, onChange, label, dotBorder, highlight, placeholder }: { value: string; onChange: (v: string) => void; label: string; dotBorder?: boolean; highlight?: boolean; placeholder?: string }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: highlight ? "#fff6f0" : "transparent", borderRadius: 12 }}>
       <div style={{ width: 11, height: 11, borderRadius: dotBorder ? "50%" : 3, border: dotBorder ? "3px solid #ff6a1a" : "none", background: dotBorder ? "transparent" : "#1b1714", flex: "none" }} />
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 11, color: highlight ? "#ff6a1a" : "#8c8378", fontWeight: highlight ? 700 : 600 }}>{label}</div>
-        <input value={value} onChange={(e) => onChange(e.target.value)} style={{ border: "none", outline: "none", background: "transparent", fontSize: 15, fontWeight: 700, width: "100%", fontFamily: "'Manrope', sans-serif", color: "#1b1714" }} />
+        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ border: "none", outline: "none", background: "transparent", fontSize: 15, fontWeight: 700, width: "100%", fontFamily: "'Manrope', sans-serif", color: "#1b1714" }} />
       </div>
     </div>
   );
@@ -753,10 +768,10 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
             <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" }}>Available trips</div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 5, flexWrap: "wrap" }}>
               <span style={{ width: 10, height: 10, borderRadius: "50%", border: "3px solid #ff6a1a" }} />
-              <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.4px" }}>{origin}</span>
+              <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.4px", color: origin ? "#1b1714" : "#a39a8d" }}>{origin || ANY_ORIGIN}</span>
               <span style={{ color: "#cbc3b6", fontSize: 16 }}>→</span>
               <span style={{ width: 10, height: 10, borderRadius: 3, background: "#1b1714" }} />
-              <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.4px" }}>{dest}</span>
+              <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.4px", color: dest ? "#1b1714" : "#a39a8d" }}>{dest || ANY_DEST}</span>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: loadingTrips ? "#f4f1ea" : "#eef5ff", border: `1px solid ${loadingTrips ? "#e9e3d8" : "#d8e6ff"}`, borderRadius: 30, padding: "8px 14px" }}>
@@ -769,7 +784,7 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
       </div>
       <div className="rel-trip-grid">
         {loadingTrips && [0, 1, 2].map((i) => <TripCardSkeleton key={i} />)}
-        {!loadingTrips && trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>No live trips on this route right now.</div>}
+        {!loadingTrips && trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>{origin || dest ? "No live trips on this route right now." : "No live trips right now — check back soon."}</div>}
         {!loadingTrips && trips.map((t) => (
           <button key={t.id} disabled={busy || t.seatsLeft === 0} onClick={() => onBook(t)} style={{ textAlign: "left", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 18, cursor: busy ? "default" : "pointer", opacity: t.seatsLeft === 0 ? 0.55 : 1 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 11 }}>
@@ -820,6 +835,10 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
 
   const save = async () => {
     if (!requireAuth()) return;
+    if (!origin.trim() || !dest.trim()) {
+      setError("Set where you're going first — Relay needs a from and a to in order to watch for matches.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -843,12 +862,12 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
       <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 8, marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px" }}>
           <div style={{ width: 11, height: 11, borderRadius: "50%", border: "3px solid #ff6a1a", flex: "none" }} />
-          <div style={{ flex: 1 }}><div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600 }}>FROM</div><div style={{ fontSize: 15, fontWeight: 700 }}>{origin}</div></div>
+          <div style={{ flex: 1 }}><div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600 }}>FROM</div><div style={{ fontSize: 15, fontWeight: 700, color: origin ? "#1b1714" : "#a39a8d" }}>{origin || "Not set"}</div></div>
         </div>
         <div style={{ height: 1, background: "#e9e3d8", margin: "0 14px" }} />
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px" }}>
           <div style={{ width: 11, height: 11, borderRadius: 3, background: "#1b1714", flex: "none" }} />
-          <div style={{ flex: 1 }}><div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600 }}>TO</div><div style={{ fontSize: 15, fontWeight: 700 }}>{dest}</div></div>
+          <div style={{ flex: 1 }}><div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600 }}>TO</div><div style={{ fontSize: 15, fontWeight: 700, color: dest ? "#1b1714" : "#a39a8d" }}>{dest || "Not set"}</div></div>
         </div>
       </div>
       <SectionLabel>When</SectionLabel>
@@ -1115,9 +1134,9 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
             </div>
           )}
           <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 8, marginBottom: 12 }}>
-            <FromToRow dotBorder value={from} onChange={setFrom} label="PICK-UP" />
+            <FromToRow dotBorder value={from} onChange={setFrom} label="PICK-UP" placeholder="Where are you?" />
             <div style={{ height: 1, background: "#e9e3d8", margin: "0 14px" }} />
-            <FromToRow value={to} onChange={setTo} label="DESTINATION" highlight />
+            <FromToRow value={to} onChange={setTo} label="DESTINATION" highlight placeholder="Where to?" />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
             <input
