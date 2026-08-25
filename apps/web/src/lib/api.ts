@@ -7,6 +7,7 @@ import type {
   PaymentMethod,
   Place,
   TripSummary,
+  TripFilters,
   TrackingSnapshot,
   TicketSummary,
   Paginated,
@@ -187,12 +188,20 @@ export const api = {
   // places & trips
   places: (q?: string) => request<Place[]>(`/places${q ? `?q=${encodeURIComponent(q)}` : ""}`),
 
-  trips: (origin?: string, destination?: string) => {
+  // Unfiltered by default — every upcoming departure, paginated.
+  trips: (f: TripFilters = {}) => {
     const params = new URLSearchParams();
-    if (origin) params.set("origin", origin);
-    if (destination) params.set("destination", destination);
+    if (f.origin) params.set("origin", f.origin);
+    if (f.destination) params.set("destination", f.destination);
+    if (f.when && f.when !== "all") params.set("when", f.when);
+    if (f.from) params.set("from", f.from);
+    if (f.to) params.set("to", f.to);
+    if (f.mode) params.set("mode", f.mode);
+    if (f.available) params.set("available", "1");
+    if (f.page) params.set("page", String(f.page));
+    if (f.pageSize) params.set("pageSize", String(f.pageSize));
     const qs = params.toString();
-    return request<TripSummary[]>(`/trips${qs ? `?${qs}` : ""}`);
+    return request<Paginated<TripSummary>>(`/trips${qs ? `?${qs}` : ""}`);
   },
 
   trip: (id: string) => request<TripSummary>(`/trips/${id}`),

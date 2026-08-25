@@ -18,6 +18,7 @@ import { Avatar } from "@/components/avatar";
 import { useAuth } from "@/lib/auth-context";
 import { Pagination, FormModal } from "@/components/console";
 import { NotificationBell } from "@/components/notification-bell";
+import { TripFilterBar, DEFAULT_TRIP_QUERY, toTripFilters, tripCountLabel, emptyTripsCopy, type TripQuery } from "@/components/trip-filters";
 import { PeriodPicker, ExportButtons, downloadAuthed, exportReportPdf, rangeQuery, isRangeReady, fmtMoney, fmtReportDate, type ReportRangeValue } from "@/components/reports";
 
 const DISPLAY = "'Space Grotesk', sans-serif";
@@ -74,6 +75,9 @@ export default function PassengerApp() {
 
   const [trips, setTrips] = useState<TripSummary[]>([]);
   const [tripsLoading, setTripsLoading] = useState(false);
+  const [tripsTotal, setTripsTotal] = useState(0);
+  const [tripsPage, setTripsPage] = useState({ page: 1, totalPages: 1 });
+  const [tripQuery, setTripQuery] = useState<TripQuery>(DEFAULT_TRIP_QUERY);
   const [selected, setSelected] = useState<TripSummary | null>(null);
   const [booking, setBooking] = useState<BookingDetail | null>(null);
   const [trackPhase, setTrackPhase] = useState<"approaching" | "boarded">("approaching");
@@ -127,23 +131,39 @@ export default function PassengerApp() {
     return true;
   }, [user, router]);
 
-  // Accepts explicit origin/dest so callers (e.g. rebooking a past route) can
-  // search immediately without waiting on a state update to land first.
-  const loadTrips = useCallback(async (o?: string, d?: string) => {
+  // Accepts explicit origin/dest/query so callers (e.g. rebooking a past route,
+  // or a filter chip) can search immediately without waiting on a state update
+  // to land first. page > 1 appends to the current list ("Load more").
+  const loadTrips = useCallback(async (o?: string, d?: string, q?: TripQuery, page = 1) => {
     setError(null);
     setTripsLoading(true);
+    if (page === 1) setTrips([]);
     try {
-      setTrips(await api.trips(o ?? origin, d ?? dest));
+      const r = await api.trips(toTripFilters(q ?? tripQuery, o ?? origin, d ?? dest, page));
+      setTrips((prev) => (page > 1 ? [...prev, ...r.items] : r.items));
+      setTripsTotal(r.total);
+      setTripsPage({ page: r.page, totalPages: r.totalPages });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not load trips");
     } finally {
       setTripsLoading(false);
     }
-  }, [origin, dest]);
+  }, [origin, dest, tripQuery]);
 
   const goAvailable = useCallback(async () => {
     setScreen("available");
     await loadTrips();
+  }, [loadTrips]);
+
+  const changeTripQuery = useCallback((q: TripQuery) => {
+    setTripQuery(q);
+    loadTrips(undefined, undefined, q);
+  }, [loadTrips]);
+
+  const clearRoute = useCallback(() => {
+    setOrigin("");
+    setDest("");
+    loadTrips("", "");
   }, [loadTrips]);
 
   const rebookRoute = useCallback(
@@ -278,7 +298,22 @@ export default function PassengerApp() {
           </div>
         )}
         {tab === "plan" && screen === "available" && (
-          <AvailableScreen origin={origin} dest={dest} trips={trips} loadingTrips={tripsLoading} busy={busy} onBack={() => setScreen("home")} onBook={startBooking} />
+          <AvailableScreen
+            origin={origin}
+            dest={dest}
+            trips={trips}
+            total={tripsTotal}
+            hasMore={tripsPage.page < tripsPage.totalPages}
+            query={tripQuery}
+            onQueryChange={changeTripQuery}
+            onLoadMore={() => loadTrips(undefined, undefined, undefined, tripsPage.page + 1)}
+            onEditRoute={() => setScreen("search")}
+            onClearRoute={clearRoute}
+            loadingTrips={tripsLoading}
+            busy={busy}
+            onBack={() => setScreen("home")}
+            onBook={startBooking}
+          />
         )}
         {tab === "plan" && screen === "planAhead" && (
           <div className="rel-narrow">
@@ -377,6 +412,7 @@ function HomeScreen({
   const [planned, setPlanned] = useState<PlannedWatch[]>([]);
   const [places, setPlaces] = useState<SavedPlace[]>([]);
   const [live, setLive] = useState<TripSummary[]>([]);
+  const [liveTotal, setLiveTotal] = useState(0);
   const [liveLoading, setLiveLoading] = useState(true);
   const [rating, setRating] = useState(0);
 
@@ -386,7 +422,10 @@ function HomeScreen({
 
   useEffect(() => {
     setLiveLoading(true);
-    api.trips(origin, dest).then(setLive).catch(() => undefined).finally(() => setLiveLoading(false));
+    api.trips({ origin: origin || undefined, destination: dest || undefined, pageSize: 4 })
+      .then((r) => { setLive(r.items); setLiveTotal(r.total); })
+      .catch(() => undefined)
+      .finally(() => setLiveLoading(false));
     if (user) {
       reloadPlanned();
       api.savedPlaces().then(setPlaces).catch(() => undefined);
@@ -537,13 +576,13 @@ function HomeScreen({
             <HomeMapArt />
             <div style={{ position: "absolute", left: 14, top: 14, background: "rgba(255,255,255,.94)", borderRadius: 11, padding: "7px 12px", display: "flex", alignItems: "center", gap: 8, boxShadow: "0 4px 14px -6px rgba(0,0,0,.25)" }}>
               <span className="rel-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#1f9d6b" }} />
-              <span style={{ fontSize: 12, fontWeight: 700 }}>{liveLoading ? "Loading…" : `${live.length} live near you`}</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>{liveLoading ? "Loading…" : `${liveTotal} upcoming`}</span>
             </div>
           </div>
           <div style={{ padding: "18px 18px 20px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div>
-                <div style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 700, letterSpacing: "-.3px" }}>Departing now</div>
+                <div style={{ fontFamily: DISPLAY, fontSize: 17, fontWeight: 700, letterSpacing: "-.3px" }}>Departing soon</div>
                 <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600 }}>{routeLabel(origin, dest)}</div>
               </div>
               <button onClick={onSeeTrips} style={{ background: "none", border: "none", color: "#ff6a1a", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>See all →</button>
@@ -559,8 +598,8 @@ function HomeScreen({
                   <div className="rel-skel" style={{ width: 44, height: 12, borderRadius: 5 }} />
                 </div>
               ))}
-              {!liveLoading && live.length === 0 && <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, padding: "6px 0" }}>{origin || dest ? "No live trips on this route right now." : "No live trips right now."}</div>}
-              {!liveLoading && live.slice(0, 4).map((t) => (
+              {!liveLoading && live.length === 0 && <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, padding: "6px 0" }}>{origin || dest ? "No upcoming trips on this route yet." : "No upcoming trips yet."}</div>}
+              {!liveLoading && live.map((t) => (
                 <button key={t.id} disabled={busy || t.seatsLeft === 0} onClick={() => onBook(t)} style={{ textAlign: "left", background: t.seatsLeft === 0 ? "#faf8f4" : "#fff", border: "1px solid #e9e3d8", borderRadius: 15, padding: "12px 13px", cursor: busy ? "default" : "pointer", opacity: t.seatsLeft === 0 ? 0.6 : 1, display: "flex", alignItems: "center", gap: 11 }}>
                   <div style={{ display: "flex", gap: 4 }}>
                     {t.legs.map((lg, i) => (
@@ -758,7 +797,24 @@ function TripCardSkeleton() {
 }
 
 /* ============ AVAILABLE ============ */
-function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBook }: { origin: string; dest: string; trips: TripSummary[]; loadingTrips: boolean; busy: boolean; onBack: () => void; onBook: (t: TripSummary) => void }) {
+function AvailableScreen({ origin, dest, trips, total, hasMore, query, onQueryChange, onLoadMore, onEditRoute, onClearRoute, loadingTrips, busy, onBack, onBook }: {
+  origin: string;
+  dest: string;
+  trips: TripSummary[];
+  total: number;
+  hasMore: boolean;
+  query: TripQuery;
+  onQueryChange: (q: TripQuery) => void;
+  onLoadMore: () => void;
+  onEditRoute: () => void;
+  onClearRoute: () => void;
+  loadingTrips: boolean;
+  busy: boolean;
+  onBack: () => void;
+  onBook: (t: TripSummary) => void;
+}) {
+  const routeSet = Boolean(origin || dest);
+  const initialLoad = loadingTrips && trips.length === 0;
   return (
     <div className="rel-up rel-wide">
       <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18 }}>
@@ -774,18 +830,31 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
               <span style={{ fontFamily: DISPLAY, fontSize: 21, fontWeight: 700, letterSpacing: "-.4px", color: dest ? "#1b1714" : "#a39a8d" }}>{dest || ANY_DEST}</span>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: loadingTrips ? "#f4f1ea" : "#eef5ff", border: `1px solid ${loadingTrips ? "#e9e3d8" : "#d8e6ff"}`, borderRadius: 30, padding: "8px 14px" }}>
-            <span className="rel-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: loadingTrips ? "#a39a8d" : "#2f6bff" }} />
-            <span style={{ fontSize: 12, color: loadingTrips ? "#8c8378" : "#2f6bff", fontWeight: 700 }}>
-              {loadingTrips ? "Searching…" : `Live · ${trips.length} ${trips.length === 1 ? "trip" : "trips"}`}
-            </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={onEditRoute} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 30, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif", color: "#1b1714" }}>
+              {routeSet ? "Edit route" : "Set a route"}
+            </button>
+            {routeSet && (
+              <button onClick={onClearRoute} style={{ background: "none", border: "none", color: "#8c8378", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+                Clear
+              </button>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, background: initialLoad ? "#f4f1ea" : "#eef5ff", border: `1px solid ${initialLoad ? "#e9e3d8" : "#d8e6ff"}`, borderRadius: 30, padding: "8px 14px" }}>
+              <span className="rel-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: initialLoad ? "#a39a8d" : "#2f6bff" }} />
+              <span style={{ fontSize: 12, color: initialLoad ? "#8c8378" : "#2f6bff", fontWeight: 700 }}>
+                {initialLoad ? "Searching…" : tripCountLabel(query, total)}
+              </span>
+            </div>
           </div>
         </div>
       </div>
+      <div style={{ marginBottom: 16 }}>
+        <TripFilterBar value={query} onChange={onQueryChange} />
+      </div>
       <div className="rel-trip-grid">
-        {loadingTrips && [0, 1, 2].map((i) => <TripCardSkeleton key={i} />)}
-        {!loadingTrips && trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>{origin || dest ? "No live trips on this route right now." : "No live trips right now — check back soon."}</div>}
-        {!loadingTrips && trips.map((t) => (
+        {initialLoad && [0, 1, 2].map((i) => <TripCardSkeleton key={i} />)}
+        {!loadingTrips && trips.length === 0 && <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, padding: "8px 0" }}>{emptyTripsCopy(query, routeSet)}</div>}
+        {trips.map((t) => (
           <button key={t.id} disabled={busy || t.seatsLeft === 0} onClick={() => onBook(t)} style={{ textAlign: "left", background: "#fff", border: "1px solid #e9e3d8", borderRadius: 18, padding: 18, cursor: busy ? "default" : "pointer", opacity: t.seatsLeft === 0 ? 0.55 : 1 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 11 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -800,7 +869,7 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <div>
                 <div style={{ fontFamily: DISPLAY, fontSize: 20, fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1 }}>{fmtTime(t.departAt)}</div>
-                <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>{t.departsInLabel}</div>
+                <div style={{ fontSize: 11, color: "#8c8378", fontWeight: 600, marginTop: 3 }}>{fmtDay(t.departAt)} · {t.departsInLabel}</div>
               </div>
               <span style={{ color: "#cbc3b6", fontSize: 14 }}>→</span>
               <div>
@@ -820,6 +889,13 @@ function AvailableScreen({ origin, dest, trips, loadingTrips, busy, onBack, onBo
           </button>
         ))}
       </div>
+      {hasMore && (
+        <div style={{ textAlign: "center", marginTop: 18 }}>
+          <button onClick={onLoadMore} disabled={loadingTrips} style={{ background: "#fff", border: "1px solid #e3ddd1", borderRadius: 14, padding: "13px 26px", fontSize: 13.5, fontWeight: 700, cursor: loadingTrips ? "default" : "pointer", fontFamily: "'Manrope', sans-serif", color: "#1b1714" }}>
+            {loadingTrips ? "Loading…" : `Load more (${total - trips.length} left)`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -899,6 +975,17 @@ function PlanAheadScreen({ origin, dest, requireAuth, onBack, onDone }: { origin
 
 /* ============ MOTO HAIL ============ */
 const RIDE_ACTIVE: RideStatus[] = ["OPEN", "ACCEPTED", "CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"];
+
+// "Today" / "Tomorrow" / "Thu 28 Aug" — computed in the browser's timezone.
+function fmtDay(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - today.getTime()) / 86_400_000);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Tomorrow";
+  return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+}
 
 function fmtClock(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });

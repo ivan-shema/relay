@@ -160,6 +160,23 @@ export interface ApiError {
   details?: unknown;
 }
 
+// ---------- Trip search ----------
+export type TripWhen = "all" | "live" | "today" | "tomorrow";
+
+// Query for GET /trips. Everything is optional — no filters means every
+// upcoming departure.
+export interface TripFilters {
+  origin?: string;
+  destination?: string;
+  when?: TripWhen; // "live" = boarding/running, or departing within the hour
+  from?: string; // ISO lower bound on departAt (client-computed day window)
+  to?: string; // ISO upper bound on departAt
+  mode?: TransportMode; // trips with at least one leg in this mode
+  available?: boolean; // only trips with seats left
+  page?: number;
+  pageSize?: number;
+}
+
 // Standard envelope for paginated list endpoints.
 export interface Paginated<T> {
   items: T[];

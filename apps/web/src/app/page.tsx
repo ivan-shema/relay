@@ -15,7 +15,7 @@ const modeCards = [
 ];
 
 const steps = [
-  { n: "1", title: "Browse live trips", body: "See what every operator is running right now — real seats, fares and arrival times." },
+  { n: "1", title: "Browse trips", body: "See every departure from every operator — real seats, fares and arrival times." },
   { n: "2", title: "Book & pay in seconds", body: "Reserve your seat and pay contactless with Mobile Money or your Relay wallet." },
   { n: "3", title: "Track to your seat", body: "Follow your vehicle live on the map until you board, then all the way to your stop." },
 ];
@@ -28,7 +28,7 @@ const realtime = [
 ];
 
 const faqs = [
-  { q: "Do I need an account to see trips?", a: "No — browse live routes, fares and arrival times freely. You only sign in when you're ready to book a seat." },
+  { q: "Do I need an account to see trips?", a: "No — browse routes, fares and arrival times freely. You only sign in when you're ready to book a seat." },
   { q: "How do I pay?", a: "Pay contactless with Mobile Money, your Relay wallet or a QR code — all from the booking screen." },
   { q: "Can I plan a trip for later?", a: "Yes. Set a trip in Plan ahead and Relay watches for a matching operator departure, then alerts you." },
   { q: "I run a transport business — how do I join?", a: "Apply as an operator partner with your RDB business certificate and ID. Once our team verifies your business, you get a console to list your fleet, publish schedules riders can book, and receive daily payouts." },
@@ -61,7 +61,7 @@ export default function LandingPage() {
           </p>
           <div style={{ display: "flex", gap: 13, marginBottom: 18, flexWrap: "wrap" }}>
             <button onClick={browse} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: "17px 28px", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 14px 30px -12px rgba(255,106,26,.7)" }}>
-              Browse live trips
+              Browse trips
             </button>
             <button onClick={() => goAuth("register")} style={{ background: "#fff", color: "#1b1714", border: "1px solid #e3ddd1", borderRadius: 15, padding: "17px 28px", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>
               Create account
@@ -234,7 +234,7 @@ export default function LandingPage() {
           <h2 className="rel-section-h2" style={{ fontFamily: DISPLAY, fontSize: 36, fontWeight: 700, letterSpacing: "-1.1px", margin: "0 0 12px" }}>Your next ride is already running.</h2>
           <p style={{ fontSize: 16, color: "#6b6258", margin: "0 0 24px" }}>See what&apos;s departing near you right now.</p>
           <div style={{ display: "flex", gap: 13, justifyContent: "center", flexWrap: "wrap" }}>
-            <button onClick={browse} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: "17px 30px", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 14px 30px -12px rgba(255,106,26,.7)" }}>Browse live trips</button>
+            <button onClick={browse} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 15, padding: "17px 30px", fontSize: 16, fontWeight: 700, cursor: "pointer", boxShadow: "0 14px 30px -12px rgba(255,106,26,.7)" }}>Browse trips</button>
             <button onClick={() => goAuth("register")} style={{ background: "#fff", color: "#1b1714", border: "1px solid #e3ddd1", borderRadius: 15, padding: "17px 30px", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>Create account</button>
           </div>
         </div>

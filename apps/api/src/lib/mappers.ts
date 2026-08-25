@@ -25,7 +25,9 @@ function relativeLabel(target: Date): string {
   if (diffMin < 60) return `in ${diffMin} min`;
   const h = Math.floor(diffMin / 60);
   const m = diffMin % 60;
-  return m ? `in ${h}h ${m}m` : `in ${h}h`;
+  if (h < 24) return m ? `in ${h}h ${m}m` : `in ${h}h`;
+  const d = Math.round(h / 24);
+  return `in ${d} ${d === 1 ? "day" : "days"}`;
 }
 
 function durationLabel(depart: Date, arrive: Date): string {
