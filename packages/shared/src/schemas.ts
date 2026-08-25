@@ -298,3 +298,9 @@ export const assignDepartureSchema = z.object({
   driverId: z.string().optional(),
 });
 export type AssignDepartureInput = z.infer<typeof assignDepartureSchema>;
+
+// Operator: assign (or clear) the driver of a vehicle — the vehicle-side twin
+// of assignVehicleSchema.
+export const assignDriverSchema = z.object({
+  driverId: z.string().nullable().optional(),
+});

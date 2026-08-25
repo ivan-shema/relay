@@ -10,6 +10,7 @@ import {
   assignTripSchema,
   operatorOnboardingSchema,
   assignDepartureSchema,
+  assignDriverSchema,
   driverInviteSchema,
   rejectDriverInviteSchema,
 } from "@relay/shared";
@@ -261,6 +262,7 @@ operatorRouter.get(
           model: v.model,
           capacity: v.capacity,
           driver: v.driver ? fullNameOf(v.driver.user) : "Unassigned",
+          driverId: v.driverId,
           util: v.status === "ACTIVE" ? "77%" : v.status === "IDLE" ? "0%" : "—",
           status: v.status,
         })),
@@ -575,6 +577,7 @@ operatorRouter.get(
           name: fullNameOf(d.user),
           phone: d.user.phone,
           vehicle: d.vehicle ? `${d.vehicle.type} · ${d.vehicle.plateNumber}` : "Unassigned",
+          vehicleId: d.vehicle?.id ?? null,
           trips,
           rating: d.ratingAvg,
           revenue: dec(paid._sum.amount ?? new Prisma.Decimal(0)),
@@ -674,7 +677,7 @@ operatorRouter.post(
 
     await prisma.$transaction(async (tx) => {
       // detach any current vehicle of this driver
-      if (d.vehicle) await tx.vehicle.update({ where: { id: d.vehicle.id }, data: { driverId: null } });
+      if (d.vehicle) await tx.vehicle.update({ where: { id: d.vehicle.id }, data: { driverId: null, status: "IDLE" } });
       if (vehicleId) {
         const v = await tx.vehicle.findFirst({ where: { id: vehicleId, operatorId: opId } });
         if (!v) throw new HttpError(400, "Vehicle not in your fleet");
@@ -1438,5 +1441,31 @@ operatorRouter.post(
     await Promise.all(invite.documents.map((d) => deleteFile(d.filePath)));
     if (invite.userId) await notify(invite.userId, "Invitation withdrawn", `${op.companyName} withdrew their driver invitation.`);
     res.json({ cancelled: true });
+  })
+);
+
+// POST /operator/vehicles/:id/assign-driver { driverId | null } — the same
+// assignment as /drivers/:id/assign-vehicle, from the vehicle's side. A driver
+// holds one vehicle and a vehicle one driver, so both sides are detached first.
+operatorRouter.post(
+  "/vehicles/:id/assign-driver",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const { driverId } = assignDriverSchema.parse(req.body);
+    const v = await prisma.vehicle.findFirst({ where: { id: req.params.id, operatorId: opId } });
+    if (!v) throw new HttpError(404, "Vehicle not found");
+
+    await prisma.$transaction(async (tx) => {
+      if (!driverId) {
+        await tx.vehicle.update({ where: { id: v.id }, data: { driverId: null, status: "IDLE" } });
+        return;
+      }
+      const d = await tx.driver.findFirst({ where: { id: driverId, operatorId: opId }, include: { vehicle: true } });
+      if (!d) throw new HttpError(400, "That driver is not in your fleet");
+      if (d.suspended) throw new HttpError(409, "That driver is suspended");
+      if (d.vehicle && d.vehicle.id !== v.id) await tx.vehicle.update({ where: { id: d.vehicle.id }, data: { driverId: null, status: "IDLE" } });
+      await tx.vehicle.update({ where: { id: v.id }, data: { driverId: d.id, status: "ACTIVE" } });
+    });
+    res.json({ ok: true });
   })
 );

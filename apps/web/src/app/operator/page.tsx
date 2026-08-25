@@ -29,6 +29,7 @@ import {
   assignVehicleSchema,
   assignTripSchema,
   assignDepartureSchema,
+  assignDriverSchema,
   type CreateVehicleInput,
   type CreateRouteInput,
   type CreateDepartureInput,
@@ -291,6 +292,10 @@ function LiveTab() {
 function FleetTab() {
   const { data, page, setPage, reloadFirst } = usePaged<OperatorVehicle>(useCallback((pg) => api.operatorVehicles(pg), []));
   const [modal, setModal] = useState(false);
+  const [assignFor, setAssignFor] = useState<OperatorVehicle | null>(null);
+  const [lookups, setLookups] = useState<ScheduleLookups>({ vehicles: [], drivers: [] });
+  const loadLookups = useCallback(() => { api.operatorScheduleLookups().then(setLookups).catch(() => undefined); }, []);
+  useEffect(() => { loadLookups(); }, [loadLookups]);
   if (!data) return <Loading />;
   return (
     <Card>
@@ -309,10 +314,21 @@ function FleetTab() {
           onClose={() => setModal(false)}
         />
       )}
+      {assignFor && (
+        <FormModal
+          title={`Driver for ${assignFor.plate}`}
+          submitLabel="Save assignment"
+          schema={assignDriverSchema}
+          defaultValues={{ driverId: assignFor.driverId ?? "" }}
+          fields={[{ name: "driverId", label: "Driver", type: "select", options: [{ value: "", label: "— Unassigned —" }, ...lookups.drivers.map(({ value, label }) => ({ value, label }))] }]}
+          onSubmit={async (v) => { await api.operatorAssignDriverToVehicle(assignFor.id, (v.driverId as string) || null); reloadFirst(); loadLookups(); }}
+          onClose={() => setAssignFor(null)}
+        />
+      )}
       <CardTitle right={<AccentButton onClick={() => setModal(true)}>+ Add vehicle</AccentButton>}>Fleet · {data.total} vehicles</CardTitle>
-      <TableHead cols={["Plate", "Type", "Model", "Cap", "Driver", "Util", "Status"]} template="1.1fr .7fr 1.2fr .5fr 1fr .6fr .9fr" />
+      <TableHead cols={["Plate", "Type", "Model", "Cap", "Driver", "Util", "Status", ""]} template="1.1fr .7fr 1.2fr .5fr 1fr .6fr .9fr .7fr" />
       {data.items.map((v) => (
-        <Row key={v.id} template="1.1fr .7fr 1.2fr .5fr 1fr .6fr .9fr">
+        <Row key={v.id} template="1.1fr .7fr 1.2fr .5fr 1fr .6fr .9fr .7fr">
           <span style={{ fontFamily: MONO, fontWeight: 700 }}>{v.plate}</span>
           <span style={{ color: "#6b6258" }}>{v.type}</span>
           <span style={{ color: "#6b6258" }}>{v.model}</span>
@@ -320,6 +336,9 @@ function FleetTab() {
           <span style={{ fontWeight: 600 }}>{v.driver}</span>
           <span style={{ fontFamily: MONO, color: "#8c8378" }}>{v.util}</span>
           <span style={{ textAlign: "right" }}><StatusPill status={v.status} /></span>
+          <span style={{ textAlign: "right" }}>
+            <button onClick={() => setAssignFor(v)} style={{ background: v.driverId ? "#fff" : "#ff6a1a", color: v.driverId ? "#1b1714" : "#fff", border: v.driverId ? "1px solid #e3ddd1" : "none", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>{v.driverId ? "Change" : "Assign"}</button>
+          </span>
         </Row>
       ))}
       <Pagination page={page} totalPages={data.totalPages} total={data.total} onPage={setPage} />
@@ -495,6 +514,10 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
   // Shown once after sending an invitation.
   const [sent, setSent] = useState<{ registered: boolean; email: string } | null>(null);
   const [inviteTick, setInviteTick] = useState(0);
+  const [assignFor, setAssignFor] = useState<OperatorDriverRow | null>(null);
+  const [fleet, setFleet] = useState<ScheduleLookups>({ vehicles: [], drivers: [] });
+  const loadFleet = useCallback(() => { api.operatorScheduleLookups().then(setFleet).catch(() => undefined); }, []);
+  useEffect(() => { loadFleet(); }, [loadFleet]);
   const [action, setAction] = useState<"vehicle" | "trip" | null>(null);
 
   const loadDetail = useCallback((id: string) => {
@@ -649,6 +672,17 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
   return (
     <Card>
       {inviteModal && <InviteDriverModal onClose={() => setInviteModal(false)} onSent={(r) => { setSent(r); setInviteTick((t) => t + 1); }} />}
+      {assignFor && (
+        <FormModal
+          title={`Vehicle for ${assignFor.name}`}
+          submitLabel="Save assignment"
+          schema={assignVehicleSchema}
+          defaultValues={{ vehicleId: assignFor.vehicleId ?? "" }}
+          fields={[{ name: "vehicleId", label: "Vehicle", type: "select", options: [{ value: "", label: "— Unassigned —" }, ...fleet.vehicles.map((v) => ({ value: v.value, label: v.driverId && v.driverId !== assignFor.id ? `${v.label} (assigned)` : v.label }))] }]}
+          onSubmit={async (v) => { await api.operatorAssignVehicle(assignFor.id, (v.vehicleId as string) || null); reload(); loadFleet(); }}
+          onClose={() => setAssignFor(null)}
+        />
+      )}
       {sent && (
         <div style={{ display: "flex", gap: 12, alignItems: "flex-start", background: "#e7f6ee", border: "1px solid #bfe6d1", borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13 }}>
           <div style={{ flex: 1 }}>
@@ -660,9 +694,9 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
       )}
       <DriverInvitesCard refreshKey={inviteTick} onApproved={reloadFirst} />
       <CardTitle right={<AccentButton onClick={() => setInviteModal(true)}>+ Invite driver</AccentButton>}>Drivers · {list.total}</CardTitle>
-      <TableHead cols={["Driver", "Vehicle", "Trips", "Rating", "Revenue", "Status", ""]} template="1.2fr 1.4fr .6fr .6fr .8fr .9fr 24px" />
+      <TableHead cols={["Driver", "Vehicle", "Trips", "Rating", "Revenue", "Status", "", ""]} template="1.2fr 1.4fr .6fr .6fr .8fr .9fr .7fr 24px" />
       {list.items.map((d) => (
-        <button key={d.id} onClick={() => onSelect(d.id)} style={{ display: "grid", gridTemplateColumns: "1.2fr 1.4fr .6fr .6fr .8fr .9fr 24px", alignItems: "center", padding: "13px 0", border: "none", borderBottom: "1px solid #f6f2ea", fontSize: 13, width: "100%", textAlign: "left", background: "none", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+        <button key={d.id} onClick={() => onSelect(d.id)} style={{ display: "grid", gridTemplateColumns: "1.2fr 1.4fr .6fr .6fr .8fr .9fr .7fr 24px", alignItems: "center", padding: "13px 0", border: "none", borderBottom: "1px solid #f6f2ea", fontSize: 13, width: "100%", textAlign: "left", background: "none", cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
           <span style={{ display: "flex", alignItems: "center", gap: 9, fontWeight: 700 }}>
             <span style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#ff8a3d,#e0560c)", flex: "none" }} />{d.name}
           </span>
@@ -671,6 +705,9 @@ function DriversTab({ selected, onSelect }: { selected: string | null; onSelect:
           <span style={{ fontFamily: MONO, fontWeight: 700 }}>{d.rating.toFixed(1)}★</span>
           <span style={{ fontFamily: MONO, fontWeight: 700, color: "#1f9d6b" }}>{formatRWF(d.revenue)}</span>
           <span><StatusPill status={d.status} /></span>
+          <span style={{ textAlign: "right" }} onClick={(e) => { e.stopPropagation(); setAssignFor(d); }}>
+            <span role="button" style={{ display: "inline-block", background: d.vehicleId ? "#fff" : "#ff6a1a", color: d.vehicleId ? "#1b1714" : "#fff", border: d.vehicleId ? "1px solid #e3ddd1" : "none", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700 }}>{d.vehicleId ? "Change" : "Assign"}</span>
+          </span>
           <span style={{ color: "#cbc3b6", textAlign: "right" }}>›</span>
         </button>
       ))}

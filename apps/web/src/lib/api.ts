@@ -291,6 +291,8 @@ export const api = {
   operatorDriverTrips: (id: string) => request<OperatorDriverTrip[]>(`/operator/drivers/${id}/trips`, { auth: true }),
   operatorDriverLookups: (id: string) =>
     request<{ vehicles: { value: string; label: string }[]; trips: { value: string; label: string }[] }>(`/operator/drivers/${id}/lookups`, { auth: true }),
+  operatorAssignDriverToVehicle: (vehicleId: string, driverId: string | null) =>
+    request<{ ok: boolean }>(`/operator/vehicles/${vehicleId}/assign-driver`, { method: "POST", body: { driverId }, auth: true }),
   operatorAssignVehicle: (id: string, vehicleId: string | null) =>
     request<{ ok: boolean }>(`/operator/drivers/${id}/assign-vehicle`, { method: "POST", body: { vehicleId }, auth: true }),
   operatorAssignTrip: (id: string, tripId: string) =>
@@ -692,6 +694,7 @@ export interface OperatorVehicle {
   model: string;
   capacity: number;
   driver: string;
+  driverId: string | null;
   util: string;
   status: string;
 }
@@ -728,6 +731,7 @@ export interface OperatorDriverRow {
   name: string;
   phone: string;
   vehicle: string;
+  vehicleId: string | null;
   trips: number;
   rating: number;
   revenue: number; // operator revenue from this driver's trips (not personal pay)
