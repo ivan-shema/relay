@@ -285,6 +285,10 @@ export const api = {
   operatorRoutes: (page?: number) => request<Paginated<OperatorRoute>>(`/operator/routes${pageQuery(page)}`, { auth: true }),
   operatorRouteLookup: () => request<{ value: string; label: string }[]>("/operator/routes/lookup", { auth: true }),
   operatorSchedule: (page?: number) => request<Paginated<OperatorScheduleRow>>(`/operator/schedule${pageQuery(page)}`, { auth: true }),
+  // vehicles + drivers for the departure pickers (with type / assigned vehicle so the form can filter by mode)
+  operatorScheduleLookups: () => request<ScheduleLookups>("/operator/schedule/lookups", { auth: true }),
+  operatorAssignDeparture: (id: string, body: { vehicleId?: string; driverId?: string }) =>
+    request<{ ok: boolean }>(`/operator/schedule/${id}/assign`, { method: "PATCH", body, auth: true }),
   operatorDrivers: (page?: number) => request<Paginated<OperatorDriverRow>>(`/operator/drivers${pageQuery(page)}`, { auth: true }),
   operatorDriver: (id: string) => request<OperatorDriverDetail>(`/operator/drivers/${id}`, { auth: true }),
   operatorSuspend: (id: string) => request<{ suspended: boolean }>(`/operator/drivers/${id}/suspend`, { method: "POST", auth: true }),
@@ -682,6 +686,10 @@ export interface OperatorRoute {
   util: number;
   fare: number;
 }
+export interface ScheduleLookups {
+  vehicles: { value: string; label: string; type: string; driverId: string | null }[];
+  drivers: { value: string; label: string; vehicleId: string | null; vehicleType: string | null }[];
+}
 export interface OperatorScheduleRow {
   id: string;
   time: string;
@@ -691,6 +699,9 @@ export interface OperatorScheduleRow {
   booked: number;
   capacity: number;
   status: string;
+  mode: string;
+  vehicleId: string | null;
+  driverId: string | null;
 }
 export interface OperatorDriverRow {
   id: string;

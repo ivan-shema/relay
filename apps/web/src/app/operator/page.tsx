@@ -15,6 +15,7 @@ import {
   type OperatorBookingRow,
   type OperatorPayments,
   type OperatorReports,
+  type ScheduleLookups,
   type OperatorMotoHails,
 } from "@/lib/api";
 import {
@@ -25,10 +26,12 @@ import {
   inviteDriverSchema,
   assignVehicleSchema,
   assignTripSchema,
+  assignDepartureSchema,
   type CreateVehicleInput,
   type CreateRouteInput,
   type CreateDepartureInput,
   type InviteDriverInput,
+  type AssignDepartureInput,
 } from "@relay/shared";
 import { useAuth } from "@/lib/auth-context";
 import { ConsoleShell, ProfileSettingsPage, KpiGrid, StatusPill, Card, CardTitle, ProgressBar, AccentButton, PrimaryButton, FormModal, Pagination, usePaged, TicketVerifyForm, BarChart, type NavItem } from "@/components/console";
@@ -369,8 +372,23 @@ function RoutesTab() {
 function ScheduleTab() {
   const { data, page, setPage, reloadFirst } = usePaged<OperatorScheduleRow>(useCallback((pg) => api.operatorSchedule(pg), []));
   const [modal, setModal] = useState(false);
+  const [assignFor, setAssignFor] = useState<OperatorScheduleRow | null>(null);
   const [routes, setRoutes] = useState<{ value: string; label: string }[]>([]);
-  useEffect(() => { api.operatorRouteLookup().then(setRoutes).catch(() => undefined); }, []);
+  const [lookups, setLookups] = useState<ScheduleLookups>({ vehicles: [], drivers: [] });
+  const loadLookups = useCallback(() => {
+    api.operatorScheduleLookups().then(setLookups).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    api.operatorRouteLookup().then(setRoutes).catch(() => undefined);
+    loadLookups();
+  }, [loadLookups]);
+
+  // Pickers only offer what can actually run the departure: vehicles of the
+  // same mode, and drivers who are either free or already on a matching vehicle.
+  const NONE = { value: "", label: "— not assigned yet —" };
+  const vehiclesFor = (mode: unknown) => [NONE, ...lookups.vehicles.filter((v) => v.type === mode).map(({ value, label }) => ({ value, label }))];
+  const driversFor = (mode: unknown) => [NONE, ...lookups.drivers.filter((d) => !d.vehicleType || d.vehicleType === mode).map(({ value, label }) => ({ value, label }))];
+
   if (!data) return <Loading />;
   return (
     <Card>
@@ -385,10 +403,36 @@ function ScheduleTab() {
             { name: "fare", label: "Fare (RWF)", type: "number", defaultValue: "800" },
             { name: "departInMinutes", label: "Departs in (min)", type: "number", defaultValue: "30" },
             { name: "durationMinutes", label: "Duration (min)", type: "number", defaultValue: "30" },
-            { name: "capacity", label: "Capacity", type: "number", defaultValue: "33", lockedValue: (v) => (v.type === "MOTO" || v.mode === "MOTO" ? "1" : undefined) },
+            { name: "capacity", label: "Capacity", type: "number", defaultValue: "33", lockedValue: (v) => (v.mode === "MOTO" ? "1" : undefined) },
+            { name: "vehicleId", label: "Vehicle", type: "select", optionsFor: (v) => vehiclesFor(v.mode) },
+            { name: "driverId", label: "Driver", type: "select", optionsFor: (v) => driversFor(v.mode) },
           ]}
-          onSubmit={async (v) => { const d = v as CreateDepartureInput; await api.operatorAddDeparture({ routeId: d.routeId, mode: d.mode, fare: d.fare, departInMinutes: d.departInMinutes, durationMinutes: d.durationMinutes, capacity: d.capacity }); reloadFirst(); }}
+          onSubmit={async (v) => {
+            const d = v as CreateDepartureInput;
+            await api.operatorAddDeparture({ routeId: d.routeId, mode: d.mode, fare: d.fare, departInMinutes: d.departInMinutes, durationMinutes: d.durationMinutes, capacity: d.capacity, vehicleId: d.vehicleId || undefined, driverId: d.driverId || undefined });
+            reloadFirst();
+            loadLookups();
+          }}
           onClose={() => setModal(false)}
+        />
+      )}
+      {assignFor && (
+        <FormModal
+          title={`Assign · ${assignFor.time} ${assignFor.route}`}
+          submitLabel="Save assignment"
+          schema={assignDepartureSchema}
+          defaultValues={{ vehicleId: assignFor.vehicleId ?? "", driverId: assignFor.driverId ?? "" }}
+          fields={[
+            { name: "vehicleId", label: `Vehicle (${assignFor.mode.toLowerCase()})`, type: "select", options: vehiclesFor(assignFor.mode) },
+            { name: "driverId", label: "Driver", type: "select", options: driversFor(assignFor.mode) },
+          ]}
+          onSubmit={async (v) => {
+            const d = v as AssignDepartureInput;
+            await api.operatorAssignDeparture(assignFor.id, { vehicleId: d.vehicleId ?? "", driverId: d.driverId ?? "" });
+            reloadFirst();
+            loadLookups();
+          }}
+          onClose={() => setAssignFor(null)}
         />
       )}
       <CardTitle
@@ -410,20 +454,31 @@ function ScheduleTab() {
       >
         Schedule · {data.total} departures
       </CardTitle>
-      <TableHead cols={["Time", "Route", "Vehicle", "Driver", "Seats booked", "Status"]} template=".6fr 1.7fr .8fr .9fr 1fr .9fr" />
-      {data.items.map((t) => (
-        <Row key={t.id} template=".6fr 1.7fr .8fr .9fr 1fr .9fr">
-          <span style={{ fontFamily: MONO, fontWeight: 700 }}>{t.time}</span>
-          <span style={{ fontWeight: 600 }}>{t.route}</span>
-          <span style={{ fontFamily: MONO, color: "#8c8378", fontSize: 12 }}>{t.vehicle}</span>
-          <span style={{ color: "#6b6258" }}>{t.driver}</span>
-          <span style={{ display: "flex", alignItems: "center", gap: 9 }}>
-            <span style={{ flex: 1, maxWidth: 70 }}><ProgressBar pct={(t.booked / Math.max(1, t.capacity)) * 100} /></span>
-            <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700 }}>{t.booked}/{t.capacity}</span>
-          </span>
-          <span style={{ textAlign: "right" }}><StatusPill status={t.status} /></span>
-        </Row>
-      ))}
+      <TableHead cols={["Time", "Route", "Vehicle", "Driver", "Seats booked", "Status", ""]} template=".6fr 1.6fr .8fr .9fr 1fr .8fr .6fr" />
+      {data.items.map((t) => {
+        const assignable = t.status === "SCHEDULED" || t.status === "BOARDING";
+        const unassigned = !t.vehicleId || !t.driverId;
+        return (
+          <Row key={t.id} template=".6fr 1.6fr .8fr .9fr 1fr .8fr .6fr">
+            <span style={{ fontFamily: MONO, fontWeight: 700 }}>{t.time}</span>
+            <span style={{ fontWeight: 600 }}>{t.route}<span style={{ display: "block", fontSize: 11, color: "#8c8378", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em" }}>{t.mode}</span></span>
+            <span style={{ fontFamily: MONO, color: t.vehicleId ? "#1b1714" : "#c2553f", fontSize: 12 }}>{t.vehicle}</span>
+            <span style={{ color: t.driverId ? "#6b6258" : "#c2553f" }}>{t.driver}</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <span style={{ flex: 1, maxWidth: 70 }}><ProgressBar pct={(t.booked / Math.max(1, t.capacity)) * 100} /></span>
+              <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700 }}>{t.booked}/{t.capacity}</span>
+            </span>
+            <span style={{ textAlign: "right" }}><StatusPill status={t.status} /></span>
+            <span style={{ textAlign: "right" }}>
+              {assignable && (
+                <button onClick={() => setAssignFor(t)} style={{ background: unassigned ? "#ff6a1a" : "#fff", color: unassigned ? "#fff" : "#1b1714", border: unassigned ? "none" : "1px solid #e3ddd1", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+                  {unassigned ? "Assign" : "Change"}
+                </button>
+              )}
+            </span>
+          </Row>
+        );
+      })}
       <Pagination page={page} totalPages={data.totalPages} total={data.total} onPage={setPage} />
     </Card>
   );

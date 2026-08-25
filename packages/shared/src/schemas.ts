@@ -285,3 +285,11 @@ export const rejectOperatorSchema = z.object({
     .max(1000, "Keep the reason under 1000 characters"),
 });
 export type RejectOperatorInput = z.infer<typeof rejectOperatorSchema>;
+
+// Operator: (re)assign a vehicle and/or driver to an existing departure.
+// Empty strings come from "— none —" select options and mean "clear".
+export const assignDepartureSchema = z.object({
+  vehicleId: z.string().optional(),
+  driverId: z.string().optional(),
+});
+export type AssignDepartureInput = z.infer<typeof assignDepartureSchema>;

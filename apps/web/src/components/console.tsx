@@ -483,6 +483,9 @@ export interface FormField {
   // Pin the field to a derived value (rendered read-only) while the predicate
   // returns one — e.g. capacity is always 1 for a moto-taxi.
   lockedValue?: (values: Record<string, unknown>) => string | undefined;
+  // Select options that depend on other live values (e.g. vehicles filtered
+  // by the chosen mode). Takes precedence over `options`.
+  optionsFor?: (values: Record<string, unknown>) => { value: string; label: string }[];
 }
 
 type FormValues = Record<string, unknown>;
@@ -569,7 +572,7 @@ export function FormModal({
                 <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8c8378", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>{f.label}</div>
                 {f.type === "select" ? (
                   <select {...register(f.name)} style={{ ...inputStyle, borderColor: err ? "#e0a99a" : "#e3ddd1" }}>
-                    {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    {(f.optionsFor ? f.optionsFor(watched) : f.options)?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
                 ) : f.type === "file" ? (
                   <label style={{ ...inputStyle, display: "flex", alignItems: "center", gap: 10, cursor: "pointer", borderStyle: "dashed", borderColor: err ? "#e0a99a" : "#cbc3b6", color: files[f.name] ? "#1b1714" : "#8c8378" }}>

@@ -10,6 +10,7 @@ import {
   assignVehicleSchema,
   assignTripSchema,
   operatorOnboardingSchema,
+  assignDepartureSchema,
 } from "@relay/shared";
 import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
@@ -396,13 +397,22 @@ operatorRouter.post(
       if (vehicle.type !== body.mode) throw new HttpError(400, `That vehicle is a ${vehicle.type.toLowerCase()}, not a ${body.mode.toLowerCase()}`);
       if (body.capacity > vehicle.capacity) throw new HttpError(400, `That vehicle only seats ${vehicle.capacity}`);
     }
+    // A chosen driver must be ours; if no vehicle was picked, use the driver's
+    // own vehicle when it matches the mode.
+    let vehicleId = body.vehicleId || undefined;
+    if (body.driverId) {
+      const driver = await prisma.driver.findFirst({ where: { id: body.driverId, operatorId: opId }, include: { vehicle: true } });
+      if (!driver) throw new HttpError(400, "That driver is not in your fleet");
+      if (driver.suspended) throw new HttpError(409, "That driver is suspended");
+      if (!vehicleId && driver.vehicle && driver.vehicle.type === body.mode) vehicleId = driver.vehicle.id;
+    }
     const departAt = new Date(Date.now() + body.departInMinutes * 60_000);
     const trip = await prisma.trip.create({
       data: {
         routeId: route.id,
         operatorId: opId,
-        vehicleId: body.vehicleId,
-        driverId: body.driverId,
+        vehicleId,
+        driverId: body.driverId || undefined,
         legs: [{ mode: body.mode }],
         departAt,
         arriveAt: new Date(departAt.getTime() + body.durationMinutes * 60_000),
@@ -582,6 +592,9 @@ operatorRouter.get(
             booked,
             capacity: t.capacity,
             status: t.status,
+            mode: (t.legs as { mode?: string }[] | null)?.[0]?.mode ?? "BUS",
+            vehicleId: t.vehicleId,
+            driverId: t.driverId,
           };
         }),
         total,
@@ -1116,5 +1129,78 @@ operatorRouter.post(
       `${op.companyName} assigned you a moto request: ${ride.originLabel} → ${ride.destLabel}. Open your console to accept it.`
     );
     res.json({ assigned: true, driverId: driver.id });
+  })
+);
+
+
+/* -------- Departure assignment (vehicle + driver) -------- */
+
+const ASSIGNABLE_TRIP_STATUSES = ["SCHEDULED", "BOARDING"] as const;
+function tripMode(t: { legs: unknown }): string {
+  const legs = t.legs as { mode?: string }[] | null;
+  return legs?.[0]?.mode ?? "BUS";
+}
+
+// GET /operator/schedule/lookups — vehicles and drivers for the departure
+// pickers, with the bits the form needs to filter by mode.
+operatorRouter.get(
+  "/schedule/lookups",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const [vehicles, drivers] = await Promise.all([
+      prisma.vehicle.findMany({ where: { operatorId: opId }, orderBy: { plateNumber: "asc" }, take: 200 }),
+      prisma.driver.findMany({ where: { operatorId: opId }, include: { user: true, vehicle: true }, orderBy: { createdAt: "asc" }, take: 200 }),
+    ]);
+    res.json({
+      vehicles: vehicles.map((v) => ({ value: v.id, label: `${v.plateNumber} · ${v.label ?? v.model ?? v.type} · ${v.capacity} seats`, type: v.type, driverId: v.driverId })),
+      drivers: drivers.map((d) => ({
+        value: d.id,
+        label: `${fullNameOf(d.user)}${d.vehicle ? ` · ${d.vehicle.plateNumber}` : " · no vehicle"}${d.suspended ? " (suspended)" : ""}`,
+        vehicleId: d.vehicle?.id ?? null,
+        vehicleType: d.vehicle?.type ?? null,
+      })),
+    });
+  })
+);
+
+// PATCH /operator/schedule/:id/assign — set or clear the vehicle and/or driver
+// of an upcoming departure. Omitted field = unchanged, "" = clear. The vehicle
+// must be ours and match the departure's mode (a moto can't run a bus
+// departure) and seat the departure's capacity; the driver must be ours, and
+// picking a driver without a vehicle uses the driver's own matching vehicle.
+operatorRouter.patch(
+  "/schedule/:id/assign",
+  asyncHandler(async (req, res) => {
+    const opId = await resolveVerifiedOperatorId(req.auth!.sub);
+    const body = assignDepartureSchema.parse(req.body);
+    const trip = await prisma.trip.findFirst({ where: { id: req.params.id, operatorId: opId } });
+    if (!trip) throw new HttpError(404, "Departure not found");
+    if (!(ASSIGNABLE_TRIP_STATUSES as readonly string[]).includes(trip.status)) {
+      throw new HttpError(409, "Only upcoming departures can be reassigned");
+    }
+    const mode = tripMode(trip);
+
+    let driverId = body.driverId === undefined ? trip.driverId : body.driverId || null;
+    let vehicleId = body.vehicleId === undefined ? trip.vehicleId : body.vehicleId || null;
+
+    const driver = driverId
+      ? await prisma.driver.findFirst({ where: { id: driverId, operatorId: opId }, include: { vehicle: true, user: true } })
+      : null;
+    if (driverId && !driver) throw new HttpError(400, "That driver is not in your fleet");
+    if (driver?.suspended) throw new HttpError(409, "That driver is suspended");
+    if (driver && !vehicleId && driver.vehicle && driver.vehicle.type === mode) vehicleId = driver.vehicle.id;
+
+    if (vehicleId) {
+      const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId, operatorId: opId } });
+      if (!vehicle) throw new HttpError(400, "That vehicle is not in your fleet");
+      if (vehicle.type !== mode) throw new HttpError(400, `That vehicle is a ${vehicle.type.toLowerCase()} — this departure is a ${mode.toLowerCase()}`);
+      if (trip.capacity > vehicle.capacity) throw new HttpError(400, `That vehicle only seats ${vehicle.capacity}; this departure has ${trip.capacity} seats`);
+    }
+
+    await prisma.trip.update({ where: { id: trip.id }, data: { vehicleId, driverId } });
+    if (driver && driver.id !== trip.driverId) {
+      await notify(driver.userId, "New trip assigned", "You've been assigned to an upcoming departure.");
+    }
+    res.json({ ok: true, vehicleId, driverId });
   })
 );
