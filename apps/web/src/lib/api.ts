@@ -284,6 +284,8 @@ export const api = {
   // The caller's own application status, or null if they haven't applied.
   operatorApplication: () => request<OperatorApplicationStatus | null>("/operator/application", { auth: true }),
   operatorMe: () => request<{ id: string; companyName: string; modes: string[]; status: string; contactInfo: string }>("/operator/me", { auth: true }),
+  // The commissions Relay keeps — for "passenger pays X → you receive Y" previews.
+  operatorFees: () => request<PlatformFees>("/operator/fees", { auth: true }),
   operatorOverview: () => request<OperatorOverview>("/operator/overview", { auth: true }),
   operatorVehicles: (page?: number) => request<Paginated<OperatorVehicle>>(`/operator/vehicles${pageQuery(page)}`, { auth: true }),
   operatorRoutes: (page?: number) => request<Paginated<OperatorRoute>>(`/operator/routes${pageQuery(page)}`, { auth: true }),
@@ -426,9 +428,8 @@ export const api = {
   myReports: (q = "?period=month") => request<PassengerReports>(`/me/reports${q}`, { auth: true }),
   myReportExportUrl: (q = "?period=month") => `${BASE}/me/reports/export${q}`,
   adminResolveComplaint: (id: string) => request<unknown>(`/admin/complaints/${id}/resolve`, { method: "POST", auth: true }),
-  adminSettings: () => request<{ motoCommissionPct: number }>("/admin/settings", { auth: true }),
-  adminUpdateSettings: (body: { motoCommissionPct: number }) =>
-    request<{ motoCommissionPct: number }>("/admin/settings", { method: "PATCH", body, auth: true }),
+  adminSettings: () => request<PlatformFees>("/admin/settings", { auth: true }),
+  adminUpdateSettings: (body: Partial<PlatformFees>) => request<PlatformFees>("/admin/settings", { method: "PATCH", body, auth: true }),
 };
 
 export interface RatingResult {
@@ -513,7 +514,14 @@ export interface OperatorMotoDriver {
   busy: boolean;
   available: boolean;
 }
+// Platform commissions (percent). Moto is locked per ride when the fare is
+// agreed; booking applies to scheduled-trip fares.
+export interface PlatformFees {
+  motoCommissionPct: number;
+  bookingCommissionPct: number;
+}
 export interface OperatorMotoHails {
+  commissionPct: number;
   enabled: boolean;
   open: OperatorMotoHail[];
   active: OperatorMotoActiveRide[];
@@ -803,7 +811,7 @@ export interface OperatorBookingRow {
 }
 export interface OperatorPayments {
   transactions: Paginated<{ id: string; booking: string; method: string; amount: number; status: string }>;
-  payout: { grossToday: number; fee: number; motoRidesToday: number; motoNetToday: number; net: number; nextPayout: number };
+  payout: { grossToday: number; feePct: number; fee: number; motoRidesToday: number; motoNetToday: number; net: number; nextPayout: number };
 }
 
 export interface AdminOverview {

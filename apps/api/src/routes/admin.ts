@@ -10,14 +10,16 @@ import { parsePage, paged } from "../lib/pagination";
 import { fullNameOf } from "../lib/mappers";
 import { notify } from "../lib/notify";
 import { fetchMerchantBalances } from "../lib/paypack";
-import { getMotoCommissionPct, setMotoCommissionPct } from "../lib/settings";
+import { getMotoCommissionPct, getBookingCommissionPct, setMotoCommissionPct, setBookingCommissionPct, getCommissionPcts } from "../lib/settings";
 import { z } from "zod";
-import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, BUS_PLATFORM_FEE_PCT, type ReportRange } from "../lib/reports";
+import { parseReportRange, reportBuckets, bucketSums, toCsv, sendCsv, fileStamp, primaryMode, round2, dec as rdec, lockedBookingFee, type ReportRange } from "../lib/reports";
 
 export const adminRouter = Router();
 
+const zPct = z.coerce.number().min(0, "Can't be negative").max(50, "Commission above 50% is not allowed");
 const zSettings = z.object({
-  motoCommissionPct: z.coerce.number().min(0, "Can't be negative").max(50, "Commission above 50% is not allowed"),
+  motoCommissionPct: zPct.optional(),
+  bookingCommissionPct: zPct.optional(),
 });
 
 adminRouter.use(requireAuth, requireRole("ADMIN"));
@@ -388,9 +390,10 @@ async function adminReportData(range: ReportRange) {
     }),
   ]);
 
+  const busPct = await getBookingCommissionPct();
   const paid = payments.filter((p) => p.status === "PAID");
   const busRevenue = paid.reduce((s, p) => s + rdec(p.amount), 0);
-  const busFee = busRevenue * (BUS_PLATFORM_FEE_PCT / 100);
+  const busFee = paid.reduce((s, p) => s + lockedBookingFee(p, busPct), 0);
   const motoGross = rides.reduce((s, r) => s + rdec(r.agreedFare), 0);
   const motoCommission = rides.reduce((s, r) => s + rdec(r.commissionAmount), 0);
   const grossVolume = busRevenue + motoGross;
@@ -417,15 +420,15 @@ async function adminReportData(range: ReportRange) {
     .sort((a, b) => b.revenue - a.revenue);
 
   // by operator (bus/ride bookings only — moto hails are driver-direct)
-  const opAgg = new Map<string, { name: string; bookings: number; revenue: number }>();
+  const opAgg = new Map<string, { name: string; bookings: number; revenue: number; fee: number }>();
   for (const p of paid) {
     const op = p.booking.trip.operator;
-    const e = opAgg.get(op.id) ?? { name: op.companyName, bookings: 0, revenue: 0 };
-    e.bookings += 1; e.revenue += rdec(p.amount);
+    const e = opAgg.get(op.id) ?? { name: op.companyName, bookings: 0, revenue: 0, fee: 0 };
+    e.bookings += 1; e.revenue += rdec(p.amount); e.fee += lockedBookingFee(p, busPct);
     opAgg.set(op.id, e);
   }
   const byOperator = [...opAgg.values()]
-    .map((o) => ({ name: o.name, bookings: o.bookings, revenue: round2(o.revenue), platformFee: round2(o.revenue * (BUS_PLATFORM_FEE_PCT / 100)), netToOperator: round2(o.revenue * (1 - BUS_PLATFORM_FEE_PCT / 100)) }))
+    .map((o) => ({ name: o.name, bookings: o.bookings, revenue: round2(o.revenue), platformFee: round2(o.fee), netToOperator: round2(o.revenue - o.fee) }))
     .sort((a, b) => b.revenue - a.revenue);
 
   // by payment method (moto hails are wallet-escrow)
@@ -468,7 +471,7 @@ async function adminReportData(range: ReportRange) {
       motoGross: round2(motoGross),
       platformTake: round2(busFee + motoCommission),
       busFee: round2(busFee),
-      busFeePct: BUS_PLATFORM_FEE_PCT,
+      busFeePct: busPct,
       motoCommission: round2(motoCommission),
       bookings: bookings.length,
       paidBookings: paid.length,
@@ -522,11 +525,12 @@ adminRouter.get(
           orderBy: { completedAt: "desc" },
         }),
       ]);
+      const busPct = await getBookingCommissionPct();
       type Row = [string, Date, string, string, string, string, string, number, number, number, string];
       const rows: Row[] = [
         ...payments.map((p): Row => {
           const gross = rdec(p.amount);
-          const fee = p.status === "PAID" ? round2(gross * (BUS_PLATFORM_FEE_PCT / 100)) : 0;
+          const fee = p.status === "PAID" ? round2(lockedBookingFee(p, busPct)) : 0;
           return [p.reference, p.createdAt, "BOOKING", fullNameOf(p.booking.passenger), p.booking.trip.operator.companyName, p.booking.trip.route.name, p.method, gross, fee, round2(gross - fee), p.status];
         }),
         ...rides.map((r): Row => {
@@ -612,21 +616,22 @@ adminRouter.get(
   })
 );
 
-// GET /admin/settings — platform configuration (currently: moto commission)
+// GET /admin/settings — platform configuration: the two commissions
 adminRouter.get(
   "/settings",
   asyncHandler(async (_req, res) => {
-    res.json({ motoCommissionPct: await getMotoCommissionPct() });
+    res.json(await getCommissionPcts());
   })
 );
 
-// PATCH /admin/settings — update platform configuration
+// PATCH /admin/settings — update either/both commissions
 adminRouter.patch(
   "/settings",
   asyncHandler(async (req, res) => {
-    const { motoCommissionPct } = zSettings.parse(req.body);
-    await setMotoCommissionPct(motoCommissionPct);
-    res.json({ motoCommissionPct });
+    const { motoCommissionPct, bookingCommissionPct } = zSettings.parse(req.body);
+    if (motoCommissionPct !== undefined) await setMotoCommissionPct(motoCommissionPct);
+    if (bookingCommissionPct !== undefined) await setBookingCommissionPct(bookingCommissionPct);
+    res.json(await getCommissionPcts());
   })
 );
 

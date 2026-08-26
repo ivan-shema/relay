@@ -12,6 +12,7 @@ import {
   type OperatorDriverRow,
   type OperatorDriverDetail,
   type OperatorDriverTrip,
+  type PlatformFees,
   type OperatorBookingRow,
   type OperatorPayments,
   type OperatorReports,
@@ -407,6 +408,17 @@ function ScheduleTab() {
   // Pickers only offer what can actually run the departure: vehicles of the
   // same mode, and drivers who are either free or already on a matching vehicle.
   const NONE = { value: "", label: "— not assigned yet —" };
+  // Relay's cut of each fare — shown next to the price so there's no surprise
+  // at payout time.
+  const [fees, setFees] = useState<PlatformFees | null>(null);
+  useEffect(() => { api.operatorFees().then(setFees).catch(() => undefined); }, []);
+  const fareHint = (v: Record<string, unknown>) => {
+    const fare = Number(v.fare);
+    if (!fees || !Number.isFinite(fare) || fare <= 0) return fees ? `Relay keeps ${fees.bookingCommissionPct}% of every fare paid; the rest is yours to withdraw.` : null;
+    const pct = fees.bookingCommissionPct;
+    const cut = Math.round((fare * pct) / 100);
+    return <>Passengers pay <b>{formatRWF(fare)}</b> per seat · Relay keeps {pct}% ({formatRWF(cut)}) · you receive <b style={{ color: "#1f9d6b" }}>{formatRWF(fare - cut)}</b> per seat.</>;
+  };
   const vehiclesFor = (mode: unknown) => [NONE, ...lookups.vehicles.filter((v) => v.type === mode).map(({ value, label }) => ({ value, label }))];
   const driversFor = (mode: unknown) => [NONE, ...lookups.drivers.filter((d) => !d.vehicleType || d.vehicleType === mode).map(({ value, label }) => ({ value, label }))];
 
@@ -421,7 +433,7 @@ function ScheduleTab() {
           fields={[
             { name: "routeId", label: "Route", type: "select", options: routes },
             { name: "mode", label: "Mode", type: "select", options: [{ value: "BUS", label: "Bus" }, { value: "MOTO", label: "Moto-taxi" }, { value: "RIDE", label: "Shared ride" }] },
-            { name: "fare", label: "Fare (RWF)", type: "number", defaultValue: "800" },
+            { name: "fare", label: "Fare (RWF) — what the passenger pays", type: "number", defaultValue: "800", hint: fareHint },
             { name: "departInMinutes", label: "Departs in (min)", type: "number", defaultValue: "30" },
             { name: "durationMinutes", label: "Duration (min)", type: "number", defaultValue: "30" },
             { name: "capacity", label: "Capacity", type: "number", defaultValue: "33", lockedValue: (v) => (v.mode === "MOTO" ? "1" : undefined) },
@@ -841,7 +853,7 @@ function PaymentsTab() {
         </div>
         <Card>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13 }}><span style={{ color: "#8c8378" }}>Gross today</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(data.payout.grossToday)}</span></div>
-          <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}><span style={{ color: "#8c8378" }}>Relay fee (12%)</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>-{formatRWF(data.payout.fee)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}><span style={{ color: "#8c8378" }}>Relay fee ({data.payout.feePct}%)</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>-{formatRWF(data.payout.fee)}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}><span style={{ color: "#8c8378" }}>Moto hails today ({data.payout.motoRidesToday}, net of commission)</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>+{formatRWF(data.payout.motoNetToday)}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "11px 0", fontSize: 14, fontWeight: 800, borderTop: "1px solid #f1ece2" }}><span>Net</span><span style={{ fontFamily: MONO, color: "#1f9d6b" }}>{formatRWF(data.payout.net)}</span></div>
         </Card>
@@ -1049,6 +1061,8 @@ function MotoHailsTab() {
   }
 
   const free = data.drivers.filter((d) => d.available);
+  // What lands with the operator once the passenger confirms: fare minus Relay's cut.
+  const netOf = (fare: number) => fare - Math.round((fare * data.commissionPct) / 100);
   // Default driver for a hail: the moto the passenger asked for (if free), else the first free one.
   const chosen = (h: OperatorMotoHail) => pick[h.id] ?? (h.requested && free.some((d) => d.id === h.requested!.id) ? h.requested.id : free[0]?.id) ?? "";
   const run = async (id: string, fn: () => Promise<unknown>) => {
@@ -1122,7 +1136,7 @@ function MotoHailsTab() {
                       <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 2 }}>
                         {h.passenger} · {fmtAgo(h.requestedAt)}{h.departAt && <> · leave {fmtHm(h.departAt)}</>}
                         {h.fare !== null
-                          ? <> · {h.prepaid ? "pays" : "offers"} <span style={{ fontFamily: MONO, color: h.prepaid ? "#1f9d6b" : "#ff6a1a", fontWeight: 700 }}>{formatRWF(h.fare)}</span></>
+                          ? <> · {h.prepaid ? "pays" : "offers"} <span style={{ fontFamily: MONO, color: h.prepaid ? "#1f9d6b" : "#ff6a1a", fontWeight: 700 }}>{formatRWF(h.fare)}</span> <span title={`Relay keeps ${data.commissionPct}% of the fare`}>(you receive {formatRWF(netOf(h.fare))})</span></>
                           : <> · <span style={{ color: "#ff6a1a", fontWeight: 700 }}>no price — send a quote</span></>}
                         {h.offers.length > 0 && <> · quoted: {h.offers.map((o) => `${o.driverName.split(" ")[0]} ${formatRWF(o.amount)}`).join(", ")}</>}
                       </div>
@@ -1147,6 +1161,13 @@ function MotoHailsTab() {
                       <button disabled={busyId === h.id || !quoteAmount || !driverId} onClick={() => run(h.id, async () => { await api.operatorQuoteMotoHail(h.id, driverId, Number(quoteAmount)); setQuoteFor(null); setQuoteAmount(""); })} style={btn("#1b1714")}>
                         {busyId === h.id ? "…" : "Send quote"}
                       </button>
+                    </div>
+                  )}
+                  {quoteFor === h.id && (
+                    <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 6 }}>
+                      {quoteAmount
+                        ? <>The passenger pays <b>{formatRWF(Number(quoteAmount))}</b> · Relay keeps {data.commissionPct}% · you receive <b style={{ color: "#1f9d6b" }}>{formatRWF(netOf(Number(quoteAmount)))}</b>.</>
+                        : <>Quote what the passenger pays — Relay keeps {data.commissionPct}% of it.</>}
                     </div>
                   )}
                 </div>

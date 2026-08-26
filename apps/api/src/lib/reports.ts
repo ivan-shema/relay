@@ -17,6 +17,9 @@ export interface ReportRange {
 
 // Share of every bus/ride booking the platform keeps (matches the operator
 // payout maths). Moto hails use the admin-configurable commission instead.
+// Default booking fee. The live value is the admin setting
+// (getBookingCommissionPct in lib/settings) — never use this constant for a
+// calculation, only as the fallback default.
 export const BUS_PLATFORM_FEE_PCT = 12;
 
 export function dec(v: Prisma.Decimal | number | null | undefined): number {
@@ -132,4 +135,13 @@ export function primaryMode(legs: unknown): string {
 
 export function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+// Relay's fee on a paid booking. The rate is locked onto the Payment row when
+// the fare is paid (commissionPct / commissionAmount); the fallback to the
+// current setting only covers rows that predate the lock (none after the
+// 20260826 backfill), so a later change to the setting never rewrites what an
+// operator was owed.
+export function lockedBookingFee(p: { amount: Prisma.Decimal | number; commissionAmount: Prisma.Decimal | null }, currentPct: number): number {
+  return p.commissionAmount !== null ? dec(p.commissionAmount) : dec(p.amount) * (currentPct / 100);
 }

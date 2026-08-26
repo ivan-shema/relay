@@ -326,7 +326,7 @@ export default function PassengerApp() {
           </div>
         )}
         {tab === "plan" && screen === "pay" && selected && booking && (
-          <PayScreen trip={selected} bookingId={booking.id} busy={busy} onBack={() => setScreen("available")} onPay={pay} onTopUp={() => setTab("wallet")} />
+          <PayScreen trip={selected} booking={booking} busy={busy} onBack={() => setScreen("available")} onPay={pay} onTopUp={() => setTab("wallet")} />
         )}
         {tab === "plan" && screen === "track" && selected && booking && (
           <TrackScreen booking={booking} trip={selected} phase={trackPhase} onBoard={() => setTrackPhase("boarded")} onArrived={() => setScreen("done")} />
@@ -1280,10 +1280,12 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
 /* ============ PAY ============ */
 // Real money: the Relay wallet is the only payment method — it holds real
 // funds (Paypack deposits), so paying is a straight balance deduction.
-function PayScreen({ trip, busy, onBack, onPay, onTopUp }: { trip: TripSummary; bookingId: string; busy: boolean; onBack: () => void; onPay: () => void; onTopUp: () => void }) {
+// The amount shown here is the booking's fare — exactly what POST /payments
+// deducts (seats × per-seat fare, no extra fees) — so the button never
+// promises a different number than the wallet is charged.
+function PayScreen({ trip, booking, busy, onBack, onPay, onTopUp }: { trip: TripSummary; booking: BookingDetail; busy: boolean; onBack: () => void; onPay: () => void; onTopUp: () => void }) {
   const { user } = useAuth();
-  const fee = 100;
-  const total = trip.fare + fee;
+  const total = booking.fare;
   const balance = user?.walletBalance ?? 0;
   const short = Math.max(0, total - balance);
 
@@ -1313,9 +1315,9 @@ function PayScreen({ trip, busy, onBack, onPay, onTopUp }: { trip: TripSummary; 
           </div>
 
           <div style={{ background: "#fff", border: "1px solid #e9e3d8", borderRadius: 16, padding: "6px 18px" }}>
-            <Row label="Fare · seat reserved" value={formatRWF(trip.fare)} />
-            <Row label="Service fee" value={formatRWF(fee)} />
-            <Row label="Total" value={formatRWF(total)} total />
+            <Row label={`Fare · ${booking.seats} ${booking.seats === 1 ? "seat" : "seats"} × ${formatRWF(trip.fare)}`} value={formatRWF(total)} />
+            <Row label="Fees" value="none" />
+            <Row label="Total charged to wallet" value={formatRWF(total)} total />
           </div>
         </div>
 
@@ -1339,7 +1341,7 @@ function PayScreen({ trip, busy, onBack, onPay, onTopUp }: { trip: TripSummary; 
             </div>
           )}
           <PrimaryBtn onClick={onPay} busy={busy} disabled={short > 0}>
-            {`Pay ${formatRWF(total)} & book seat`}
+            {`Pay ${formatRWF(total)} & book ${booking.seats === 1 ? "seat" : `${booking.seats} seats`}`}
           </PrimaryBtn>
           <div style={{ textAlign: "center", fontSize: 11.5, color: "#a39a8d", marginTop: 11 }}>⊘ Deducted from your wallet · seat held until departure</div>
         </div>

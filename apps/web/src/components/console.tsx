@@ -487,6 +487,9 @@ export interface FormField {
   // Pin the field to a derived value (rendered read-only) while the predicate
   // returns one — e.g. capacity is always 1 for a moto-taxi.
   lockedValue?: (values: Record<string, unknown>) => string | undefined;
+  // Live helper text under the input, derived from the current values
+  // (e.g. "passengers pay X → you receive Y after the platform fee").
+  hint?: (values: Record<string, unknown>) => React.ReactNode;
   // Select options that depend on other live values (e.g. vehicles filtered
   // by the chosen mode). Takes precedence over `options`.
   optionsFor?: (values: Record<string, unknown>) => { value: string; label: string }[];
@@ -614,6 +617,7 @@ export function FormModal({
                   </>
                 )}
                 {err && <div style={{ fontSize: 11.5, color: "#c2553f", fontWeight: 600, marginTop: 5 }}>{err}</div>}
+                {!err && f.hint && (() => { const h = f.hint(watched); return h ? <div style={{ fontSize: 11.5, color: "#8c8378", fontWeight: 600, marginTop: 6, lineHeight: 1.5 }}>{h}</div> : null; })()}
               </div>
             );
           })}

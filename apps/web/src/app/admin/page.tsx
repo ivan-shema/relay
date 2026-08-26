@@ -815,7 +815,7 @@ function DisputesTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
   const resolve = async (d: AdminRideDispute, outcome: "REFUND_PASSENGER" | "PAY_OPERATOR") => {
     const msg = outcome === "REFUND_PASSENGER"
       ? `Side with the PASSENGER? ${d.passenger} gets the full ${d.fare !== null ? formatRWF(d.fare) : "fare"} back and ${d.driver} is not paid.`
-      : `Side with the DRIVER? ${d.driver} is paid the fare minus the locked commission; ${d.passenger} gets no refund.`;
+      : `Side with the DRIVER? The ride counts as completed: the fare minus the locked commission is released to ${d.driver}'s operator; ${d.passenger} gets no refund.`;
     if (!window.confirm(msg)) return;
     setBusyId(d.id);
     try {
@@ -882,29 +882,33 @@ function DisputesTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
   );
 }
 
-// Platform-wide knobs. Currently: the commission Relay keeps from each
-// moto hail. The rate is locked onto each ride the moment its fare is agreed,
-// so changing it here only affects agreements made from now on.
+// Platform-wide knobs: the two commissions Relay keeps. The moto rate is
+// locked onto each ride the moment its fare is agreed, so changing it only
+// affects agreements made from now on; the booking fee applies to scheduled
+// trip fares at payout / report time.
 function SettingsTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
-  const [pct, setPct] = useState<string>("");
+  const [moto, setMoto] = useState<string>("");
+  const [booking, setBooking] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.adminSettings().then((s) => { setPct(String(s.motoCommissionPct)); setLoaded(true); }).catch(() => setLoaded(true));
+    api.adminSettings().then((s) => { setMoto(String(s.motoCommissionPct)); setBooking(String(s.bookingCommissionPct)); setLoaded(true); }).catch(() => setLoaded(true));
   }, []);
 
   const save = async () => {
-    const value = Number(pct);
-    if (!Number.isFinite(value) || value < 0 || value > 50) {
-      onToast({ kind: "error", msg: "Commission must be between 0 and 50%." });
+    const m = Number(moto);
+    const b = Number(booking);
+    if (![m, b].every((v) => Number.isFinite(v) && v >= 0 && v <= 50)) {
+      onToast({ kind: "error", msg: "Each commission must be between 0 and 50%." });
       return;
     }
     setBusy(true);
     try {
-      const r = await api.adminUpdateSettings({ motoCommissionPct: value });
-      setPct(String(r.motoCommissionPct));
-      onToast({ kind: "success", msg: `Moto commission set to ${r.motoCommissionPct}%.` });
+      const r = await api.adminUpdateSettings({ motoCommissionPct: m, bookingCommissionPct: b });
+      setMoto(String(r.motoCommissionPct));
+      setBooking(String(r.bookingCommissionPct));
+      onToast({ kind: "success", msg: `Saved — bookings ${r.bookingCommissionPct}%, moto hails ${r.motoCommissionPct}%.` });
     } catch (e) {
       onToast({ kind: "error", msg: e instanceof Error ? e.message : "Could not save settings" });
     } finally {
@@ -914,26 +918,42 @@ function SettingsTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
 
   if (!loaded) return <Loading />;
 
-  return (
-    <Card style={{ maxWidth: 620 }}>
-      <CardTitle>Moto ride commission</CardTitle>
-      <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, marginBottom: 16, lineHeight: 1.5 }}>
-        Relay keeps this percentage of every moto hail; the driver receives the rest when the passenger confirms
-        completion. The rate is locked onto each ride when its fare is agreed, so changes here only affect new agreements.
-      </div>
+  const field = (label: string, help: string, value: string, set: (v: string) => void, def: number) => (
+    <div style={{ padding: "16px 0", borderTop: "1px solid #f1ece2" }}>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 600, marginBottom: 12, lineHeight: 1.5 }}>{help}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <input
-          value={pct}
-          onChange={(e) => setPct(e.target.value.replace(/[^0-9.]/g, ""))}
+          value={value}
+          onChange={(e) => set(e.target.value.replace(/[^0-9.]/g, ""))}
           inputMode="decimal"
           style={{ width: 120, border: "1px solid #e3ddd1", borderRadius: 11, padding: "11px 13px", fontSize: 15, fontWeight: 700, fontFamily: MONO, outline: "none" }}
         />
         <span style={{ fontSize: 14, fontWeight: 700, color: "#8c8378" }}>%</span>
-        <button onClick={save} disabled={busy} style={{ background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 11, padding: "11px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
-          {busy ? "Saving…" : "Save"}
-        </button>
+        <span style={{ fontSize: 12, color: "#a39a8d", fontWeight: 600 }}>default {def}% · 0–50%</span>
       </div>
-      <div style={{ fontSize: 12, color: "#a39a8d", fontWeight: 600, marginTop: 12 }}>Default: 10% · allowed range 0–50%.</div>
+    </div>
+  );
+
+  return (
+    <Card style={{ maxWidth: 620 }}>
+      <CardTitle>Platform commission</CardTitle>
+      <div style={{ fontSize: 13, color: "#8c8378", fontWeight: 600, marginBottom: 6, lineHeight: 1.5 }}>
+        What Relay keeps from each fare. Operators see these rates wherever they set a price, so what they&apos;re told they&apos;ll receive is what they can withdraw.
+      </div>
+      {field(
+        "Scheduled trips (bus & shared ride)",
+        "Deducted from every paid booking before it reaches the operator's withdrawable balance and reports.",
+        booking, setBooking, 12
+      )}
+      {field(
+        "Moto hails",
+        "Deducted when the passenger confirms a completed ride. Locked onto each ride when its fare is agreed, so changes only affect new agreements.",
+        moto, setMoto, 10
+      )}
+      <button onClick={save} disabled={busy} style={{ marginTop: 6, background: "#ff6a1a", color: "#fff", border: "none", borderRadius: 11, padding: "11px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}>
+        {busy ? "Saving…" : "Save"}
+      </button>
     </Card>
   );
 }

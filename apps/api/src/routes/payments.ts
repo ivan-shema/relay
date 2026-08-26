@@ -6,6 +6,7 @@ import { prisma } from "../prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
 import { notify } from "../lib/notify";
+import { getBookingCommissionPct } from "../lib/settings";
 
 export const paymentsRouter = Router();
 
@@ -54,6 +55,9 @@ paymentsRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const { bookingId, method, idempotencyKey } = createSchema.parse(req.body);
+    // Relay's booking commission is locked onto the payment now — a later
+    // change to the platform setting doesn't touch what this operator is owed.
+    const commissionPct = await getBookingCommissionPct();
 
     // Replay: this exact attempt already went through but the response was
     // lost (network retry). Return the stored result — charge nothing.
@@ -100,6 +104,7 @@ paymentsRouter.post(
         data: { walletBalance: balance.minus(booking.fare) },
       });
 
+      const commissionAmount = new Prisma.Decimal(booking.fare).mul(commissionPct).div(100).toDecimalPlaces(2);
       const payment = await tx.payment.upsert({
         where: { bookingId },
         create: {
@@ -109,8 +114,10 @@ paymentsRouter.post(
           status: "PAID",
           reference: "PAY-" + Math.random().toString(36).slice(2, 10).toUpperCase(),
           idempotencyKey,
+          commissionPct,
+          commissionAmount,
         },
-        update: { method, status: "PAID", idempotencyKey },
+        update: { method, status: "PAID", idempotencyKey, commissionPct, commissionAmount },
       });
 
       // One independently-boardable ticket per purchased seat — a group

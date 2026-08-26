@@ -416,6 +416,11 @@ model Payment {
   // Client-generated key: a network-level retry of the same payment attempt
   // replays the stored result instead of charging again.
   idempotencyKey String?  @unique
+  // Relay's booking commission, locked the moment the fare is paid so a later
+  // change to the platform setting never rewrites what the operator was owed
+  // (mirrors commissionPct / commissionAmount on RideRequest).
+  commissionPct    Float?
+  commissionAmount Decimal? @db.Decimal(10, 2)
   createdAt DateTime      @default(now())
 }
 
