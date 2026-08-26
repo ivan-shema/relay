@@ -842,6 +842,7 @@ function PaymentsTab() {
         <Card>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13 }}><span style={{ color: "#8c8378" }}>Gross today</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>{formatRWF(data.payout.grossToday)}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}><span style={{ color: "#8c8378" }}>Relay fee (12%)</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>-{formatRWF(data.payout.fee)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", fontSize: 13, borderTop: "1px solid #f1ece2" }}><span style={{ color: "#8c8378" }}>Moto hails today ({data.payout.motoRidesToday}, net of commission)</span><span style={{ fontFamily: MONO, fontWeight: 700 }}>+{formatRWF(data.payout.motoNetToday)}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "11px 0", fontSize: 14, fontWeight: 800, borderTop: "1px solid #f1ece2" }}><span>Net</span><span style={{ fontFamily: MONO, color: "#1f9d6b" }}>{formatRWF(data.payout.net)}</span></div>
         </Card>
       </div>
@@ -886,7 +887,8 @@ function ReportsTab() {
         fileName: `operator-report_${data.from.slice(0, 10)}.pdf`,
         kpis: [
           { label: "Revenue (gross)", value: fmtMoney(data.kpis.revenue) },
-          { label: `Net after ${data.kpis.platformFeePct}% Relay fee`, value: fmtMoney(data.kpis.net) },
+          { label: "Net to you", value: fmtMoney(data.kpis.net) },
+          { label: "Moto hails (gross)", value: `${fmtMoney(data.kpis.motoRevenue)} · ${data.kpis.motoRides} rides` },
           { label: "Bookings", value: `${data.kpis.bookings} (${data.kpis.cancelled} cancelled)` },
           { label: "Occupancy", value: `${data.kpis.occupancyPct}%` },
         ],
@@ -912,7 +914,8 @@ function ReportsTab() {
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 16 }}>
             <StatTile label="Revenue (gross)" value={formatRWF(data.kpis.revenue)} sub={`${data.kpis.paidBookings} paid bookings · avg ${formatRWF(data.kpis.avgFare)}`} />
-            <StatTile label={`Net after ${data.kpis.platformFeePct}% Relay fee`} value={formatRWF(data.kpis.net)} sub={`fee ${formatRWF(data.kpis.platformFee)}`} accent="#1f9d6b" />
+            <StatTile label="Net to you" value={formatRWF(data.kpis.net)} sub={`${data.kpis.platformFeePct}% fee ${formatRWF(data.kpis.platformFee)}${data.kpis.motoCommission ? ` · moto commission ${formatRWF(data.kpis.motoCommission)}` : ""}`} accent="#1f9d6b" />
+            <StatTile label="Moto hails" value={formatRWF(data.kpis.motoRevenue)} sub={`${data.kpis.motoRides} rides · gross, by your motos`} />
             <StatTile label="Bookings" value={String(data.kpis.bookings)} sub={`${data.kpis.cancelled} cancelled (${data.kpis.cancelRate}%)`} />
             <StatTile label="Occupancy" value={`${data.kpis.occupancyPct}%`} sub={`${data.kpis.seatsSold} of ${data.kpis.capacity} seats · ${data.kpis.tripsRun} trips ran`} />
             <StatTile label="Passenger rating" value={data.kpis.avgRating !== null ? `★ ${data.kpis.avgRating.toFixed(1)}` : "—"} sub={`${data.kpis.ratingsCount} ratings`} />

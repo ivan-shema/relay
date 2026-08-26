@@ -470,16 +470,19 @@ ridesRouter.post(
 );
 
 // POST /rides/:id/confirm-complete — the driver said the ride is done; the
-// passenger's confirmation is what actually releases the escrow: driver gets
-// the fare minus the platform commission. The commission % was locked on the
-// ride when the price was agreed — an admin change since then doesn't apply.
+// passenger's confirmation is what actually releases the escrow. The fare
+// minus the platform commission belongs to the OPERATOR whose moto did the
+// ride (drivers are the operator's staff and don't take a cut through Relay):
+// it joins the operator's withdrawable balance, exactly like bus fares. The
+// commission % was locked on the ride when the price was agreed — an admin
+// change since then doesn't apply.
 ridesRouter.post(
   "/:id/confirm-complete",
   asyncHandler(async (req, res) => {
     const currentPct = await getMotoCommissionPct();
 
-    const payout = await prisma.$transaction(async (tx) => {
-      const ride = await tx.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: { include: { user: true } } } });
+    const settled = await prisma.$transaction(async (tx) => {
+      const ride = await tx.rideRequest.findUnique({ where: { id: req.params.id }, include: { acceptedDriver: { include: { operator: true } } } });
       if (!ride || ride.passengerId !== req.auth!.sub) throw new HttpError(404, "Ride request not found");
       if (ride.status !== "AWAITING_CONFIRM") throw new HttpError(409, "The driver hasn't requested completion yet");
       const fare = ride.agreedFare;
@@ -488,23 +491,24 @@ ridesRouter.post(
 
       const pct = ride.commissionPct ?? currentPct;
       const commission = ride.commissionAmount ?? new Prisma.Decimal(fare).mul(pct).div(100).toDecimalPlaces(2);
-      const driverShare = new Prisma.Decimal(fare).minus(commission);
+      const operatorShare = new Prisma.Decimal(fare).minus(commission);
 
       await tx.rideRequest.update({
         where: { id: ride.id },
         data: { status: "COMPLETED", commissionPct: pct, commissionAmount: commission, completedAt: new Date() },
       });
-      await tx.user.update({
-        where: { id: driver.userId },
-        data: { walletBalance: new Prisma.Decimal(driver.user.walletBalance).plus(driverShare) },
-      });
-      await tx.walletTransaction.create({
-        data: { userId: driver.userId, kind: "CREDIT", amount: driverShare, label: `Moto ride payout · ${ride.originLabel} → ${ride.destLabel}` },
-      });
-      return { driverUserId: driver.userId, driverShare: Number(driverShare.toString()), route: `${ride.originLabel} → ${ride.destLabel}` };
+      return {
+        driverUserId: driver.userId,
+        operatorOwnerId: driver.operator?.ownerUserId ?? null,
+        operatorShare: Number(operatorShare.toString()),
+        route: `${ride.originLabel} → ${ride.destLabel}`,
+      };
     });
 
-    await notify(payout.driverUserId, "Ride payout received", `RWF ${Math.round(payout.driverShare).toLocaleString("en-US")} for ${payout.route} was added to your wallet (after platform commission).`);
+    if (settled.operatorOwnerId) {
+      await notify(settled.operatorOwnerId, "Moto fare received", `RWF ${Math.round(settled.operatorShare).toLocaleString("en-US")} for ${settled.route} (after Relay commission) is now available to withdraw.`);
+    }
+    await notify(settled.driverUserId, "Ride completed", `The passenger confirmed ${settled.route}. Thanks for the ride — you're free for the next one.`);
 
     const fresh = await loadRideView(req.params.id);
     res.json(fresh ? toRideView(fresh) : null);

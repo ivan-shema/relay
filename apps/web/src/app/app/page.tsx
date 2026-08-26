@@ -995,7 +995,7 @@ function fmtClock(iso: string): string {
 //   request (optional price + departure time) → bargain over counter-offers →
 //   pay into platform escrow → 10-min pickup window (rebroadcast or refund if
 //   the driver never comes) → ride → driver requests completion → passenger
-//   confirms → driver is paid out minus the platform commission.
+//   confirms → the fare (minus platform commission) is released to the moto's operator.
 function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string; onBack: () => void }) {
   const { refreshUser } = useAuth();
   const payKeyFor = useIdempotencyKeys();
@@ -1124,7 +1124,7 @@ function MotoHailScreen({ origin, dest, onBack }: { origin: string; dest: string
           {active.status === "ACCEPTED" && (
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1ece2" }}>
               <div style={{ fontSize: 12.5, color: "#6b6258", fontWeight: 600, marginBottom: 12 }}>
-                Pay from your Relay Wallet to confirm — Relay holds the money and only pays the driver after you confirm the ride is done. Top up via MoMo from the Wallet tab if your balance is short.
+                Pay from your Relay Wallet to confirm — Relay holds the money and only releases it to the moto operator after you confirm the ride is done. Top up via MoMo from the Wallet tab if your balance is short.
               </div>
               <button onClick={() => run(async () => { await api.payRide(active.id, payKeyFor(active.id)); await refreshUser(); })} disabled={busy} style={{ ...btn("#ff6a1a"), boxShadow: "0 12px 26px -12px rgba(255,106,26,.7)" }}>
                 {busy ? "Paying…" : `Pay ${active.agreedFare !== null ? formatRWF(active.agreedFare) : ""} & confirm`}

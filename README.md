@@ -10,8 +10,9 @@ frontend. **All four roles are implemented** end-to-end against the database:
 
 - **Passenger** — landing → auth → search → book → pay → track → rate, plus trips /
   wallet / profile.
-- **Driver** — online toggle, incoming ride requests (accept / decline / complete),
-  today's trips, earnings.
+- **Driver** — online toggle, the departures their operator assigned them
+  (board by ticket code, start, end), assigned moto hails. No earnings or
+  cash-out: drivers are operator staff — every fare is the operator's.
 - **Operator console** — overview KPIs, live map, vehicles, routes, schedule, drivers
   (with manage + suspend), bookings, payments & payouts.
 - **Admin console** — platform overview, users, operators, operator approvals
@@ -131,7 +132,7 @@ no credentials (toggle in `apps/api/.env`):
   (below). `MOCK_PAYMENTS` is gone — a payment either moves real recorded
   money or fails.
 - **Deposits & withdrawals (Paypack, required)** — wallet top-ups (cashin) and
-  operator/driver payouts (cashout) go through [Paypack](https://paypack.rw),
+  operator payouts (cashout) go through [Paypack](https://paypack.rw),
   which handles both MTN MoMo and Airtel Money. `PAYPACK_CLIENT_ID` /
   `PAYPACK_CLIENT_SECRET` in `apps/api/.env` are required for these flows —
   without them deposits/withdrawals return 503. Top-ups sit `PENDING` until the
@@ -211,7 +212,8 @@ gone. Admins can still add users of any role from the admin console.
   accepted/paid ride to another free moto (`/withdraw`, `/reassign`).
 - **The driver just drives.** Their console shows only the ride assigned to
   them: *Passenger picked up* → *Ride done*; the passenger confirms completion,
-  which releases the escrow minus commission. Pickup disputes stay with the
+  which releases the escrow minus commission **to the operator** (it joins their
+  withdrawable balance like bus fares). Pickup disputes stay with the
   driver (they're about what physically happened) and can be escalated to an
   admin.
 - **One passenger per moto.** Vehicles and departures with mode `MOTO` must
@@ -273,7 +275,8 @@ Beyond the core booking flow, these are backed by real endpoints + persistence
 
 - **Passenger** — wallet balance + ledger with working **top-up**, real
   **notifications** (list + mark read), rider **stats**, and **saved places** CRUD.
-- **Driver** — **cash-out** to MoMo (records a payout).
+- **Driver** — **start / end** an assigned departure (moves its bookings to
+  in-progress / completed and notifies the passengers); boarding by ticket code.
 - **Operator** — **add vehicle**, **new route**, **add departure** (publishes a
   bookable trip), **invite driver** (creates the account), **withdraw** payout.
 - **Admin** — **add user**, operator **approve/reject**, complaint **resolve**, and

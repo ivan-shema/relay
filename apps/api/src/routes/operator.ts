@@ -196,7 +196,7 @@ operatorRouter.get(
     const opId = await resolveVerifiedOperatorId(req.auth!.sub);
     const today = startOfToday();
 
-    const [bookingsToday, paidToday, activeVehicles, totalVehicles, liveBookings, routes] = await Promise.all([
+    const [bookingsToday, paidToday, activeVehicles, totalVehicles, liveBookings, routes, motoToday] = await Promise.all([
       prisma.booking.count({ where: { trip: { operatorId: opId }, createdAt: { gte: today } } }),
       prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } }),
       prisma.vehicle.count({ where: { operatorId: opId, status: "ACTIVE" } }),
@@ -208,9 +208,10 @@ operatorRouter.get(
         take: 6,
       }),
       prisma.route.findMany({ include: { trips: { where: { operatorId: opId }, include: { bookings: true } } } }),
+      motoEarnings(opId, today),
     ]);
 
-    const revenueToday = paidToday.reduce((s, p) => s + dec(p.amount), 0);
+    const revenueToday = paidToday.reduce((s, p) => s + dec(p.amount), 0) + motoToday.gross;
 
     const routePerf = routes
       .map((r) => {
@@ -453,17 +454,32 @@ operatorRouter.post(
 );
 
 
-// Today's withdrawable balance: net of Relay's fee, minus what was already
-// paid out (or is in flight) today. Failed payouts return to the pool.
+// Completed moto hails done by this operator's motos in a window. The fare
+// minus the commission locked on each ride is the operator's money — drivers
+// are the operator's staff and don't take a cut through Relay.
+async function motoEarnings(opId: string, from: Date, to?: Date) {
+  const rides = await prisma.rideRequest.findMany({
+    where: { status: "COMPLETED", completedAt: { gte: from, ...(to ? { lt: to } : {}) }, acceptedDriver: { operatorId: opId } },
+    select: { agreedFare: true, commissionAmount: true },
+  });
+  const gross = rides.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const commission = rides.reduce((s, r) => s + rdec(r.commissionAmount), 0);
+  return { rides: rides.length, gross, commission, net: gross - commission };
+}
+
+// Today's withdrawable balance: bus/ride fares net of Relay's fee, plus moto
+// fares net of their locked commission, minus what was already paid out (or
+// is in flight) today. Failed payouts return to the pool.
 async function withdrawableToday(opId: string): Promise<number> {
   const today = startOfToday();
-  const [paid, payouts] = await Promise.all([
+  const [paid, payouts, moto] = await Promise.all([
     prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } }),
     prisma.payout.findMany({ where: { operatorId: opId, createdAt: { gte: today }, status: { not: "FAILED" } } }),
+    motoEarnings(opId, today),
   ]);
   const gross = paid.reduce((s, p) => s + dec(p.amount), 0);
   const alreadyOut = payouts.reduce((s, p) => s + dec(p.amount), 0);
-  return gross * 0.88 - alreadyOut;
+  return gross * 0.88 + moto.net - alreadyOut;
 }
 
 // POST /operator/payout — withdraw today's net earnings. Real money only: a
@@ -783,7 +799,10 @@ operatorRouter.get(
       prisma.payment.findMany({ where, include: { booking: true }, orderBy: { createdAt: "desc" }, skip: p.skip, take: p.take }),
       prisma.payment.count({ where }),
     ]);
-    const paidToday = await prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } });
+    const [paidToday, moto] = await Promise.all([
+      prisma.payment.findMany({ where: { status: "PAID", createdAt: { gte: today }, booking: { trip: { operatorId: opId } } } }),
+      motoEarnings(opId, today),
+    ]);
     const gross = paidToday.reduce((s, pay) => s + dec(pay.amount), 0);
     const fee = gross * 0.12;
     // What's actually left to withdraw (net of fee AND of today's payouts)
@@ -803,6 +822,8 @@ operatorRouter.get(
       payout: {
         grossToday: Number(gross.toFixed(2)),
         fee: Number(fee.toFixed(2)),
+        motoRidesToday: moto.rides,
+        motoNetToday: Number(moto.net.toFixed(2)),
         net: Number(withdrawable.toFixed(2)),
         nextPayout: Number(withdrawable.toFixed(2)),
       },
@@ -818,7 +839,7 @@ operatorRouter.get(
 
 async function operatorReportData(opId: string, range: ReportRange) {
   const { start, end } = range;
-  const [bookings, trips, ratings] = await Promise.all([
+  const [bookings, trips, ratings, rides] = await Promise.all([
     prisma.booking.findMany({
       where: { createdAt: { gte: start, lt: end }, trip: { operatorId: opId } },
       include: { payment: true, trip: { include: { route: true, driver: { include: { user: true } } } } },
@@ -828,11 +849,20 @@ async function operatorReportData(opId: string, range: ReportRange) {
       include: { route: true, bookings: { select: { seats: true, status: true } } },
     }),
     prisma.rating.findMany({ where: { createdAt: { gte: start, lt: end }, booking: { trip: { operatorId: opId } } } }),
+    // Moto hails completed by this operator's motos — the fare (minus the
+    // locked commission) is operator income like any other.
+    prisma.rideRequest.findMany({
+      where: { status: "COMPLETED", completedAt: { gte: start, lt: end }, acceptedDriver: { operatorId: opId } },
+      include: { acceptedDriver: { include: { user: true } } },
+    }),
   ]);
 
   const paidOf = (b: (typeof bookings)[number]) => (b.payment?.status === "PAID" ? rdec(b.payment.amount) : 0);
   const revenue = bookings.reduce((s, b) => s + paidOf(b), 0);
   const platformFee = revenue * (BUS_PLATFORM_FEE_PCT / 100);
+  const motoRevenue = rides.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const motoCommission = rides.reduce((s, r) => s + rdec(r.commissionAmount), 0);
+  const totalGross = revenue + motoRevenue;
   const paidBookings = bookings.filter((b) => b.payment?.status === "PAID");
   const cancelled = bookings.filter((b) => b.status === "CANCELLED").length;
   const seatsSold = trips.reduce((s, t) => s + t.bookings.filter((b) => b.status !== "CANCELLED").reduce((x, b) => x + b.seats, 0), 0);
@@ -865,6 +895,13 @@ async function operatorReportData(opId: string, range: ReportRange) {
     if (b.status === "COMPLETED") e.completed += 1;
     driverAgg.set(d.id, e);
   }
+  for (const r of rides) {
+    const d = r.acceptedDriver;
+    if (!d) continue;
+    const e = driverAgg.get(d.id) ?? { driver: fullNameOf(d.user), bookings: 0, completed: 0, revenue: 0, scores: [] };
+    e.bookings += 1; e.completed += 1; e.revenue += rdec(r.agreedFare);
+    driverAgg.set(d.id, e);
+  }
   const ratingByBooking = new Map(ratings.map((r) => [r.bookingId, r.score]));
   for (const b of bookings) {
     const score = ratingByBooking.get(b.id);
@@ -882,13 +919,21 @@ async function operatorReportData(opId: string, range: ReportRange) {
     e.bookings += 1; e.revenue += paidOf(b);
     modeAgg.set(m, e);
   }
-  const byMode = [...modeAgg.entries()].map(([mode, v]) => ({ mode, label: MODE_LABEL[mode] ?? mode, bookings: v.bookings, revenue: round2(v.revenue), pct: revenue ? Math.round((v.revenue / revenue) * 100) : 0 })).sort((a, b) => b.revenue - a.revenue);
+  if (rides.length) {
+    const e = modeAgg.get("MOTO") ?? { bookings: 0, revenue: 0 };
+    e.bookings += rides.length; e.revenue += motoRevenue;
+    modeAgg.set("MOTO", e);
+  }
+  const byMode = [...modeAgg.entries()].map(([mode, v]) => ({ mode, label: MODE_LABEL[mode] ?? mode, bookings: v.bookings, revenue: round2(v.revenue), pct: totalGross ? Math.round((v.revenue / totalGross) * 100) : 0 })).sort((a, b) => b.revenue - a.revenue);
 
   const statusAgg = new Map<string, number>();
   for (const b of bookings) statusAgg.set(b.status, (statusAgg.get(b.status) ?? 0) + 1);
   const byStatus = [...statusAgg.entries()].map(([status, count]) => ({ status, count })).sort((a, b) => b.count - a.count);
 
-  const revenueBars = bucketSums(reportBuckets(range), paidBookings.map((b) => ({ at: b.payment!.createdAt, value: rdec(b.payment!.amount) })));
+  const revenueBars = bucketSums(reportBuckets(range), [
+    ...paidBookings.map((b) => ({ at: b.payment!.createdAt, value: rdec(b.payment!.amount) })),
+    ...rides.map((r) => ({ at: r.completedAt ?? r.createdAt, value: rdec(r.agreedFare) })),
+  ]);
 
   return {
     period: range.period,
@@ -899,7 +944,10 @@ async function operatorReportData(opId: string, range: ReportRange) {
       revenue: round2(revenue),
       platformFee: round2(platformFee),
       platformFeePct: BUS_PLATFORM_FEE_PCT,
-      net: round2(revenue - platformFee),
+      motoRides: rides.length,
+      motoRevenue: round2(motoRevenue),
+      motoCommission: round2(motoCommission),
+      net: round2(revenue - platformFee + motoRevenue - motoCommission),
       bookings: bookings.length,
       paidBookings: paidBookings.length,
       cancelled,

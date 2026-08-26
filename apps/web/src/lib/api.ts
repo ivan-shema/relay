@@ -238,13 +238,13 @@ export const api = {
   confirmRideComplete: (id: string) => request<RideView>(`/rides/${id}/confirm-complete`, { method: "POST", auth: true }),
   cancelRide: (id: string) => request<{ cancelled: boolean; refunded: boolean }>(`/rides/${id}/cancel`, { method: "POST", auth: true }),
   driverMotoRequests: () =>
-    request<{ current: DriverMotoRequest | null; platformCommissionPct: number; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
+    request<{ current: DriverMotoRequest | null; hailing: { enabled: boolean; reason: string | null } }>("/driver/moto-requests", { auth: true }),
   driverAcknowledgeNoPickup: (id: string) =>
     request<{ acknowledged: boolean }>(`/driver/moto-requests/${id}/acknowledge-no-pickup`, { method: "POST", auth: true }),
   driverContestDispute: (id: string) =>
     request<{ contested: boolean }>(`/driver/moto-requests/${id}/contest-dispute`, { method: "POST", auth: true }),
   adminRideDisputes: () => request<AdminRideDispute[]>("/admin/ride-disputes", { auth: true }),
-  adminResolveRideDispute: (id: string, outcome: "REFUND_PASSENGER" | "PAY_DRIVER") =>
+  adminResolveRideDispute: (id: string, outcome: "REFUND_PASSENGER" | "PAY_OPERATOR") =>
     request<{ resolved: boolean; outcome: string }>(`/admin/ride-disputes/${id}/resolve`, { method: "POST", body: { outcome }, auth: true }),
   driverPickupMotoRide: (id: string) => request<{ pickedUp: boolean }>(`/driver/moto-requests/${id}/pickup`, { method: "POST", auth: true }),
   driverCompleteMotoRide: (id: string) => request<{ requested: boolean }>(`/driver/moto-requests/${id}/complete`, { method: "POST", auth: true }),
@@ -272,11 +272,10 @@ export const api = {
   // ---- driver ----
   driverMe: () => request<DriverMe>("/driver/me", { auth: true }),
   driverSetOnline: (online: boolean) => request<{ online: boolean }>("/driver/online", { method: "POST", body: { online }, auth: true }),
-  driverRequests: () => request<DriverRequest[]>("/driver/requests", { auth: true }),
-  driverAccept: (id: string) => request<unknown>(`/driver/requests/${id}/accept`, { method: "POST", auth: true }),
-  driverDecline: (id: string) => request<unknown>(`/driver/requests/${id}/decline`, { method: "POST", auth: true }),
-  driverComplete: (id: string) => request<unknown>(`/driver/requests/${id}/complete`, { method: "POST", auth: true }),
-  driverTrips: () => request<DriverTrip[]>("/driver/trips", { auth: true }),
+  // assigned departures — the driver runs them; no accepting/declining
+  driverSchedule: () => request<DriverScheduleTrip[]>("/driver/schedule", { auth: true }),
+  driverStartTrip: (id: string) => request<{ started: boolean }>(`/driver/trips/${id}/start`, { method: "POST", auth: true }),
+  driverCompleteTrip: (id: string) => request<{ completed: boolean }>(`/driver/trips/${id}/complete`, { method: "POST", auth: true }),
 
   // ---- operator ----
   // Onboarding — a signed-in passenger applies to become an operator (multipart:
@@ -356,9 +355,6 @@ export const api = {
   addSavedPlace: (body: { label: string; area: string; icon?: string }) => request<SavedPlace>("/me/places", { method: "POST", body, auth: true }),
   deleteSavedPlace: (id: string) => request<unknown>(`/me/places/${id}`, { method: "DELETE", auth: true }),
 
-  // ---- driver actions ----
-  driverCashout: () => request<{ amount: number; reference: string; status: TransferStatus }>("/driver/cashout", { method: "POST", auth: true }),
-  driverCashoutStatus: (reference: string) => request<{ status: TransferStatus; amount: number; reference: string }>(`/driver/cashout/${reference}/status`, { auth: true }),
 
   // ---- operator writes ----
   operatorAddVehicle: (body: { plateNumber: string; type: string; capacity: number; model?: string }) => request<{ id: string }>("/operator/vehicles", { method: "POST", body, auth: true }),
@@ -427,8 +423,6 @@ export const api = {
     request<{ reassigned: boolean }>(`/operator/moto-hails/${id}/reassign`, { method: "POST", body: { driverId }, auth: true }),
   operatorReports: (q = "?period=month") => request<OperatorReports>(`/operator/reports${q}`, { auth: true }),
   operatorReportExportUrl: (q = "?period=month") => `${BASE}/operator/reports/export${q}`,
-  driverReports: (q = "?period=month") => request<DriverReports>(`/driver/reports${q}`, { auth: true }),
-  driverReportExportUrl: (q = "?period=month") => `${BASE}/driver/reports/export${q}`,
   myReports: (q = "?period=month") => request<PassengerReports>(`/me/reports${q}`, { auth: true }),
   myReportExportUrl: (q = "?period=month") => `${BASE}/me/reports/export${q}`,
   adminResolveComplaint: (id: string) => request<unknown>(`/admin/complaints/${id}/resolve`, { method: "POST", auth: true }),
@@ -544,10 +538,6 @@ export interface DriverMotoRequest {
   requestedAt: string;
   disputedAt: string | null;
   disputeContested: boolean;
-  commissionPct: number;
-  commissionLocked: boolean;
-  commissionAmount: number | null;
-  netPayout: number | null;
 }
 export interface AdminRideDispute {
   id: string;
@@ -660,28 +650,24 @@ export interface DriverMe {
   rating: number;
   vehicle: { label: string; plate: string; type: string } | null;
   operatorName: string | null;
-  stats: { earningsToday: number; tripsToday: number; onlineHours: number; acceptance: number; earningsWeek: number; tripsWeek: number };
+  // No earnings here — fares belong to the operator the driver works for.
+  stats: { tripsToday: number; passengersToday: number; onlineHours: number; tripsWeek: number };
 }
-export interface DriverRequest {
+// A departure the operator assigned to this driver, with its confirmed
+// passengers. No fares: the driver only boards, starts and finishes.
+export interface DriverScheduleTrip {
   id: string;
-  passenger: string;
-  passengerRating: number;
-  from: string;
-  to: string;
-  fare: number;
-  distanceKm: number;
-  seatNumber: string | null;
-  ticketsBoarded: number;
-  ticketsTotal: number;
-}
-export interface DriverTrip {
-  id: string;
-  time: string;
   from: string;
   to: string;
   mode: string;
-  fare: number;
+  departAt: string;
+  arriveAt: string;
   status: string;
+  capacity: number;
+  seatsLeft: number;
+  passengers: { bookingId: string; name: string; seats: number; seatNumbers: string | null; boarded: number; status: string }[];
+  boarded: number;
+  ticketsTotal: number;
 }
 
 export interface Kpi {
@@ -817,7 +803,7 @@ export interface OperatorBookingRow {
 }
 export interface OperatorPayments {
   transactions: Paginated<{ id: string; booking: string; method: string; amount: number; status: string }>;
-  payout: { grossToday: number; fee: number; net: number; nextPayout: number };
+  payout: { grossToday: number; fee: number; motoRidesToday: number; motoNetToday: number; net: number; nextPayout: number };
 }
 
 export interface AdminOverview {
@@ -928,7 +914,7 @@ export interface AdminReports extends ReportRangeMeta {
 }
 export interface OperatorReports extends ReportRangeMeta {
   kpis: {
-    revenue: number; platformFee: number; platformFeePct: number; net: number; bookings: number; paidBookings: number; cancelled: number; cancelRate: number;
+    revenue: number; platformFee: number; platformFeePct: number; motoRides: number; motoRevenue: number; motoCommission: number; net: number; bookings: number; paidBookings: number; cancelled: number; cancelRate: number;
     tripsRun: number; seatsSold: number; capacity: number; occupancyPct: number; avgFare: number; avgRating: number | null; ratingsCount: number;
   };
   revenueBars: { m: string; value: number }[];
@@ -936,18 +922,6 @@ export interface OperatorReports extends ReportRangeMeta {
   byDriver: { driver: string; bookings: number; completed: number; revenue: number; rating: number | null }[];
   byMode: { mode: string; label: string; bookings: number; revenue: number; pct: number }[];
   byStatus: { status: string; count: number }[];
-}
-export interface DriverReportRow {
-  date: string; kind: "TRIP" | "MOTO"; route: string; passenger: string; gross: number; fee: number; net: number; status: string; reference: string;
-}
-export interface DriverReports extends ReportRangeMeta {
-  kpis: {
-    gross: number; motoCommission: number; net: number; bookings: number; tripsCompleted: number; rides: number; ridesCancelled: number; disputes: number;
-    avgRating: number | null; ratingsCount: number;
-  };
-  earningsBars: { m: string; value: number }[];
-  rows: DriverReportRow[];
-  truncated: boolean;
 }
 export interface PassengerReportRow {
   date: string; kind: "BOOKING" | "MOTO" | "WALLET"; route: string; mode: string; seats: number | null; amount: number; status: string; reference: string;

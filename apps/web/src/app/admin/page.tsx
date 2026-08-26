@@ -812,7 +812,7 @@ function DisputesTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
     return () => clearInterval(t);
   }, [load]);
 
-  const resolve = async (d: AdminRideDispute, outcome: "REFUND_PASSENGER" | "PAY_DRIVER") => {
+  const resolve = async (d: AdminRideDispute, outcome: "REFUND_PASSENGER" | "PAY_OPERATOR") => {
     const msg = outcome === "REFUND_PASSENGER"
       ? `Side with the PASSENGER? ${d.passenger} gets the full ${d.fare !== null ? formatRWF(d.fare) : "fare"} back and ${d.driver} is not paid.`
       : `Side with the DRIVER? ${d.driver} is paid the fare minus the locked commission; ${d.passenger} gets no refund.`;
@@ -868,11 +868,11 @@ function DisputesTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
                 Refund passenger in full
               </button>
               <button
-                onClick={() => resolve(d, "PAY_DRIVER")}
+                onClick={() => resolve(d, "PAY_OPERATOR")}
                 disabled={busyId === d.id}
                 style={{ background: "#1f9d6b", color: "#fff", border: "none", borderRadius: 11, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "'Manrope', sans-serif" }}
               >
-                Pay the driver
+                Ride happened — release fare to operator
               </button>
             </div>
           )}
@@ -972,7 +972,7 @@ function ComplaintsTab() {
 // include, and a format. CSV streams the server export; PDF combines the
 // window's summary numbers with the same export's rows.
 const REPORT_TYPES: { key: AdminReportType; t: string; d: string }[] = [
-  { key: "revenue", t: "Revenue & payouts", d: "Every settled booking and moto hail, with Relay's fee and the net to operator / driver" },
+  { key: "revenue", t: "Revenue & payouts", d: "Every settled booking and moto hail, with Relay's fee and the net to the operator" },
   { key: "bookings", t: "Bookings & trips", d: "Every booking in the window: route, mode, driver, vehicle, payment and status" },
   { key: "passengers", t: "Passenger activity", d: "Per passenger: bookings, moto rides, spend, last activity and wallet balance" },
   { key: "drivers", t: "Driver performance", d: "Per driver: bookings, completed trips, moto rides, gross, commission and ratings" },
