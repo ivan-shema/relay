@@ -413,6 +413,7 @@ export const api = {
   adminPayments: (page?: number) => request<AdminPayments>(`/admin/payments${pageQuery(page)}`, { auth: true }),
   // Reports — `q` is the range query from components/reports.tsx (rangeQuery)
   adminReports: (q = "?period=month") => request<AdminReports>(`/admin/reports${q}`, { auth: true }),
+  adminFinance: (q = "?period=month") => request<AdminFinance>(`/admin/finance${q}`, { auth: true }),
   adminReportExportUrl: (type: AdminReportType, q = "?period=all") => `${BASE}/admin/reports/export${q}&type=${type}`,
   // moto dispatch (operators offering MOTO)
   operatorMotoHails: () => request<OperatorMotoHails>("/operator/moto-hails", { auth: true }),
@@ -818,6 +819,7 @@ export interface AdminOverview {
   kpis: Kpi[];
   approvals: AdminApproval[];
   revenueBars: { m: string; value: number }[];
+  revenueTrend: string;
   complaints: { id: string; who: string; message: string; priority: string }[];
   // Paypack merchant float (real money held); null = not connected
   paypack: { balance: number; mtn: number; airtel: number } | null;
@@ -919,6 +921,30 @@ export interface AdminReports extends ReportRangeMeta {
   byOperator: { name: string; bookings: number; revenue: number; platformFee: number; netToOperator: number }[];
   byMethod: { method: string; count: number; amount: number }[];
   bookingsByStatus: { status: string; count: number }[];
+}
+// Platform finance: lifetime money position + a period view with growth.
+export interface AdminFinanceLedger {
+  collected: number; bookingGross: number; motoGross: number;
+  commission: number; bookingCommission: number; motoCommission: number; takeRatePct: number;
+  owedToOperators: number; paidOut: number; payoutsPending: number; payoutsFailed: number; operatorBalance: number;
+  escrowHeld: number; refunded: number; walletFloat: number; topUps: number; topUpCount: number; pendingTopUps: number;
+  liabilities: number; paypackBalance: number | null; coveragePct: number | null;
+}
+export interface AdminFinancePeriod {
+  gross: number; bookingGross: number; motoGross: number; commission: number; bookingCommission: number; motoCommission: number; takeRatePct: number; avgTicket: number;
+  paidBookings: number; bookingsCreated: number; bookingsCancelled: number; bookingsCompleted: number; paidConversionPct: number; cancelRatePct: number;
+  hailsRequested: number; hailsCompleted: number; hailsCancelled: number; hailFulfilmentPct: number; rides: number;
+  newPassengers: number; newDrivers: number; newOperators: number; activePassengers: number; repeatPassengers: number; repeatRatePct: number;
+  avgRating: number | null; ratingsCount: number; disputes: number; disputeRatePct: number; complaints: number;
+  tripsRun: number; occupancyPct: number; activeOperators: number; topOperatorSharePct: number;
+}
+export interface AdminFinance extends ReportRangeMeta {
+  ledger: AdminFinanceLedger;
+  current: AdminFinancePeriod;
+  previous: AdminFinancePeriod | null;
+  growth: { gross: number | null; commission: number | null; paidBookings: number | null; rides: number | null; activePassengers: number | null; newPassengers: number | null; bookingsCreated: number | null; hailsRequested: number | null };
+  bars: { m: string; gross: number; commission: number }[];
+  topRoutes: { route: string; bookings: number; revenue: number; sharePct: number }[];
 }
 export interface OperatorReports extends ReportRangeMeta {
   kpis: {

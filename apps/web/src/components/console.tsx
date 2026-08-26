@@ -274,7 +274,7 @@ export function KpiGrid({ kpis }: { kpis: { label: string; value: string; sub: s
           <div style={{ fontFamily: DISPLAY, fontSize: 26, fontWeight: 700, letterSpacing: "-.6px" }}>{k.value}</div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 9 }}>
             <span style={{ fontSize: 11.5, color: "#a39a8d" }}>{k.sub}</span>
-            {k.delta && <span style={{ fontSize: 11, fontWeight: 800, color: "#1f9d6b", background: "#e7f6ee", borderRadius: 6, padding: "3px 7px" }}>{k.delta}</span>}
+            {k.delta && (() => { const down = /^[-−]/.test(k.delta); return <span style={{ fontSize: 11, fontWeight: 800, color: down ? "#c2553f" : "#1f9d6b", background: down ? "#fbeae6" : "#e7f6ee", borderRadius: 6, padding: "3px 7px" }}>{k.delta}</span>; })()}
           </div>
         </div>
       ))}

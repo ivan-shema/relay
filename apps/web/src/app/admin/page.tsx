@@ -11,6 +11,7 @@ import {
   type AdminApproval,
   type AdminPayments,
   type AdminReports,
+  type AdminFinance,
   type KycDocument,
   type AdminRideDispute,
   type AdminReportType,
@@ -58,6 +59,7 @@ export default function AdminConsole() {
     { key: "approvals", label: "Approvals", icon: "✓", badge: pending || undefined },
     { key: "payments", label: "Payments", icon: "◈" },
     { key: "reports", label: "Reports", icon: "▧" },
+    { key: "finance", label: "Finance", icon: "Σ" },
     { key: "complaints", label: "Complaints", icon: "!" },
     { key: "disputes", label: "Ride disputes", icon: "⚖" },
     { key: "settings", label: "Settings", icon: "⚙" },
@@ -116,6 +118,7 @@ export default function AdminConsole() {
             {tab === "approvals" && <ApprovalsTab onReview={setReviewId} />}
             {tab === "payments" && <PaymentsTab />}
             {tab === "reports" && <ReportsTab onToast={setToast} />}
+            {tab === "finance" && <FinanceTab onToast={setToast} />}
             {tab === "complaints" && <ComplaintsTab />}
             {tab === "disputes" && <DisputesTab onToast={setToast} />}
             {tab === "settings" && <SettingsTab onToast={setToast} />}
@@ -154,7 +157,7 @@ function Dashboard({ onReview, onReviewAll }: { onReview: (id: string) => void; 
             {data.approvals.map((a) => <ApprovalRow key={a.id} a={a} onReview={() => onReview(a.id)} />)}
           </Card>
           <Card>
-            <CardTitle right={<span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: "#1f9d6b" }}>+19% MoM</span>}>Platform revenue</CardTitle>
+            <CardTitle right={<span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: /^[-−]/.test(data.revenueTrend) ? "#c2553f" : "#1f9d6b" }}>{data.revenueTrend}</span>}>Collected from passengers · last 6 months</CardTitle>
             <BarChart bars={data.revenueBars} />
           </Card>
         </div>
@@ -877,6 +880,187 @@ function DisputesTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
             </div>
           )}
         </Card>
+      ))}
+    </div>
+  );
+}
+
+// Platform finance — the money position and the numbers behind a decision:
+// what passengers paid, what Relay kept, what operators are owed vs paid out,
+// what the platform is holding (wallets + escrow) against the Paypack float,
+// and a period view with growth, funnels and quality signals.
+function FinanceTab({ onToast }: { onToast: (t: ToastMsg) => void }) {
+  const [range, setRange] = useState<ReportRangeValue>({ period: "month" });
+  const [data, setData] = useState<AdminFinance | null>(null);
+  const q = rangeQuery(range);
+
+  useEffect(() => {
+    if (!isRangeReady(range)) return;
+    let active = true;
+    setData(null);
+    api.adminFinance(q).then((d) => active && setData(d)).catch((e) => onToast({ kind: "error", msg: e instanceof Error ? e.message : "Could not load finance data" }));
+    return () => { active = false; };
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!data) return (
+    <>
+      <div style={{ marginBottom: 16 }}><PeriodPicker value={range} onChange={setRange} /></div>
+      <Loading />
+    </>
+  );
+  const L = data.ledger;
+  const c = data.current;
+  const p = data.previous;
+  const growth = (g: number | null) => (g === null ? "" : `${g >= 0 ? "▲" : "▼"} ${Math.abs(g)}% vs previous`);
+  const prevNote = (v: number | undefined) => (p && v !== undefined ? ` · prev ${typeof v === "number" ? v.toLocaleString("en-US") : v}` : "");
+  const money = (n: number) => formatRWF(n);
+  const line = (label: string, value: React.ReactNode, strong?: boolean, color?: string) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, padding: "8px 0", borderTop: "1px solid rgba(255,255,255,.08)", fontSize: strong ? 14 : 12.5, fontWeight: strong ? 800 : 600 }}>
+      <span style={{ color: strong ? "#fff" : "#cfc7bb" }}>{label}</span>
+      <span style={{ fontFamily: MONO, color: color ?? "#fff", whiteSpace: "nowrap" }}>{value}</span>
+    </div>
+  );
+  const coverageColor = L.coveragePct === null ? "#9a9186" : L.coveragePct >= 100 ? "#4cd396" : "#e0a99a";
+
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <PeriodPicker value={range} onChange={setRange} />
+        <span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>Money position is all-time · activity is {data.label.toLowerCase()}</span>
+      </div>
+
+      {/* ---- lifetime money position ---- */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", gap: 16, marginBottom: 16 }} className="op-two">
+        <div style={{ background: "#1b1714", borderRadius: 18, padding: 20, color: "#fff" }}>
+          <div style={{ fontSize: 12.5, color: "#cfc7bb", fontWeight: 700 }}>Collected from passengers · all time</div>
+          <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 700, margin: "2px 0 6px" }}>{money(L.collected)}</div>
+          <div style={{ fontSize: 12, color: "#9a9186", fontWeight: 600, marginBottom: 8 }}>{money(L.bookingGross)} scheduled trips · {money(L.motoGross)} moto hails</div>
+          {line("Relay commission kept", <span style={{ color: "#4cd396" }}>{money(L.commission)}</span>, true)}
+          {line(`· effective take rate`, `${L.takeRatePct}%`)}
+          {line("· from bookings / moto", `${money(L.bookingCommission)} / ${money(L.motoCommission)}`)}
+          {line("Owed to operators (net of commission)", money(L.owedToOperators), true)}
+          {line("· paid out (completed)", money(L.paidOut))}
+          {line("· payouts in flight", money(L.payoutsPending))}
+          {line("· still to withdraw", money(L.operatorBalance), false, L.operatorBalance > 0 ? "#ffb266" : "#fff")}
+          {L.payoutsFailed > 0 && line("· failed payouts", String(L.payoutsFailed), false, "#e0a99a")}
+        </div>
+        <div style={{ background: "#1b1714", borderRadius: 18, padding: 20, color: "#fff" }}>
+          <div style={{ fontSize: 12.5, color: "#cfc7bb", fontWeight: 700 }}>What Relay is holding</div>
+          <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 700, margin: "2px 0 6px" }}>{money(L.liabilities)}</div>
+          <div style={{ fontSize: 12, color: "#9a9186", fontWeight: 600, marginBottom: 8 }}>must be payable at any moment</div>
+          {line("Passenger wallet balances", money(L.walletFloat))}
+          {line("Moto escrow (funded, not yet done)", money(L.escrowHeld))}
+          {line("Operators still to withdraw", money(Math.max(0, L.operatorBalance)))}
+          {line("Paypack float", L.paypackBalance === null ? "not connected" : money(L.paypackBalance), true, coverageColor)}
+          {line("· covers liabilities", L.coveragePct === null ? "—" : `${L.coveragePct}%`, false, coverageColor)}
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #ece6db", borderRadius: 18, padding: 20 }}>
+          <div style={{ fontSize: 12.5, color: "#8c8378", fontWeight: 700 }}>Wallet flows · all time</div>
+          <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 700, margin: "2px 0 6px" }}>{money(L.topUps)}</div>
+          <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginBottom: 8 }}>topped up via MoMo / Airtel · {L.topUpCount} deposits</div>
+          <SplitRow label="Top-ups pending at provider" value={money(L.pendingTopUps)} mono />
+          <SplitRow label="Refunded to passengers (moto)" value={money(L.refunded)} mono />
+          <SplitRow label="Failed operator payouts" value={String(L.payoutsFailed)} mono />
+          <div style={{ fontSize: 11.5, color: "#a39a8d", fontWeight: 600, marginTop: 10, lineHeight: 1.5 }}>
+            Every fare is paid from the wallet, so top-ups are the only money entering the platform; commission is what stays after operators withdraw.
+          </div>
+        </div>
+      </div>
+
+      {/* ---- period KPIs with growth ---- */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <StatTile label="Collected" value={money(c.gross)} sub={growth(data.growth.gross) || `${money(c.bookingGross)} trips · ${money(c.motoGross)} moto`} />
+        <StatTile label="Commission earned" value={money(c.commission)} sub={growth(data.growth.commission) || `${c.takeRatePct}% take rate`} accent="#1f9d6b" />
+        <StatTile label="Take rate" value={`${c.takeRatePct}%`} sub={`${money(c.bookingCommission)} bookings · ${money(c.motoCommission)} moto`} />
+        <StatTile label="Paid bookings" value={String(c.paidBookings)} sub={growth(data.growth.paidBookings) || `avg ticket ${money(c.avgTicket)}`} />
+        <StatTile label="Moto rides done" value={String(c.rides)} sub={growth(data.growth.rides) || `${c.hailsRequested} requested`} />
+        <StatTile label="Active passengers" value={String(c.activePassengers)} sub={growth(data.growth.activePassengers) || `${c.repeatRatePct}% repeat`} />
+      </div>
+
+      {/* ---- trend ---- */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }} className="op-two">
+        <Card>
+          <CardTitle right={<span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>{data.label}</span>}>Collected by period</CardTitle>
+          <BarChart bars={data.bars.map((b) => ({ m: b.m, value: b.gross }))} height={130} />
+        </Card>
+        <Card>
+          <CardTitle right={<span style={{ fontSize: 12, color: "#1f9d6b", fontWeight: 700 }}>{c.takeRatePct}% of collected</span>}>Commission by period</CardTitle>
+          <BarChart bars={data.bars.map((b) => ({ m: b.m, value: b.commission }))} height={130} />
+        </Card>
+      </div>
+
+      {/* ---- funnels, quality, growth ---- */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }} className="op-two">
+        <Card>
+          <CardTitle>Booking funnel</CardTitle>
+          <Funnel steps={[
+            { label: "Bookings created", value: c.bookingsCreated, note: prevNote(p?.bookingsCreated) },
+            { label: "Paid", value: c.paidBookings, note: `${c.paidConversionPct}% of created` },
+            { label: "Completed", value: c.bookingsCompleted, note: "trip ran to the end" },
+          ]} />
+          <div style={{ fontSize: 12.5, color: c.cancelRatePct > 15 ? "#c2553f" : "#8c8378", fontWeight: 700, marginTop: 10 }}>
+            Cancellation rate {c.cancelRatePct}% ({c.bookingsCancelled} cancelled){c.cancelRatePct > 15 ? " — above 15%, worth a look" : ""}
+          </div>
+        </Card>
+        <Card>
+          <CardTitle>Moto hail funnel</CardTitle>
+          <Funnel steps={[
+            { label: "Hails requested", value: c.hailsRequested, note: prevNote(p?.hailsRequested) },
+            { label: "Completed", value: c.hailsCompleted, note: `${c.hailFulfilmentPct}% fulfilled` },
+            { label: "Cancelled / unserved", value: c.hailsCancelled, note: "passenger backed out or no moto" },
+          ]} />
+          <div style={{ fontSize: 12.5, color: c.hailFulfilmentPct < 60 && c.hailsRequested > 0 ? "#c2553f" : "#8c8378", fontWeight: 700, marginTop: 10 }}>
+            {c.hailsRequested === 0 ? "No hails in this period." : c.hailFulfilmentPct < 60 ? "Fewer than 60% of hails are being served — check moto supply and operator response." : "Supply is keeping up with demand."}
+          </div>
+        </Card>
+        <Card>
+          <CardTitle>Quality &amp; risk</CardTitle>
+          <SplitRow label="Passenger rating" value={c.avgRating !== null ? `★ ${c.avgRating.toFixed(1)} (${c.ratingsCount})` : "no ratings"} mono />
+          <SplitRow label="Pickup disputes" value={`${c.disputes} · ${c.disputeRatePct}% of rides`} mono />
+          <SplitRow label="Complaints raised" value={String(c.complaints)} mono />
+          <SplitRow label="Seat occupancy (trips run)" value={`${c.occupancyPct}% · ${c.tripsRun} trips`} mono />
+          <SplitRow label="Revenue concentration" value={`top operator ${c.topOperatorSharePct}%`} mono />
+          <div style={{ fontSize: 12, color: "#8c8378", fontWeight: 600, marginTop: 10, lineHeight: 1.5 }}>
+            {c.topOperatorSharePct >= 70 && c.activeOperators > 1 ? "One operator drives most of the volume — onboarding more reduces dependence." : `${c.activeOperators} operators earned in this period.`}
+            {c.occupancyPct > 0 && c.occupancyPct < 40 ? " Occupancy under 40%: operators may be scheduling more capacity than demand." : ""}
+          </div>
+        </Card>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16, marginBottom: 16 }} className="op-two">
+        <Card>
+          <CardTitle>Growth · {data.label}</CardTitle>
+          <SplitRow label="New passengers" value={`${c.newPassengers}${p ? ` (prev ${p.newPassengers})` : ""}`} mono />
+          <SplitRow label="New drivers" value={`${c.newDrivers}${p ? ` (prev ${p.newDrivers})` : ""}`} mono />
+          <SplitRow label="New operators" value={`${c.newOperators}${p ? ` (prev ${p.newOperators})` : ""}`} mono />
+          <SplitRow label="Repeat passengers" value={`${c.repeatPassengers} of ${c.activePassengers} (${c.repeatRatePct}%)`} mono />
+          <SplitRow label="Avg ticket" value={money(c.avgTicket)} mono />
+        </Card>
+        <Card>
+          <CardTitle right={<span style={{ fontSize: 12, color: "#8c8378", fontWeight: 700 }}>share of scheduled-trip revenue</span>}>Top routes</CardTitle>
+          <ReportTable columns={["Route", "Paid bookings", "Revenue", "Share"]} align={["l", "r", "r", "r"]}
+            rows={data.topRoutes.map((r) => [r.route, r.bookings, money(r.revenue), `${r.sharePct}%`])} />
+        </Card>
+      </div>
+    </>
+  );
+}
+
+function Funnel({ steps }: { steps: { label: string; value: number; note?: string }[] }) {
+  const max = Math.max(1, ...steps.map((s) => s.value));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {steps.map((s, i) => (
+        <div key={s.label}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
+            <span>{s.label}</span>
+            <span style={{ fontFamily: MONO }}>{s.value.toLocaleString("en-US")}</span>
+          </div>
+          <div style={{ height: 8, borderRadius: 6, background: "#f1ece2", overflow: "hidden" }}>
+            <div style={{ width: `${Math.max(2, (s.value / max) * 100)}%`, height: "100%", background: i === 0 ? "#1b1714" : i === 1 ? "#ff6a1a" : "#1f9d6b" }} />
+          </div>
+          {s.note && <div style={{ fontSize: 11, color: "#a39a8d", fontWeight: 600, marginTop: 3 }}>{s.note}</div>}
+        </div>
       ))}
     </div>
   );

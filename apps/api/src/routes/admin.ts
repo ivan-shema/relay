@@ -68,34 +68,59 @@ function mapApproval(o: ApprovalOperator) {
   };
 }
 
-// GET /admin/overview — KPIs, approvals, revenue, complaints
+// GET /admin/overview — KPIs, approvals, revenue, complaints. Every number and
+// delta is computed from the ledger (the deltas compare this calendar month
+// with the previous one).
 adminRouter.get(
   "/overview",
   asyncHandler(async (_req, res) => {
-    const [users, operators, trips, paidAll, pendingOps, complaints, paypack] = await Promise.all([
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const sixMonthsStart = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    const [users, usersThisMonth, operators, bookings, bookingsThisMonth, paidAll, ridesAll, pendingOps, complaints, paypack] = await Promise.all([
       prisma.user.count(),
+      prisma.user.count({ where: { createdAt: { gte: monthStart } } }),
       prisma.operator.count(),
       prisma.booking.count(),
-      prisma.payment.findMany({ where: { status: "PAID" } }),
+      prisma.booking.count({ where: { createdAt: { gte: monthStart } } }),
+      prisma.payment.findMany({ where: { status: "PAID" }, select: { amount: true, commissionAmount: true, createdAt: true } }),
+      prisma.rideRequest.findMany({ where: { status: "COMPLETED" }, select: { agreedFare: true, commissionAmount: true, completedAt: true, createdAt: true } }),
       prisma.operator.findMany({ where: { status: "PENDING" }, orderBy: { createdAt: "asc" }, include: { documents: true, ownerUser: true } }),
       prisma.complaint.findMany({ where: { status: "OPEN" }, orderBy: { createdAt: "desc" }, take: 4 }),
       fetchMerchantBalances(), // null when Paypack isn't configured/reachable
     ]);
-    const revenue = paidAll.reduce((s, p) => s + dec(p.amount), 0);
+    const items = [
+      ...paidAll.map((p) => ({ at: p.createdAt, gross: rdec(p.amount), fee: rdec(p.commissionAmount) })),
+      ...ridesAll.map((r) => ({ at: r.completedAt ?? r.createdAt, gross: rdec(r.agreedFare), fee: rdec(r.commissionAmount) })),
+    ];
+    const sumIn = (from: Date, to: Date, key: "gross" | "fee") => items.filter((i) => i.at >= from && i.at < to).reduce((s, i) => s + i[key], 0);
+    const collected = items.reduce((s, i) => s + i.gross, 0);
+    const commission = items.reduce((s, i) => s + i.fee, 0);
+    const grossThisMonth = sumIn(monthStart, new Date(now.getTime() + 60_000), "gross");
+    const grossPrevMonth = sumIn(prevMonthStart, monthStart, "gross");
+    const commThisMonth = sumIn(monthStart, new Date(now.getTime() + 60_000), "fee");
+    const commPrevMonth = sumIn(prevMonthStart, monthStart, "fee");
+    const mom = (cur: number, prev: number) => (prev > 0 ? `${cur >= prev ? "+" : "−"}${Math.round((Math.abs(cur - prev) / prev) * 100)}% MoM` : cur > 0 ? "new" : "");
 
-    // 6-month revenue bars (mostly synthetic history + real current bucket)
-    const base = [0.42, 0.55, 0.6, 0.78, 0.9, 1].map((f) => Math.round(revenue * f * 100) / 100);
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+    // Real monthly gross for the last six calendar months.
+    const revenueBars = Array.from({ length: 6 }, (_, i) => {
+      const start = new Date(sixMonthsStart.getFullYear(), sixMonthsStart.getMonth() + i, 1);
+      const end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+      return { m: start.toLocaleDateString("en-US", { month: "short" }), value: round2(sumIn(start, end, "gross")) };
+    });
 
     res.json({
       kpis: [
-        { label: "Total users", value: users.toLocaleString(), sub: "all roles", delta: "+6%" },
-        { label: "Operators", value: String(operators), sub: "onboarded", delta: `+${pendingOps.length}` },
-        { label: "Trips", value: trips.toLocaleString(), sub: "all time", delta: "+11%" },
-        { label: "Revenue", value: formatRWF(revenue), sub: "processed", delta: "+19%" },
+        { label: "Total users", value: users.toLocaleString(), sub: "all roles", delta: usersThisMonth ? `+${usersThisMonth} this month` : "" },
+        { label: "Operators", value: String(operators), sub: pendingOps.length ? `${pendingOps.length} awaiting review` : "all verified", delta: "" },
+        { label: "Bookings", value: bookings.toLocaleString(), sub: "all time", delta: bookingsThisMonth ? `+${bookingsThisMonth} this month` : "" },
+        { label: "Collected from passengers", value: formatRWF(collected), sub: `${formatRWF(grossThisMonth)} this month`, delta: mom(grossThisMonth, grossPrevMonth) },
+        { label: "Relay commission", value: formatRWF(commission), sub: `${formatRWF(commThisMonth)} this month`, delta: mom(commThisMonth, commPrevMonth) },
       ],
       approvals: pendingOps.map(mapApproval),
-      revenueBars: months.map((m, i) => ({ m, value: base[i] })),
+      revenueBars,
+      revenueTrend: mom(grossThisMonth, grossPrevMonth),
       complaints: complaints.map((c) => ({ id: c.id, who: c.who, message: c.message, priority: c.priority })),
       // Paypack merchant float — the real money the platform holds
       paypack,
@@ -613,6 +638,236 @@ adminRouter.get(
         return [fullNameOf(d.user), d.user.phone, d.operator?.companyName ?? "Independent", d.vehicle?.plateNumber ?? "", d.vehicle?.type ?? "", d.suspended ? "SUSPENDED" : d.online ? "ONLINE" : "OFFLINE", e?.trips ?? 0, e?.completed ?? 0, e?.rides ?? 0, round2(e?.gross ?? 0), round2(e?.commission ?? 0), pr, d.ratingAvg];
       })
     ));
+  })
+);
+
+/* ---------------- Finance ----------------
+   The platform's money position (lifetime ledger) plus a period view with
+   growth against the previous window of the same length, conversion funnels
+   and quality signals — the numbers a decision needs, not activity counts.
+   Every figure is derived from the ledger (payments, rides, payouts, wallet)
+   using the commission locked on each payment / ride. */
+
+const FUNDED_OPEN_RIDE = ["CONFIRMED", "IN_PROGRESS", "AWAITING_CONFIRM", "DISPUTED"] as const;
+
+function pctOf(part: number, whole: number): number {
+  return whole > 0 ? Math.round((part / whole) * 1000) / 10 : 0;
+}
+// Growth vs the previous window, in percent; null when there is no baseline.
+function growthPct(cur: number, prev: number): number | null {
+  if (prev === 0) return cur === 0 ? 0 : null;
+  return Math.round(((cur - prev) / prev) * 1000) / 10;
+}
+
+async function financeLedger() {
+  const [payments, ridesDone, ridesOpen, ridesRefunded, payouts, wallet, credits] = await Promise.all([
+    prisma.payment.findMany({ where: { status: "PAID" }, select: { amount: true, commissionAmount: true } }),
+    prisma.rideRequest.findMany({ where: { status: "COMPLETED" }, select: { agreedFare: true, commissionAmount: true } }),
+    prisma.rideRequest.findMany({ where: { status: { in: [...FUNDED_OPEN_RIDE] }, paidAt: { not: null } }, select: { agreedFare: true } }),
+    prisma.rideRequest.findMany({ where: { refundedAt: { not: null } }, select: { agreedFare: true } }),
+    prisma.payout.findMany({ where: { operatorId: { not: null } }, select: { amount: true, status: true } }),
+    prisma.user.aggregate({ _sum: { walletBalance: true } }),
+    prisma.walletTransaction.findMany({ where: { kind: "CREDIT" }, select: { amount: true, status: true, momoRef: true, label: true } }),
+  ]);
+  const bookingGross = payments.reduce((s, p) => s + rdec(p.amount), 0);
+  const bookingCommission = payments.reduce((s, p) => s + rdec(p.commissionAmount), 0);
+  const motoGross = ridesDone.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const motoCommission = ridesDone.reduce((s, r) => s + rdec(r.commissionAmount), 0);
+  const collected = bookingGross + motoGross;
+  const commission = bookingCommission + motoCommission;
+  const owedToOperators = collected - commission;
+  const paidOut = payouts.filter((p) => p.status === "COMPLETED").reduce((s, p) => s + rdec(p.amount), 0);
+  const payoutsPending = payouts.filter((p) => p.status === "PENDING").reduce((s, p) => s + rdec(p.amount), 0);
+  const payoutsFailed = payouts.filter((p) => p.status === "FAILED").length;
+  const escrowHeld = ridesOpen.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const refunded = ridesRefunded.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const walletFloat = rdec(wallet._sum.walletBalance);
+  const done = credits.filter((c) => c.status === "COMPLETED");
+  const topUps = done.filter((c) => c.momoRef !== null);
+  const topUpTotal = topUps.reduce((s, c) => s + rdec(c.amount), 0);
+  const pendingTopUps = credits.filter((c) => c.status === "PENDING" && c.momoRef !== null).reduce((s, c) => s + rdec(c.amount), 0);
+  const operatorBalance = owedToOperators - paidOut - payoutsPending;
+  // What the platform must be able to pay out at any moment.
+  const liabilities = walletFloat + escrowHeld + Math.max(0, operatorBalance);
+  const paypack = await fetchMerchantBalances();
+  return {
+    collected: round2(collected),
+    bookingGross: round2(bookingGross),
+    motoGross: round2(motoGross),
+    commission: round2(commission),
+    bookingCommission: round2(bookingCommission),
+    motoCommission: round2(motoCommission),
+    takeRatePct: pctOf(commission, collected),
+    owedToOperators: round2(owedToOperators),
+    paidOut: round2(paidOut),
+    payoutsPending: round2(payoutsPending),
+    payoutsFailed,
+    operatorBalance: round2(operatorBalance),
+    escrowHeld: round2(escrowHeld),
+    refunded: round2(refunded),
+    walletFloat: round2(walletFloat),
+    topUps: round2(topUpTotal),
+    topUpCount: topUps.length,
+    pendingTopUps: round2(pendingTopUps),
+    liabilities: round2(liabilities),
+    paypackBalance: paypack ? round2(paypack.balance) : null,
+    coveragePct: paypack ? pctOf(paypack.balance, liabilities) : null,
+  };
+}
+
+async function financePeriod(start: Date, end: Date) {
+  const win = { gte: start, lt: end };
+  const [payments, ridesDone, bookingsBy, hailsBy, usersBy, ratings, disputes, complaints, tripsRun] = await Promise.all([
+    prisma.payment.findMany({
+      where: { status: "PAID", createdAt: win },
+      select: { amount: true, commissionAmount: true, createdAt: true, booking: { select: { passengerId: true, trip: { select: { operatorId: true, route: { select: { name: true } } } } } } },
+    }),
+    prisma.rideRequest.findMany({
+      where: { status: "COMPLETED", completedAt: win },
+      select: { agreedFare: true, commissionAmount: true, completedAt: true, passengerId: true, acceptedDriver: { select: { operatorId: true } } },
+    }),
+    prisma.booking.groupBy({ by: ["status"], _count: { _all: true }, where: { createdAt: win } }),
+    prisma.rideRequest.groupBy({ by: ["status"], _count: { _all: true }, where: { createdAt: win } }),
+    prisma.user.groupBy({ by: ["role"], _count: { _all: true }, where: { createdAt: win } }),
+    prisma.rating.aggregate({ _avg: { score: true }, _count: { _all: true }, where: { createdAt: win } }),
+    prisma.rideRequest.count({ where: { disputedAt: win } }),
+    prisma.complaint.count({ where: { createdAt: win } }),
+    prisma.trip.findMany({ where: { departAt: win, status: { in: ["RUNNING", "COMPLETED"] } }, select: { capacity: true, seatsLeft: true } }),
+  ]);
+  const countOf = <R extends { _count: { _all: number } }>(rows: R[], pick: (r: R) => string, value: string) =>
+    rows.filter((r) => pick(r) === value).reduce((s, r) => s + r._count._all, 0);
+  const sumCounts = (rows: { _count: { _all: number } }[]) => rows.reduce((s, r) => s + r._count._all, 0);
+
+  const bookingGross = payments.reduce((s, p) => s + rdec(p.amount), 0);
+  const bookingCommission = payments.reduce((s, p) => s + rdec(p.commissionAmount), 0);
+  const motoGross = ridesDone.reduce((s, r) => s + rdec(r.agreedFare), 0);
+  const motoCommission = ridesDone.reduce((s, r) => s + rdec(r.commissionAmount), 0);
+  const gross = bookingGross + motoGross;
+  const commission = bookingCommission + motoCommission;
+
+  const bookingsCreated = sumCounts(bookingsBy);
+  const bookingsCancelled = countOf(bookingsBy, (r) => r.status, "CANCELLED");
+  const bookingsCompleted = countOf(bookingsBy, (r) => r.status, "COMPLETED");
+  const hailsRequested = sumCounts(hailsBy);
+  const hailsCompleted = countOf(hailsBy, (r) => r.status, "COMPLETED");
+  const hailsCancelled = countOf(hailsBy, (r) => r.status, "CANCELLED");
+
+  const passengerCounts = new Map<string, number>();
+  for (const p of payments) passengerCounts.set(p.booking.passengerId, (passengerCounts.get(p.booking.passengerId) ?? 0) + 1);
+  for (const r of ridesDone) passengerCounts.set(r.passengerId, (passengerCounts.get(r.passengerId) ?? 0) + 1);
+  const activePassengers = passengerCounts.size;
+  const repeatPassengers = [...passengerCounts.values()].filter((n) => n >= 2).length;
+
+  const opRevenue = new Map<string, number>();
+  for (const p of payments) opRevenue.set(p.booking.trip.operatorId, (opRevenue.get(p.booking.trip.operatorId) ?? 0) + rdec(p.amount));
+  for (const r of ridesDone) {
+    const id = r.acceptedDriver?.operatorId;
+    if (id) opRevenue.set(id, (opRevenue.get(id) ?? 0) + rdec(r.agreedFare));
+  }
+  const topOperator = Math.max(0, ...opRevenue.values());
+
+  const routeAgg = new Map<string, { route: string; bookings: number; revenue: number }>();
+  for (const p of payments) {
+    const name = p.booking.trip.route.name;
+    const e = routeAgg.get(name) ?? { route: name, bookings: 0, revenue: 0 };
+    e.bookings += 1; e.revenue += rdec(p.amount);
+    routeAgg.set(name, e);
+  }
+  const topRoutes = [...routeAgg.values()].map((r) => ({ ...r, revenue: round2(r.revenue), sharePct: pctOf(r.revenue, bookingGross) })).sort((a, b) => b.revenue - a.revenue).slice(0, 6);
+
+  const capacity = tripsRun.reduce((s, t) => s + t.capacity, 0);
+  const seatsSold = tripsRun.reduce((s, t) => s + (t.capacity - t.seatsLeft), 0);
+  const settled = payments.length + ridesDone.length;
+
+  return {
+    stats: {
+      gross: round2(gross),
+      bookingGross: round2(bookingGross),
+      motoGross: round2(motoGross),
+      commission: round2(commission),
+      bookingCommission: round2(bookingCommission),
+      motoCommission: round2(motoCommission),
+      takeRatePct: pctOf(commission, gross),
+      avgTicket: settled ? round2(gross / settled) : 0,
+      paidBookings: payments.length,
+      bookingsCreated,
+      bookingsCancelled,
+      bookingsCompleted,
+      paidConversionPct: pctOf(payments.length, bookingsCreated),
+      cancelRatePct: pctOf(bookingsCancelled, bookingsCreated),
+      hailsRequested,
+      hailsCompleted,
+      hailsCancelled,
+      hailFulfilmentPct: pctOf(hailsCompleted, hailsRequested),
+      rides: ridesDone.length,
+      newPassengers: countOf(usersBy, (r) => r.role, "PASSENGER"),
+      newDrivers: countOf(usersBy, (r) => r.role, "DRIVER"),
+      newOperators: countOf(usersBy, (r) => r.role, "OPERATOR"),
+      activePassengers,
+      repeatPassengers,
+      repeatRatePct: pctOf(repeatPassengers, activePassengers),
+      avgRating: ratings._avg.score !== null ? round2(ratings._avg.score) : null,
+      ratingsCount: ratings._count._all,
+      disputes,
+      disputeRatePct: pctOf(disputes, ridesDone.length),
+      complaints,
+      tripsRun: tripsRun.length,
+      occupancyPct: pctOf(seatsSold, capacity),
+      activeOperators: opRevenue.size,
+      topOperatorSharePct: pctOf(topOperator, gross),
+    },
+    topRoutes,
+    // for the trend bars
+    grossItems: [
+      ...payments.map((p) => ({ at: p.createdAt, value: rdec(p.amount) })),
+      ...ridesDone.map((r) => ({ at: r.completedAt ?? new Date(0), value: rdec(r.agreedFare) })),
+    ],
+    commissionItems: [
+      ...payments.map((p) => ({ at: p.createdAt, value: rdec(p.commissionAmount) })),
+      ...ridesDone.map((r) => ({ at: r.completedAt ?? new Date(0), value: rdec(r.commissionAmount) })),
+    ],
+  };
+}
+
+// GET /admin/finance?period=… | ?from=&to=
+adminRouter.get(
+  "/finance",
+  asyncHandler(async (req, res) => {
+    const range = parseReportRange(req);
+    const len = range.end.getTime() - range.start.getTime();
+    const prevRange = range.period === "all" ? null : { start: new Date(range.start.getTime() - len), end: range.start };
+    const [ledger, current, previous] = await Promise.all([
+      financeLedger(),
+      financePeriod(range.start, range.end),
+      prevRange ? financePeriod(prevRange.start, prevRange.end) : Promise.resolve(null),
+    ]);
+    const buckets = reportBuckets(range);
+    const gross = bucketSums(buckets, current.grossItems);
+    const comm = bucketSums(buckets, current.commissionItems);
+    const c = current.stats;
+    const p = previous?.stats ?? null;
+    const g = (key: keyof typeof c) => (p ? growthPct(Number(c[key] ?? 0), Number(p[key] ?? 0)) : null);
+    res.json({
+      period: range.period,
+      label: range.label,
+      from: range.start.toISOString(),
+      to: range.end.toISOString(),
+      ledger,
+      current: c,
+      previous: p,
+      growth: {
+        gross: g("gross"),
+        commission: g("commission"),
+        paidBookings: g("paidBookings"),
+        rides: g("rides"),
+        activePassengers: g("activePassengers"),
+        newPassengers: g("newPassengers"),
+        bookingsCreated: g("bookingsCreated"),
+        hailsRequested: g("hailsRequested"),
+      },
+      bars: gross.map((b, i) => ({ m: b.m, gross: round2(b.value), commission: round2(comm[i]?.value ?? 0) })),
+      topRoutes: current.topRoutes,
+    });
   })
 );
 
